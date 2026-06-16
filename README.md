@@ -16,15 +16,17 @@ cd src-tauri && cargo build --release   # 또는: bun run tauri build --no-bundl
 cp target/release/knock ~/.local/bin/knock
 ```
 
-### GUI 앱 (.app / .dmg)
+### 바이너리 다운로드 (Apple Silicon)
 
-[Releases](https://github.com/hihenen/knock/releases) 에서 dmg 다운로드 후 `Knock.app` 을 Applications 로.
+```bash
+curl -L https://github.com/hihenen/knock/releases/latest/download/knock-macos-aarch64 -o knock
+chmod +x knock
+xattr -c knock          # Gatekeeper quarantine 제거 (다운로드 빌드라 필요)
+mv knock ~/.local/bin/
+knock --version
+```
 
-> ⚠️ **"손상되었기 때문에 열 수 없습니다"** — unsigned 빌드(notarization 없음)라 macOS Gatekeeper 가 막는 것. 손상 아님. quarantine 제거 후 열기:
-> ```bash
-> xattr -cr ~/Downloads/Knock_*.dmg          # 받은 dmg, 또는
-> xattr -cr /Applications/Knock.app          # 복사한 앱
-> ```
+> ⚠️ knock 은 **CLI 도구**입니다. `.app` 더블클릭이 아니라 `knock annotate <md>` / `knock ask <json>` 처럼 인자와 함께 실행합니다. (인자 없이 실행하면 즉시 종료)
 
 ## 모드
 
