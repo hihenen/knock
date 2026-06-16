@@ -152,7 +152,7 @@ function setupAsk(p: AskPayload) {
     if (q.question) sec.appendChild(el("h2", "ask-q-title", q.question));
     if (multi)
       sec.appendChild(
-        el("p", "ask-hint", "복수 선택 — 숫자/Space 토글, Enter 로 다음"),
+        el("p", "ask-hint", "복수 선택 — 숫자/Space 로 토글, → 또는 Enter 로 다음"),
       );
 
     const optsWrap = el("div", "ask-options");
@@ -367,25 +367,13 @@ function setupAsk(p: AskPayload) {
       e.preventDefault();
       goPrev();
     } else if (e.key === "Enter") {
+      // progress with Enter or → ; Space only selects/toggles
       e.preventDefault();
-      if (qs[step].multiSelect) {
-        // multi-select: Enter confirms and advances (toggle with Space/number)
-        goNext();
-      } else {
-        opts[focusIdx]?.querySelector("input")?.click();
-        if (answeredFor(step)) goNext();
-      }
+      goNext();
     } else if (e.key === " ") {
+      // Space selects (single) or toggles (multi); advance with → / Enter
       e.preventDefault();
-      if (qs[step].multiSelect) {
-        // multi-select: Space toggles
-        opts[focusIdx]?.querySelector("input")?.click();
-      } else {
-        // single-select: 1st Space selects, 2nd Space (already selected) advances
-        const input = opts[focusIdx]?.querySelector<HTMLInputElement>("input");
-        if (input?.checked) goNext();
-        else input?.click();
-      }
+      opts[focusIdx]?.querySelector("input")?.click();
     } else if (/^[1-9]$/.test(e.key)) {
       e.preventDefault();
       const n = parseInt(e.key, 10);
