@@ -7,9 +7,26 @@ plannotator 의 대체 — 브라우저 탭 대신 **Tauri 네이티브 창** + 
 - `stdout` 계약이 plannotator 와 호환 → 기존 스킬/룰에 drop-in
 - 채팅 blocking 질문(AskUserQuestion) 을 데스크톱 창으로 대체
 
-## 설치
+## Quick Start
 
-### Homebrew (권장 · Apple Silicon)
+```bash
+# ① CLI 설치 (Homebrew 불필요)
+curl -fsSL https://raw.githubusercontent.com/hihenen/knock/master/install.sh | bash
+```
+
+```
+# ② Claude Code 스킬 플러그인 (에이전트가 knock-annotate / knock-ask 호출)
+/plugin marketplace add hihenen/knock
+/plugin install knock@knock
+```
+
+> **업데이트**: `①` 줄 재실행. (Homebrew 선호 시 `brew install hihenen/tap/knock` → 이후 `brew upgrade knock`)
+
+---
+
+## 설치 (자세히)
+
+### Homebrew (Apple Silicon)
 
 ```bash
 brew install hihenen/tap/knock

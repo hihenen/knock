@@ -1,0 +1,77 @@
+name: release
+
+# Push a tag (e.g. `git tag v0.1.2 && git push --tags`) to:
+#   1. build the arm64 macOS binary
+#   2. create a GitHub Release with the binary attached
+#   3. bump the Homebrew formula in hihenen/homebrew-tap (version/url/sha256)
+#
+# Requires repo secret TAP_TOKEN: a PAT (or fine-grained token) with
+# contents:write on hihenen/homebrew-tap. Without it, the formula-bump step
+# is skipped (release still happens).
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-14 # Apple Silicon (arm64)
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install deps
+        run: bun install
+
+      - name: Build (CLI binary)
+        run: bun run tauri build --no-bundle
+
+      - name: Package + checksum
+        run: |
+          cp src-tauri/target/release/knock knock-macos-aarch64
+          SHA=$(shasum -a 256 knock-macos-aarch64 | cut -d' ' -f1)
+          echo "SHA=$SHA" >> "$GITHUB_ENV"
+          echo "Built knock-macos-aarch64 (sha256=$SHA)"
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          gh release create "$TAG" \
+            --repo "${{ github.repository }}" \
+            --title "Knock $TAG" \
+            --generate-notes \
+            knock-macos-aarch64
+
+      - name: Bump Homebrew formula
+        continue-on-error: true
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+        run: |
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "TAP_TOKEN 미설정 — homebrew-tap formula 갱신 스킵 (release 는 완료됨)"
+            exit 0
+          fi
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#v}"
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/hihenen/homebrew-tap.git" tap
+          cd tap
+          sed -i '' -E \
+            -e "s|/download/v[0-9][0-9.]*/|/download/${TAG}/|" \
+            -e "s|version \"[0-9][0-9.]*\"|version \"${VERSION}\"|" \
+            -e "s|sha256 \"[a-f0-9]*\"|sha256 \"${SHA}\"|" \
+            Formula/knock.rb
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/knock.rb
+          git commit -m "knock ${VERSION}" || { echo "변경 없음"; exit 0; }
+          git push
+          echo "homebrew-tap formula → ${VERSION} (sha256=${SHA})"
