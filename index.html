@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Knock</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+
+  <body>
+    <header class="topbar">
+      <span class="badge" id="badge">승인 요청</span>
+      <h1 id="title">Knock</h1>
+    </header>
+
+    <!-- annotate mode -->
+    <main id="content" class="markdown hidden"></main>
+
+    <!-- ask mode -->
+    <div id="ask-root" class="ask hidden"></div>
+
+    <footer class="actions">
+      <!-- annotate actions -->
+      <div id="annotate-footer" class="hidden">
+        <div id="annotate-box" class="annotate hidden">
+          <textarea
+            id="feedback"
+            rows="4"
+            placeholder="변경 요청 / 주석을 적어주세요. (Cmd+Enter 로 전송)"
+          ></textarea>
+          <div class="btn-row">
+            <button id="send" class="btn primary" disabled>피드백 보내기</button>
+            <button id="cancel-annotate" class="btn ghost">취소</button>
+          </div>
+        </div>
+
+        <div id="main-actions" class="btn-row">
+          <button id="approve" class="btn approve" title="Cmd+Enter">✓ 승인</button>
+          <button id="request" class="btn warn">✎ 변경요청</button>
+          <button id="dismiss" class="btn ghost" title="Esc">✗ 닫기</button>
+        </div>
+      </div>
+
+      <!-- ask actions (wizard) -->
+      <div id="ask-footer" class="btn-row hidden">
+        <button id="ask-dismiss" class="btn ghost" title="Esc">✗ 닫기</button>
+        <button id="ask-prev" class="btn ghost hidden" title="← 방향키">← 이전</button>
+        <button id="ask-next" class="btn primary" disabled title="→ 방향키">다음 →</button>
+        <button id="ask-submit" class="btn primary hidden" title="Cmd+Enter">제출 ✓</button>
+      </div>
+    </footer>
+  </body>
+</html>
