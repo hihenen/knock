@@ -9,10 +9,22 @@ plannotator 의 대체 — 브라우저 탭 대신 **Tauri 네이티브 창** + 
 
 ## 설치
 
+### CLI (워크플로우/에이전트용)
+
 ```bash
 cd src-tauri && cargo build --release   # 또는: bun run tauri build --no-bundle
 cp target/release/knock ~/.local/bin/knock
 ```
+
+### GUI 앱 (.app / .dmg)
+
+[Releases](https://github.com/hihenen/knock/releases) 에서 dmg 다운로드 후 `Knock.app` 을 Applications 로.
+
+> ⚠️ **"손상되었기 때문에 열 수 없습니다"** — unsigned 빌드(notarization 없음)라 macOS Gatekeeper 가 막는 것. 손상 아님. quarantine 제거 후 열기:
+> ```bash
+> xattr -cr ~/Downloads/Knock_*.dmg          # 받은 dmg, 또는
+> xattr -cr /Applications/Knock.app          # 복사한 앱
+> ```
 
 ## 모드
 

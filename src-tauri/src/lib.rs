@@ -17,6 +17,8 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use serde_json::Value;
+use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem};
+use tauri::tray::TrayIconBuilder;
 use tauri::{Manager, UserAttentionType, WindowEvent};
 use tauri_plugin_global_shortcut::{
     Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState,
@@ -268,6 +270,35 @@ pub fn run() {
                 .title(heading)
                 .body(&title)
                 .show();
+
+            // Menubar tray: shows knock is running, with an Info / Quit menu.
+            let info = MenuItemBuilder::with_id("info", format!("Knock v{}", env!("CARGO_PKG_VERSION")))
+                .enabled(false)
+                .build(app)?;
+            let sep = PredefinedMenuItem::separator(app)?;
+            let quit = MenuItemBuilder::with_id("quit", "닫기 (Quit)").build(app)?;
+            let menu = MenuBuilder::new(app).items(&[&info, &sep, &quit]).build()?;
+            if let Some(icon) = app.default_window_icon().cloned() {
+                let _ = TrayIconBuilder::with_id("knock")
+                    .icon(icon)
+                    .tooltip("Knock — 응답 대기 중")
+                    .menu(&menu)
+                    .show_menu_on_left_click(true)
+                    .on_menu_event(|app, event| {
+                        if event.id().as_ref() == "quit" {
+                            let state = app.state::<AppState>();
+                            match &state.mode {
+                                Mode::Annotate { .. } => {
+                                    output_annotate("dismissed", None, state.json)
+                                }
+                                Mode::Ask { .. } => print_and_exit(
+                                    serde_json::json!({ "decision": "dismissed" }).to_string(),
+                                ),
+                            }
+                        }
+                    })
+                    .build(app)?;
+            }
 
             Ok(())
         })
