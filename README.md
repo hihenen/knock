@@ -176,6 +176,15 @@ knock ask questions.json
 
 annotate 모드: `Cmd+Enter`=승인(gate), `Esc`=닫기.
 
+## 설정 (knock settings)
+
+```bash
+knock settings
+```
+
+설정 창에서 토글:
+- **🔒 critical 게이트에 Touch ID 요구** → `~/.config/knock/config.json` 의 `{"touch_id": true}` 로 저장. 에이전트가 이 값을 읽어 prd/IAM/destructive 같은 중요 승인에 Touch ID 를 적용 (환경변수 불필요, 한 번만 켜면 영구).
+
 ## 알람
 
 - OS 네이티브 알림 (창 띄울 때)

@@ -22,7 +22,11 @@ interface AskPayload {
   title: string;
   questions: { questions?: AskQuestion[] };
 }
-type Payload = AnnotatePayload | AskPayload;
+interface SettingsPayload {
+  mode: "settings";
+  touchId: boolean;
+}
+type Payload = AnnotatePayload | AskPayload | SettingsPayload;
 
 const $ = <T extends HTMLElement>(id: string) =>
   document.getElementById(id) as T;
@@ -465,6 +469,28 @@ function setupAsk(p: AskPayload) {
 }
 
 // =====================================================================
+function setupSettings(p: SettingsPayload) {
+  $("badge").textContent = "설정";
+  $("title").textContent = "Knock 설정";
+  $("settings-root").classList.remove("hidden");
+  $("settings-footer").classList.remove("hidden");
+
+  const toggle = $<HTMLInputElement>("touch-id-toggle");
+  toggle.checked = p.touchId;
+  toggle.addEventListener("change", () => {
+    invoke("save_touch_id", { enabled: toggle.checked });
+  });
+
+  const close = () => once(() => invoke("dismiss"));
+  $("settings-close").addEventListener("click", close);
+  window.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" || ((e.metaKey || e.ctrlKey) && e.key === "Enter")) {
+      e.preventDefault();
+      close();
+    }
+  });
+}
+
 async function init() {
   let payload: Payload;
   try {
@@ -473,6 +499,7 @@ async function init() {
     return;
   }
   if (payload.mode === "ask") setupAsk(payload);
+  else if (payload.mode === "settings") setupSettings(payload);
   else setupAnnotate(payload);
 }
 

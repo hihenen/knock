@@ -233,6 +233,41 @@ body {
   display: none !important;
 }
 
+/* ---- Settings mode ---- */
+.settings {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 24px;
+}
+.toggle-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  cursor: pointer;
+}
+.toggle-row:hover {
+  border-color: var(--accent);
+}
+.toggle-row input {
+  width: 20px;
+  height: 20px;
+  margin-top: 2px;
+  accent-color: var(--accent);
+  flex: 0 0 auto;
+}
+.toggle-label {
+  font-weight: 600;
+}
+.toggle-desc {
+  font-size: 0.85em;
+  color: var(--muted);
+  line-height: 1.5;
+  margin-top: 4px;
+}
+
 /* ---- Ask mode ---- */
 .ask {
   flex: 1 1 auto;

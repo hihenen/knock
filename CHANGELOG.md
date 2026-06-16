@@ -2,6 +2,13 @@
 
 All notable changes to knock are documented here. Versions follow [SemVer](https://semver.org).
 
+## [0.1.7] - 2026-06-17
+
+### Added
+- **`knock settings`** — GUI 설정 창. "critical 게이트에 Touch ID 요구" 토글을
+  `~/.config/knock/config.json` (`{"touch_id": true}`) 에 저장. 환경변수 없이
+  토글 한 번으로 영구 설정. 에이전트가 이 config 를 읽어 critical 게이트에 적용.
+
 ## [0.1.6] - 2026-06-17
 
 ### Added

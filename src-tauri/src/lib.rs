@@ -51,6 +51,27 @@ enum Command {
         #[arg(long)]
         title: Option<String>,
     },
+    /// Open the settings window (toggle Touch ID requirement, etc.).
+    Settings,
+}
+
+fn config_path() -> PathBuf {
+    let base = std::env::var("HOME").unwrap_or_default();
+    PathBuf::from(base).join(".config/knock/config.json")
+}
+
+fn read_config() -> Value {
+    std::fs::read_to_string(config_path())
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({}))
+}
+
+fn config_touch_id() -> bool {
+    read_config()
+        .get("touch_id")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
 }
 
 enum Mode {
@@ -63,6 +84,7 @@ enum Mode {
         questions: Value,
         title: String,
     },
+    Settings,
 }
 
 struct AppState {
@@ -190,6 +212,7 @@ fn finish(decision: &str, feedback: Option<&str>, state: &AppState) -> ! {
         Mode::Ask { .. } => {
             print_and_exit(serde_json::json!({ "decision": "dismissed" }).to_string())
         }
+        Mode::Settings => print_nothing_and_exit(),
     }
 }
 
@@ -208,7 +231,27 @@ fn get_payload(state: tauri::State<AppState>) -> Value {
             "questions": questions,
             "title": title,
         }),
+        Mode::Settings => serde_json::json!({
+            "mode": "settings",
+            "touchId": config_touch_id(),
+        }),
     }
+}
+
+/// Persist the Touch ID requirement toggle to the config file.
+#[tauri::command]
+fn save_touch_id(enabled: bool) -> Result<(), String> {
+    let mut cfg = read_config();
+    cfg["touch_id"] = serde_json::json!(enabled);
+    let path = config_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&cfg).unwrap_or_else(|_| "{}".to_string()),
+    )
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -293,6 +336,7 @@ fn launch(state: AppState) {
             submit_answers,
             save_pasted_image,
             touch_id_approve,
+            save_touch_id,
             dismiss
         ])
         .on_window_event(|window, event| {
@@ -324,6 +368,7 @@ fn launch(state: AppState) {
             let (heading, title) = match &app.state::<AppState>().mode {
                 Mode::Annotate { title, .. } => ("Knock — 승인 요청", title.clone()),
                 Mode::Ask { title, .. } => ("Knock — 확인 필요", title.clone()),
+                Mode::Settings => ("Knock — 설정", "설정".to_string()),
             };
             let _ = app
                 .notification()
@@ -453,6 +498,7 @@ pub fn run() {
                 .unwrap_or_else(|| "확인 필요".to_string());
             (Mode::Ask { questions, title }, true, false)
         }
+        Command::Settings => (Mode::Settings, false, false),
     };
 
     launch(AppState {

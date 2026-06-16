@@ -20,6 +20,20 @@
     <!-- ask mode -->
     <div id="ask-root" class="ask hidden"></div>
 
+    <!-- settings mode -->
+    <div id="settings-root" class="settings hidden">
+      <label class="toggle-row">
+        <input type="checkbox" id="touch-id-toggle" />
+        <div class="toggle-text">
+          <div class="toggle-label">🔒 critical 게이트에 Touch ID 요구</div>
+          <div class="toggle-desc">
+            prd 변경 · IAM 확장 · destructive 같은 중요 승인에 지문 / Windows
+            Hello 인증을 요구합니다. (에이전트가 이 설정을 읽어 적용)
+          </div>
+        </div>
+      </label>
+    </div>
+
     <footer class="actions">
       <!-- annotate actions (vertical option cards, like ask) -->
       <div id="annotate-footer" class="hidden">
@@ -55,6 +69,11 @@
         <button id="ask-prev" class="btn ghost hidden" title="← 방향키">← 이전</button>
         <button id="ask-next" class="btn primary" disabled title="→ 방향키">다음 →</button>
         <button id="ask-submit" class="btn primary hidden" title="Cmd+Enter">제출 ✓</button>
+      </div>
+
+      <!-- settings actions -->
+      <div id="settings-footer" class="btn-row hidden">
+        <button id="settings-close" class="btn primary" title="Esc">완료</button>
       </div>
     </footer>
   </body>
