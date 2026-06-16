@@ -5,6 +5,7 @@ interface AnnotatePayload {
   html: string;
   title: string;
   gate: boolean;
+  touchId?: boolean;
 }
 interface AskOption {
   label: string;
@@ -63,12 +64,25 @@ function setupAnnotate(p: AnnotatePayload) {
 
   if (!p.gate) optApprove.classList.add("hidden");
 
+  if (p.touchId) {
+    const label = optApprove.querySelector(".ask-opt-label");
+    if (label) label.textContent = "🔒 Touch ID 승인";
+  }
+  // Approve, optionally gated behind Touch ID / Windows Hello.
+  const approve = async () => {
+    if (p.touchId) {
+      const ok = await invoke<boolean>("touch_id_approve");
+      if (!ok) return; // auth cancelled/failed → keep window open
+    }
+    sendDecision("approved");
+  };
+
   const submitFeedback = () => {
     const txt = feedback.value.trim();
     if (txt) sendDecision("annotated", txt);
   };
 
-  optApprove.addEventListener("click", () => sendDecision("approved"));
+  optApprove.addEventListener("click", approve);
   optCancel.addEventListener("click", () => sendDecision("dismissed"));
   sendBtn.addEventListener("click", submitFeedback);
   feedback.addEventListener("input", () => {
@@ -114,7 +128,7 @@ function setupAnnotate(p: AnnotatePayload) {
   });
 
   const run = (o: HTMLElement) => {
-    if (o === optApprove) sendDecision("approved");
+    if (o === optApprove) approve();
     else sendDecision("dismissed");
   };
 
@@ -123,7 +137,7 @@ function setupAnnotate(p: AnnotatePayload) {
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
       e.preventDefault();
       if (feedback.value.trim()) submitFeedback();
-      else if (p.gate) sendDecision("approved");
+      else if (p.gate) approve();
       return;
     }
     if (e.key === "Escape") {
@@ -135,7 +149,7 @@ function setupAnnotate(p: AnnotatePayload) {
     if (inText) return;
     if (e.key === "1" && p.gate) {
       e.preventDefault();
-      sendDecision("approved");
+      approve();
     } else if (e.key === "2") {
       e.preventDefault();
       feedback.focus();

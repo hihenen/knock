@@ -119,6 +119,7 @@ knock annotate plan.md --gate --json
 | `--gate` | 명시적 `승인` 버튼 노출 |
 | `--json` | 결과를 JSON 으로 출력 (없으면 평문) |
 | `--title T` | 헤더 제목 (기본: 파일명) |
+| `--touch-id` | macOS Touch ID / Windows Hello 로 승인 (생체 없으면 시스템 암호 / 버튼 fallback) |
 
 **stdout 계약**:
 

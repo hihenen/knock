@@ -41,6 +41,9 @@ enum Command {
         json: bool,
         #[arg(long)]
         title: Option<String>,
+        /// Require Touch ID / Windows Hello to approve (falls back to a button if unavailable).
+        #[arg(long)]
+        touch_id: bool,
     },
     /// Ask a multiple-choice question (AskUserQuestion schema). Always emits JSON.
     Ask {
@@ -67,6 +70,8 @@ struct AppState {
     json: bool,
     /// hook mode: emit Claude Code PermissionRequest decision JSON instead of plain/contract output.
     hook: bool,
+    /// require biometric (Touch ID / Windows Hello) for the approve action.
+    touch_id: bool,
 }
 
 fn render_md(md: &str) -> String {
@@ -196,6 +201,7 @@ fn get_payload(state: tauri::State<AppState>) -> Value {
             "html": html,
             "title": title,
             "gate": gate,
+            "touchId": state.touch_id,
         }),
         Mode::Ask { questions, title } => serde_json::json!({
             "mode": "ask",
@@ -238,6 +244,39 @@ fn save_pasted_image(data_url: String) -> Result<String, String> {
     Ok(path.to_string_lossy().to_string())
 }
 
+/// Biometric approval (macOS Touch ID / Windows Hello) via robius-authentication.
+/// Returns true if the user authenticated, false otherwise (incl. no hardware).
+#[tauri::command]
+fn touch_id_approve() -> bool {
+    use robius_authentication::{
+        AndroidText, BiometricStrength, Context, PolicyBuilder, Text, WindowsText,
+    };
+    let policy = match PolicyBuilder::new()
+        .biometrics(Some(BiometricStrength::Strong))
+        .password(true)
+        .build()
+    {
+        Some(p) => p,
+        None => return false,
+    };
+    let windows = match WindowsText::new("Knock", "Approve the request") {
+        Some(w) => w,
+        None => return false,
+    };
+    let text = Text {
+        android: AndroidText {
+            title: "Knock",
+            subtitle: None,
+            description: None,
+        },
+        apple: "approve the knock request",
+        windows,
+    };
+    Context::new(())
+        .blocking_authenticate(text, &policy)
+        .is_ok()
+}
+
 #[tauri::command]
 fn dismiss(state: tauri::State<AppState>) {
     finish("dismissed", None, &state);
@@ -253,6 +292,7 @@ fn launch(state: AppState) {
             submit,
             submit_answers,
             save_pasted_image,
+            touch_id_approve,
             dismiss
         ])
         .on_window_event(|window, event| {
@@ -351,6 +391,7 @@ fn run_hook() {
         },
         json: false,
         hook: true,
+        touch_id: false,
     });
 }
 
@@ -364,12 +405,13 @@ pub fn run() {
 
     let cli = Cli::parse();
 
-    let (mode, json) = match cli.command {
+    let (mode, json, touch_id) = match cli.command {
         Command::Annotate {
             file,
             gate,
             json,
             title,
+            touch_id,
         } => {
             let md = std::fs::read_to_string(&file).unwrap_or_else(|e| {
                 eprintln!("knock: cannot read {}: {}", file.display(), e);
@@ -387,6 +429,7 @@ pub fn run() {
                     gate,
                 },
                 json,
+                touch_id,
             )
         }
         Command::Ask { file, title } => {
@@ -408,7 +451,7 @@ pub fn run() {
                         .map(|s| s.to_string())
                 })
                 .unwrap_or_else(|| "확인 필요".to_string());
-            (Mode::Ask { questions, title }, true)
+            (Mode::Ask { questions, title }, true, false)
         }
     };
 
@@ -416,6 +459,7 @@ pub fn run() {
         mode,
         json,
         hook: false,
+        touch_id,
     });
 }
 

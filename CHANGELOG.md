@@ -2,6 +2,13 @@
 
 All notable changes to knock are documented here. Versions follow [SemVer](https://semver.org).
 
+## [0.1.6] - 2026-06-17
+
+### Added
+- **`--touch-id` 옵션** — macOS Touch ID / Windows Hello 로 승인 (robius-authentication).
+  승인 액션이 생체인증을 거치고, 통과해야 `approved`. 생체 하드웨어가 없으면 시스템 암호,
+  비-데스크톱은 일반 버튼으로 fallback. 변경요청/취소는 인증 없이 그대로.
+
 ## [0.1.5] - 2026-06-16
 
 ### Changed
