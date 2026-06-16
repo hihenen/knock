@@ -9,7 +9,15 @@ plannotator 의 대체 — 브라우저 탭 대신 **Tauri 네이티브 창** + 
 
 ## 설치
 
-### CLI (워크플로우/에이전트용)
+### Homebrew (권장 · Apple Silicon)
+
+```bash
+brew install hihenen/tap/knock
+```
+
+Gatekeeper quarantine 을 brew 가 자동 처리 — "손상됨 / 확인 불가" 경고 없음.
+
+### 소스 빌드 (CLI)
 
 ```bash
 cd src-tauri && cargo build --release   # 또는: bun run tauri build --no-bundle
