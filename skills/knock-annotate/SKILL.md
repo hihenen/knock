@@ -1,6 +1,6 @@
 ---
 name: knock-annotate
-description: Open knock's desktop approval/annotation window for a markdown file and respond to the returned decision. Drop-in alternative to plannotator-annotate with OS notification + Dock attention.
+description: Open knock's desktop approval/annotation window for a markdown file and respond to the returned decision. Native window with OS notification + Dock attention.
 allowed-tools: Bash(knock:*)
 disable-model-invocation: true
 ---

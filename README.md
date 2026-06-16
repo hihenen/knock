@@ -1,10 +1,10 @@
 # knock
 
-데스크톱 승인 / 주석 / 질문 게이트 for AI agents.
-plannotator 의 대체 — 브라우저 탭 대신 **Tauri 네이티브 창** + OS 알림 + Dock 두드림 + 키보드 네비.
+AI 코딩 에이전트를 위한 데스크톱 승인 / 주석 / 질문 게이트.
+브라우저 탭이 아닌 **Tauri 네이티브 창** + OS 알림 + Dock 두드림 + 키보드 네비.
 
 - 단일 바이너리 (~9.5MB), Bun/Tauri 빌드
-- `stdout` 계약이 plannotator 와 호환 → 기존 스킬/룰에 drop-in
+- 단순한 `stdout` 계약 → 기존 스킬·훅·CLI 에 그대로 연결
 - 채팅 blocking 질문(AskUserQuestion) 을 데스크톱 창으로 대체
 
 ## Quick Start (macOS · Apple Silicon)
@@ -88,7 +88,7 @@ CLI 설치 후, Claude Code 에서 스킬 플러그인을 추가하면 에이전
 
 | 스킬 | 용도 |
 |------|------|
-| `knock-annotate` | 승인 / 주석 게이트 (plannotator 대체) |
+| `knock-annotate` | 승인 / 주석 게이트 |
 | `knock-ask` | 객관식 질문 (AskUserQuestion 대체) |
 
 ### 자동 plan 승인 (hook)
@@ -108,7 +108,7 @@ plan 승인은 hook 으로 자동이지만, "에이전트가 질문할 때 `AskU
 
 ## 모드
 
-### 1. annotate — 승인 / 주석 게이트 (plannotator 대체)
+### 1. annotate — 승인 / 주석 게이트
 
 ```bash
 knock annotate plan.md --gate --json
@@ -120,7 +120,7 @@ knock annotate plan.md --gate --json
 | `--json` | 결과를 JSON 으로 출력 (없으면 평문) |
 | `--title T` | 헤더 제목 (기본: 파일명) |
 
-**stdout 계약** (plannotator 와 동일):
+**stdout 계약**:
 
 | 사용자 행동 | 평문 | `--json` |
 |------------|------|----------|
@@ -175,7 +175,7 @@ knock ask questions.json
 
 annotate 모드: `Cmd+Enter`=승인(gate), `Esc`=닫기.
 
-## 알람 (plannotator 대비 강화)
+## 알람
 
 - OS 네이티브 알림 (창 띄울 때)
 - macOS Dock 아이콘 튕김 (`request_user_attention`)

@@ -1,6 +1,6 @@
 {
   "name": "knock",
-  "description": "Desktop approval / annotation / question gate for AI coding agents — native window, OS notification, keyboard nav. Drop-in alternative to plannotator with an AskUserQuestion-style ask mode.",
+  "description": "Desktop approval / annotation / question gate for AI coding agents — native window, OS notification, keyboard nav, and an AskUserQuestion-style ask mode.",
   "version": "0.1.5",
   "author": {
     "name": "hihenen"
@@ -12,7 +12,6 @@
     "question",
     "AskUserQuestion",
     "gate",
-    "hooks",
-    "plannotator"
+    "hooks"
   ]
 }

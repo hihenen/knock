@@ -1,7 +1,7 @@
 // knock — desktop approval / annotation / question gate for AI agents.
 //
 // Modes:
-//   knock annotate <file.md> [--gate] [--json] [--title T]   plannotator-compatible
+//   knock annotate <file.md> [--gate] [--json] [--title T]   markdown approval / annotation
 //   knock ask <questions.json>                                AskUserQuestion-style
 //   knock            (no args)                                Claude Code hook mode:
 //                                                             reads a PermissionRequest
@@ -142,7 +142,7 @@ fn extract_plan(payload: &Value) -> &str {
         .unwrap_or("")
 }
 
-/// annotate-mode decision -> plannotator contract line, or None = print nothing.
+/// annotate-mode decision -> stdout contract line, or None = print nothing.
 fn annotate_contract(decision: &str, feedback: Option<&str>, json: bool) -> Option<String> {
     match decision {
         "approved" => Some(if json {
