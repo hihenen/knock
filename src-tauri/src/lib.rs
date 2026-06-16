@@ -1,18 +1,14 @@
 // knock — desktop approval / annotation / question gate for AI agents.
 //
-// Subcommands:
-//   knock annotate <file.md> [--gate] [--json] [--title T]
-//     plannotator-compatible stdout contract:
-//       approved  -> "The user approved."      (or {"decision":"approved"} with --json)
-//       dismissed -> ""                         (or {"decision":"dismissed"} with --json)
-//       annotated -> <feedback text>            (or {"decision":"annotated","feedback":...} with --json)
-//
-//   knock ask <questions.json>
-//     AskUserQuestion-shaped input; always emits JSON:
-//       answered  -> {"answers": { "<header>": "<label>" | ["<label>", ...] }}
-//       dismissed -> {"decision":"dismissed"}
+// Modes:
+//   knock annotate <file.md> [--gate] [--json] [--title T]   plannotator-compatible
+//   knock ask <questions.json>                                AskUserQuestion-style
+//   knock            (no args)                                Claude Code hook mode:
+//                                                             reads a PermissionRequest
+//                                                             payload on stdin, shows the
+//                                                             plan, returns allow/deny JSON.
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
@@ -36,23 +32,17 @@ struct Cli {
 enum Command {
     /// Display a markdown file for approval / annotation.
     Annotate {
-        /// Markdown file to display for review.
         file: PathBuf,
-        /// Show an explicit Approve button (gate mode).
         #[arg(long)]
         gate: bool,
-        /// Emit the decision as a JSON object instead of plain text.
         #[arg(long)]
         json: bool,
-        /// Override the header title (defaults to the file name).
         #[arg(long)]
         title: Option<String>,
     },
     /// Ask a multiple-choice question (AskUserQuestion schema). Always emits JSON.
     Ask {
-        /// JSON file with AskUserQuestion-style questions.
         file: PathBuf,
-        /// Override the header title.
         #[arg(long)]
         title: Option<String>,
     },
@@ -66,6 +56,8 @@ enum Mode {
 struct AppState {
     mode: Mode,
     json: bool,
+    /// hook mode: emit Claude Code PermissionRequest decision JSON instead of plain/contract output.
+    hook: bool,
 }
 
 fn render_md(md: &str) -> String {
@@ -92,6 +84,36 @@ fn print_and_exit(line: String) -> ! {
 fn print_nothing_and_exit() -> ! {
     let _ = std::io::stdout().flush();
     std::process::exit(0);
+}
+
+fn hook_allow() -> String {
+    serde_json::json!({
+        "decision": "allow",
+        "hookSpecificOutput": { "permissionDecision": "allow" }
+    })
+    .to_string()
+}
+
+/// hook-mode decision -> Claude Code PermissionRequest JSON.
+fn output_hook(decision: &str, feedback: Option<&str>) -> ! {
+    let json = match decision {
+        "approved" => serde_json::json!({
+            "decision": "allow",
+            "hookSpecificOutput": { "permissionDecision": "allow" }
+        }),
+        "annotated" => serde_json::json!({
+            "decision": "deny",
+            "reason": feedback.unwrap_or("User requested changes via knock"),
+            "hookSpecificOutput": { "permissionDecision": "deny" }
+        }),
+        // dismissed
+        _ => serde_json::json!({
+            "decision": "deny",
+            "reason": "User dismissed the plan review in knock",
+            "hookSpecificOutput": { "permissionDecision": "deny" }
+        }),
+    };
+    print_and_exit(json.to_string());
 }
 
 /// annotate-mode decision -> plannotator contract.
@@ -124,6 +146,19 @@ fn output_annotate(decision: &str, feedback: Option<&str>, json: bool) -> ! {
     }
 }
 
+/// Route a finished decision to the right output for the current mode.
+fn finish(decision: &str, feedback: Option<&str>, state: &AppState) -> ! {
+    if state.hook {
+        output_hook(decision, feedback);
+    }
+    match &state.mode {
+        Mode::Annotate { .. } => output_annotate(decision, feedback, state.json),
+        Mode::Ask { .. } => {
+            print_and_exit(serde_json::json!({ "decision": "dismissed" }).to_string())
+        }
+    }
+}
+
 #[tauri::command]
 fn get_payload(state: tauri::State<AppState>) -> Value {
     match &state.mode {
@@ -143,6 +178,9 @@ fn get_payload(state: tauri::State<AppState>) -> Value {
 
 #[tauri::command]
 fn submit(decision: String, feedback: Option<String>, state: tauri::State<AppState>) {
+    if state.hook {
+        output_hook(&decision, feedback.as_deref());
+    }
     output_annotate(&decision, feedback.as_deref(), state.json);
 }
 
@@ -153,15 +191,127 @@ fn submit_answers(answers: Value) {
 
 #[tauri::command]
 fn dismiss(state: tauri::State<AppState>) {
-    match &state.mode {
-        Mode::Annotate { .. } => output_annotate("dismissed", None, state.json),
-        Mode::Ask { .. } => {
-            print_and_exit(serde_json::json!({ "decision": "dismissed" }).to_string())
-        }
+    finish("dismissed", None, &state);
+}
+
+fn launch(state: AppState) {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .manage(state)
+        .invoke_handler(tauri::generate_handler![
+            get_payload,
+            submit,
+            submit_answers,
+            dismiss
+        ])
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { .. } = event {
+                let state = window.state::<AppState>();
+                finish("dismissed", None, &state);
+            }
+        })
+        .setup(|app| {
+            let sc = Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyK);
+            let _ = app
+                .global_shortcut()
+                .on_shortcut(sc, |app, _shortcut, event| {
+                    if event.state() == ShortcutState::Pressed {
+                        if let Some(win) = app.get_webview_window("main") {
+                            let _ = win.unminimize();
+                            let _ = win.show();
+                            let _ = win.set_focus();
+                        }
+                    }
+                });
+
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.set_always_on_top(true);
+                let _ = win.set_focus();
+                let _ = win.request_user_attention(Some(UserAttentionType::Critical));
+            }
+
+            let (heading, title) = match &app.state::<AppState>().mode {
+                Mode::Annotate { title, .. } => ("Knock — 승인 요청", title.clone()),
+                Mode::Ask { title, .. } => ("Knock — 확인 필요", title.clone()),
+            };
+            let _ = app
+                .notification()
+                .builder()
+                .title(heading)
+                .body(&title)
+                .show();
+
+            let info = MenuItemBuilder::with_id("info", format!("Knock v{}", env!("CARGO_PKG_VERSION")))
+                .enabled(false)
+                .build(app)?;
+            let sep = PredefinedMenuItem::separator(app)?;
+            let quit = MenuItemBuilder::with_id("quit", "닫기 (Quit)").build(app)?;
+            let menu = MenuBuilder::new(app).items(&[&info, &sep, &quit]).build()?;
+            if let Some(icon) = app.default_window_icon().cloned() {
+                let _ = TrayIconBuilder::with_id("knock")
+                    .icon(icon)
+                    .tooltip("Knock — 응답 대기 중")
+                    .menu(&menu)
+                    .show_menu_on_left_click(true)
+                    .on_menu_event(|app, event| {
+                        if event.id().as_ref() == "quit" {
+                            let state = app.state::<AppState>();
+                            finish("dismissed", None, &state);
+                        }
+                    })
+                    .build(app)?;
+            }
+
+            Ok(())
+        })
+        .run(tauri::generate_context!())
+        .expect("error while running knock");
+}
+
+/// Hook mode: read a Claude Code PermissionRequest payload on stdin, show the plan,
+/// and emit an allow/deny decision. Never blocks if there's no plan to review.
+fn run_hook() {
+    let mut buf = String::new();
+    let _ = std::io::stdin().read_to_string(&mut buf);
+    let payload: Value = serde_json::from_str(&buf).unwrap_or(Value::Null);
+
+    let plan = payload
+        .get("context")
+        .and_then(|c| c.get("plan"))
+        .and_then(|p| p.as_str())
+        .or_else(|| {
+            payload
+                .get("tool_input")
+                .and_then(|t| t.get("plan"))
+                .and_then(|p| p.as_str())
+        })
+        .unwrap_or("");
+
+    if plan.trim().is_empty() {
+        // Nothing to review — let the permission flow proceed normally.
+        print_and_exit(hook_allow());
     }
+
+    launch(AppState {
+        mode: Mode::Annotate {
+            html: render_md(plan),
+            title: "Plan 검토".to_string(),
+            gate: true,
+        },
+        json: false,
+        hook: true,
+    });
 }
 
 pub fn run() {
+    let argv: Vec<String> = std::env::args().collect();
+    // No subcommand → Claude Code hook mode (PermissionRequest payload on stdin).
+    if argv.len() <= 1 {
+        run_hook();
+        return;
+    }
+
     let cli = Cli::parse();
 
     let (mode, json) = match cli.command {
@@ -208,100 +358,13 @@ pub fn run() {
                         .map(|s| s.to_string())
                 })
                 .unwrap_or_else(|| "확인 필요".to_string());
-            // ask mode is always structured JSON.
             (Mode::Ask { questions, title }, true)
         }
     };
 
-    let state = AppState { mode, json };
-
-    tauri::Builder::default()
-        .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-        .manage(state)
-        .invoke_handler(tauri::generate_handler![
-            get_payload,
-            submit,
-            submit_answers,
-            dismiss
-        ])
-        .on_window_event(|window, event| {
-            // Closing the window without a decision == dismissed.
-            if let WindowEvent::CloseRequested { .. } = event {
-                let state = window.state::<AppState>();
-                match &state.mode {
-                    Mode::Annotate { .. } => output_annotate("dismissed", None, state.json),
-                    Mode::Ask { .. } => print_and_exit(
-                        serde_json::json!({ "decision": "dismissed" }).to_string(),
-                    ),
-                }
-            }
-        })
-        .setup(|app| {
-            // Global shortcut (Cmd/Ctrl+Shift+K): bring the knock window to the
-            // front from any app. Focus only — never auto-approves.
-            let sc = Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyK);
-            let _ = app
-                .global_shortcut()
-                .on_shortcut(sc, |app, _shortcut, event| {
-                    if event.state() == ShortcutState::Pressed {
-                        if let Some(win) = app.get_webview_window("main") {
-                            let _ = win.unminimize();
-                            let _ = win.show();
-                            let _ = win.set_focus();
-                        }
-                    }
-                });
-
-            if let Some(win) = app.get_webview_window("main") {
-                let _ = win.set_always_on_top(true);
-                let _ = win.set_focus();
-                // macOS: bounce the Dock icon / flash until the user looks.
-                let _ = win.request_user_attention(Some(UserAttentionType::Critical));
-            }
-
-            let (heading, title) = match &app.state::<AppState>().mode {
-                Mode::Annotate { title, .. } => ("Knock — 승인 요청", title.clone()),
-                Mode::Ask { title, .. } => ("Knock — 확인 필요", title.clone()),
-            };
-            let _ = app
-                .notification()
-                .builder()
-                .title(heading)
-                .body(&title)
-                .show();
-
-            // Menubar tray: shows knock is running, with an Info / Quit menu.
-            let info = MenuItemBuilder::with_id("info", format!("Knock v{}", env!("CARGO_PKG_VERSION")))
-                .enabled(false)
-                .build(app)?;
-            let sep = PredefinedMenuItem::separator(app)?;
-            let quit = MenuItemBuilder::with_id("quit", "닫기 (Quit)").build(app)?;
-            let menu = MenuBuilder::new(app).items(&[&info, &sep, &quit]).build()?;
-            if let Some(icon) = app.default_window_icon().cloned() {
-                let _ = TrayIconBuilder::with_id("knock")
-                    .icon(icon)
-                    .tooltip("Knock — 응답 대기 중")
-                    .menu(&menu)
-                    .show_menu_on_left_click(true)
-                    .on_menu_event(|app, event| {
-                        if event.id().as_ref() == "quit" {
-                            let state = app.state::<AppState>();
-                            match &state.mode {
-                                Mode::Annotate { .. } => {
-                                    output_annotate("dismissed", None, state.json)
-                                }
-                                Mode::Ask { .. } => print_and_exit(
-                                    serde_json::json!({ "decision": "dismissed" }).to_string(),
-                                ),
-                            }
-                        }
-                    })
-                    .build(app)?;
-            }
-
-            Ok(())
-        })
-        .run(tauri::generate_context!())
-        .expect("error while running knock");
+    launch(AppState {
+        mode,
+        json,
+        hook: false,
+    });
 }

@@ -75,7 +75,20 @@ CLI 설치 후, Claude Code 에서 스킬 플러그인을 추가하면 에이전
 | `knock-annotate` | 승인 / 주석 게이트 (plannotator 대체) |
 | `knock-ask` | 객관식 질문 (AskUserQuestion 대체) |
 
-> 플러그인은 스킬만 제공합니다. `knock` CLI 는 위 **설치** 단계(brew / install.sh)로 따로 설치하세요.
+### 자동 plan 승인 (hook)
+
+플러그인에는 `PermissionRequest` + `ExitPlanMode` hook 이 포함되어, **plan mode 를 빠져나갈 때 자동으로 knock 창**이 떠서 plan 을 검토·승인합니다 — **CLAUDE.md 지침 없이도 동작**. (승인 → plan 진행 / 변경요청·닫기 → plan 거부 + 피드백)
+
+### ask 까지 적극 쓰려면 (CLAUDE.md 스니펫)
+
+plan 승인은 hook 으로 자동이지만, "에이전트가 질문할 때 `AskUserQuestion` 대신 `knock ask` 를 쓰게" 하려면 프로젝트 `CLAUDE.md` 에 한 줄 추가하세요:
+
+```
+사용자에게 객관식 질문이 필요하면 AskUserQuestion 대신 `knock ask <json>` 을,
+승인 게이트는 `knock annotate <md> --gate --json` 을 쓴다.
+```
+
+> 플러그인은 **스킬 + hook** 을 제공합니다. `knock` CLI 는 위 **설치** 단계(brew / install.sh)로 따로 설치하세요.
 
 ## 모드
 
