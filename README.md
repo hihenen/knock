@@ -7,20 +7,28 @@ plannotator 의 대체 — 브라우저 탭 대신 **Tauri 네이티브 창** + 
 - `stdout` 계약이 plannotator 와 호환 → 기존 스킬/룰에 drop-in
 - 채팅 blocking 질문(AskUserQuestion) 을 데스크톱 창으로 대체
 
-## Quick Start
+## Quick Start (macOS · Apple Silicon)
+
+**1. CLI 설치** — 둘 중 하나
 
 ```bash
-# ① CLI 설치 (Homebrew 불필요)
-curl -fsSL https://raw.githubusercontent.com/hihenen/knock/master/install.sh | bash
+brew install hihenen/tap/knock                                                       # 권장 (경고 없음)
+curl -fsSL https://raw.githubusercontent.com/hihenen/knock/master/install.sh | bash  # 또는 (Homebrew 없이)
 ```
 
+**2. Claude Code 플러그인** (스킬 + hook)
+
 ```
-# ② Claude Code 스킬 플러그인 (에이전트가 knock-annotate / knock-ask 호출)
 /plugin marketplace add hihenen/knock
 /plugin install knock@knock
+/reload-plugins
 ```
 
-> **업데이트**: `①` 줄 재실행. (Homebrew 선호 시 `brew install hihenen/tap/knock` → 이후 `brew upgrade hihenen/tap/knock`)
+**끝.** plan mode 를 빠져나갈 때 knock 창이 자동으로 떠서 plan 을 검토·승인합니다 (hook). 에이전트는 `knock-annotate`(승인) / `knock-ask`(질문) 스킬로도 호출합니다.
+
+> **업데이트**: `brew upgrade hihenen/tap/knock` (+ `/plugin marketplace update knock` → `/reload-plugins`)
+>
+> **ask 까지 자동으로** 쓰려면 프로젝트 `CLAUDE.md` 에 한 줄: `객관식 질문은 AskUserQuestion 대신 knock ask, 승인 게이트는 knock annotate 를 쓴다.`
 
 ---
 
