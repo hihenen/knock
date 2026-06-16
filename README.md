@@ -20,7 +20,7 @@ curl -fsSL https://raw.githubusercontent.com/hihenen/knock/master/install.sh | b
 /plugin install knock@knock
 ```
 
-> **업데이트**: `①` 줄 재실행. (Homebrew 선호 시 `brew install hihenen/tap/knock` → 이후 `brew upgrade knock`)
+> **업데이트**: `①` 줄 재실행. (Homebrew 선호 시 `brew install hihenen/tap/knock` → 이후 `brew upgrade hihenen/tap/knock`)
 
 ---
 
