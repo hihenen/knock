@@ -1,0 +1,13 @@
+{
+  "name": "knock",
+  "owner": {
+    "name": "hihenen"
+  },
+  "plugins": [
+    {
+      "name": "knock",
+      "source": ".",
+      "description": "Desktop approval / annotation / question gate for AI coding agents. Provides knock-annotate (approval gate) and knock-ask (AskUserQuestion-style multiple choice) skills. Requires the `knock` CLI (install.sh or `brew install hihenen/tap/knock`)."
+    }
+  ]
+}

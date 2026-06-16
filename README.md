@@ -17,6 +17,14 @@ brew install hihenen/tap/knock
 
 Gatekeeper quarantine 을 brew 가 자동 처리 — "손상됨 / 확인 불가" 경고 없음.
 
+### install.sh (한 줄)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/hihenen/knock/master/install.sh | bash
+```
+
+최신 릴리스 바이너리를 `~/.local/bin/knock` 에 설치 (Gatekeeper quarantine 자동 제거).
+
 ### 소스 빌드 (CLI)
 
 ```bash
@@ -35,6 +43,22 @@ knock --version
 ```
 
 > ⚠️ knock 은 **CLI 도구**입니다. `.app` 더블클릭이 아니라 `knock annotate <md>` / `knock ask <json>` 처럼 인자와 함께 실행합니다. (인자 없이 실행하면 즉시 종료)
+
+## Claude Code 플러그인 (스킬)
+
+CLI 설치 후, Claude Code 에서 스킬 플러그인을 추가하면 에이전트가 `knock-annotate` / `knock-ask` 를 직접 호출합니다:
+
+```
+/plugin marketplace add hihenen/knock
+/plugin install knock@knock
+```
+
+| 스킬 | 용도 |
+|------|------|
+| `knock-annotate` | 승인 / 주석 게이트 (plannotator 대체) |
+| `knock-ask` | 객관식 질문 (AskUserQuestion 대체) |
+
+> 플러그인은 스킬만 제공합니다. `knock` CLI 는 위 **설치** 단계(brew / install.sh)로 따로 설치하세요.
 
 ## 모드
 
