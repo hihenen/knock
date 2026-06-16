@@ -18,6 +18,9 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use serde_json::Value;
 use tauri::{Manager, UserAttentionType, WindowEvent};
+use tauri_plugin_global_shortcut::{
+    Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState,
+};
 use tauri_plugin_notification::NotificationExt;
 
 #[derive(Parser, Debug)]
@@ -212,6 +215,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             get_payload,
@@ -232,6 +236,21 @@ pub fn run() {
             }
         })
         .setup(|app| {
+            // Global shortcut (Cmd/Ctrl+Shift+K): bring the knock window to the
+            // front from any app. Focus only — never auto-approves.
+            let sc = Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyK);
+            let _ = app
+                .global_shortcut()
+                .on_shortcut(sc, |app, _shortcut, event| {
+                    if event.state() == ShortcutState::Pressed {
+                        if let Some(win) = app.get_webview_window("main") {
+                            let _ = win.unminimize();
+                            let _ = win.show();
+                            let _ = win.set_focus();
+                        }
+                    }
+                });
+
             if let Some(win) = app.get_webview_window("main") {
                 let _ = win.set_always_on_top(true);
                 let _ = win.set_focus();
