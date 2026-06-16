@@ -56,42 +56,103 @@ function setupAnnotate(p: AnnotatePayload) {
   $("content").classList.remove("hidden");
   $("annotate-footer").classList.remove("hidden");
 
-  const approveBtn = $("approve");
-  if (!p.gate) approveBtn.style.display = "none";
-
-  const annBox = $("annotate-box");
+  const optApprove = $("opt-approve");
+  const optCancel = $("opt-cancel");
   const feedback = $<HTMLTextAreaElement>("feedback");
   const sendBtn = $<HTMLButtonElement>("send");
 
-  const showAnnotate = (show: boolean) => {
-    annBox.classList.toggle("hidden", !show);
-    $("main-actions").classList.toggle("hidden", show);
-    if (show) feedback.focus();
-  };
+  if (!p.gate) optApprove.classList.add("hidden");
 
-  approveBtn.addEventListener("click", () => sendDecision("approved"));
-  $("dismiss").addEventListener("click", () => sendDecision("dismissed"));
-  $("request").addEventListener("click", () => showAnnotate(true));
-  $("cancel-annotate").addEventListener("click", () => showAnnotate(false));
-  feedback.addEventListener("input", () => {
-    sendBtn.disabled = feedback.value.trim().length === 0;
-  });
-  const sendFeedback = () => {
+  const submitFeedback = () => {
     const txt = feedback.value.trim();
     if (txt) sendDecision("annotated", txt);
   };
-  sendBtn.addEventListener("click", sendFeedback);
+
+  optApprove.addEventListener("click", () => sendDecision("approved"));
+  optCancel.addEventListener("click", () => sendDecision("dismissed"));
+  sendBtn.addEventListener("click", submitFeedback);
+  feedback.addEventListener("input", () => {
+    sendBtn.disabled = feedback.value.trim().length === 0;
+  });
+
+  // Clipboard image paste → save to a temp file, append its path to the feedback.
+  feedback.addEventListener("paste", (e) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (const item of items) {
+      if (item.type.startsWith("image/")) {
+        e.preventDefault();
+        const blob = item.getAsFile();
+        if (!blob) continue;
+        const reader = new FileReader();
+        reader.onload = async () => {
+          try {
+            const path = await invoke<string>("save_pasted_image", {
+              dataUrl: reader.result as string,
+            });
+            feedback.value +=
+              (feedback.value ? "\n" : "") + `[붙여넣은 이미지: ${path}]`;
+            sendBtn.disabled = false;
+          } catch {
+            /* ignore */
+          }
+        };
+        reader.readAsDataURL(blob);
+      }
+    }
+  });
+
+  // Keyboard: 1/2/3, ↑↓ move, Enter/Space run, Cmd+Enter submit, Esc cancel/close.
+  const opts = [optApprove, optCancel].filter(
+    (o) => !o.classList.contains("hidden"),
+  );
+  let focusIdx = 0;
+  opts[0]?.focus();
+  $("annotate-footer").addEventListener("focusin", (e) => {
+    const i = opts.indexOf(e.target as HTMLElement);
+    if (i >= 0) focusIdx = i;
+  });
+
+  const run = (o: HTMLElement) => {
+    if (o === optApprove) sendDecision("approved");
+    else sendDecision("dismissed");
+  };
 
   window.addEventListener("keydown", (e) => {
-    const inAnnotate = !annBox.classList.contains("hidden");
+    const inText = document.activeElement === feedback;
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
       e.preventDefault();
-      if (inAnnotate) sendFeedback();
+      if (feedback.value.trim()) submitFeedback();
       else if (p.gate) sendDecision("approved");
-    } else if (e.key === "Escape") {
+      return;
+    }
+    if (e.key === "Escape") {
       e.preventDefault();
-      if (inAnnotate) showAnnotate(false);
+      if (inText) (document.activeElement as HTMLElement).blur();
       else sendDecision("dismissed");
+      return;
+    }
+    if (inText) return;
+    if (e.key === "1" && p.gate) {
+      e.preventDefault();
+      sendDecision("approved");
+    } else if (e.key === "2") {
+      e.preventDefault();
+      feedback.focus();
+    } else if (e.key === "3") {
+      e.preventDefault();
+      sendDecision("dismissed");
+    } else if (e.key === "ArrowDown") {
+      e.preventDefault();
+      focusIdx = (focusIdx + 1) % opts.length;
+      opts[focusIdx].focus();
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      focusIdx = (focusIdx - 1 + opts.length) % opts.length;
+      opts[focusIdx].focus();
+    } else if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      run(opts[focusIdx]);
     }
   });
 }

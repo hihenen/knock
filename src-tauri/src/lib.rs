@@ -218,6 +218,26 @@ fn submit_answers(answers: Value) {
     print_and_exit(serde_json::json!({ "answers": answers }).to_string());
 }
 
+/// Save a pasted image (data: URL) to a temp file and return its path.
+#[tauri::command]
+fn save_pasted_image(data_url: String) -> Result<String, String> {
+    use base64::Engine;
+    let b64 = data_url
+        .split(',')
+        .nth(1)
+        .ok_or_else(|| "invalid data url".to_string())?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .map_err(|e| e.to_string())?;
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let path = std::env::temp_dir().join(format!("knock-paste-{}.png", ts));
+    std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().to_string())
+}
+
 #[tauri::command]
 fn dismiss(state: tauri::State<AppState>) {
     finish("dismissed", None, &state);
@@ -232,6 +252,7 @@ fn launch(state: AppState) {
             get_payload,
             submit,
             submit_answers,
+            save_pasted_image,
             dismiss
         ])
         .on_window_event(|window, event| {

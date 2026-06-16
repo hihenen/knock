@@ -201,22 +201,32 @@ body {
   background: transparent;
 }
 
-/* ---- Annotate box ---- */
-.annotate textarea {
-  width: 100%;
+/* ---- Annotate: option 2 is an inline input card ---- */
+.ann-input {
+  cursor: text;
+  align-items: stretch;
+}
+.ann-input:focus-within {
+  border-color: var(--accent);
+  background: rgba(77, 131, 240, 0.08);
+}
+.ann-textarea {
+  flex: 1;
+  border: none;
+  background: transparent;
   resize: vertical;
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  padding: 10px 12px;
   font-family: inherit;
   font-size: 14px;
   color: var(--fg);
-  background: var(--bg);
-  margin-bottom: 10px;
-}
-.annotate textarea:focus {
   outline: none;
-  border-color: var(--accent);
+  min-height: 2.4em;
+  padding: 2px 0;
+}
+.ann-textarea::placeholder {
+  color: var(--muted);
+}
+#annotate-footer .btn-row {
+  margin-top: 10px;
 }
 
 .hidden {

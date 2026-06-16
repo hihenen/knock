@@ -21,24 +21,31 @@
     <div id="ask-root" class="ask hidden"></div>
 
     <footer class="actions">
-      <!-- annotate actions -->
+      <!-- annotate actions (vertical option cards, like ask) -->
       <div id="annotate-footer" class="hidden">
-        <div id="annotate-box" class="annotate hidden">
-          <textarea
-            id="feedback"
-            rows="4"
-            placeholder="변경 요청 / 주석을 적어주세요. (Cmd+Enter 로 전송)"
-          ></textarea>
-          <div class="btn-row">
-            <button id="send" class="btn primary" disabled>피드백 보내기</button>
-            <button id="cancel-annotate" class="btn ghost">취소</button>
+        <div class="ask-options">
+          <div class="ask-opt" id="opt-approve" tabindex="0">
+            <span class="ask-opt-num">1</span>
+            <div class="ask-opt-body"><div class="ask-opt-label">✓ 승인</div></div>
+          </div>
+          <label class="ask-opt ann-input">
+            <span class="ask-opt-num">2</span>
+            <textarea
+              id="feedback"
+              class="ann-textarea"
+              rows="2"
+              placeholder="변경요청·피드백 입력 → 제출 (Cmd+Enter · 이미지 붙여넣기 가능)"
+            ></textarea>
+          </label>
+          <div class="ask-opt" id="opt-cancel" tabindex="0">
+            <span class="ask-opt-num">3</span>
+            <div class="ask-opt-body"><div class="ask-opt-label">✗ 취소</div></div>
           </div>
         </div>
-
-        <div id="main-actions" class="btn-row">
-          <button id="approve" class="btn approve" title="Cmd+Enter">✓ 승인</button>
-          <button id="request" class="btn warn">✎ 변경요청</button>
-          <button id="dismiss" class="btn ghost" title="Esc">✗ 닫기</button>
+        <div class="btn-row">
+          <button id="send" class="btn primary" disabled title="Cmd+Enter">
+            제출 ✓
+          </button>
         </div>
       </div>
 

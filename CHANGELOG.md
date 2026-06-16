@@ -2,6 +2,16 @@
 
 All notable changes to knock are documented here. Versions follow [SemVer](https://semver.org).
 
+## [0.1.5] - 2026-06-16
+
+### Changed
+- annotate UI 를 세로 옵션 카드로 (ask wizard 와 통일): `[1] 승인` / `[2] 인라인 입력창` / `[3] 취소`.
+- 키보드 1/2/3 · ↑↓ · Cmd+Enter 일관.
+
+### Added
+- 변경요청 입력창에 **클립보드 이미지 붙여넣기** — 스크린샷을 붙이면 임시파일로 저장하고
+  그 경로를 피드백에 첨부 (`save_pasted_image` command).
+
 ## [0.1.4] - 2026-06-16
 
 ### Fixed
