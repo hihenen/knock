@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Knock",
-  "version": "0.1.3",
-  "identifier": "co.fnf.knock",
+  "version": "0.1.4",
+  "identifier": "io.github.hihenen.knock",
   "build": {
     "beforeDevCommand": "bun run dev",
     "devUrl": "http://localhost:1420",

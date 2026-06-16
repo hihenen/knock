@@ -16,13 +16,15 @@ use serde_json::Value;
 use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{Manager, UserAttentionType, WindowEvent};
-use tauri_plugin_global_shortcut::{
-    Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState,
-};
+use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 use tauri_plugin_notification::NotificationExt;
 
 #[derive(Parser, Debug)]
-#[command(name = "knock", version, about = "Desktop approval / question gate for AI agents")]
+#[command(
+    name = "knock",
+    version,
+    about = "Desktop approval / question gate for AI agents"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -49,8 +51,15 @@ enum Command {
 }
 
 enum Mode {
-    Annotate { html: String, title: String, gate: bool },
-    Ask { questions: Value, title: String },
+    Annotate {
+        html: String,
+        title: String,
+        gate: bool,
+    },
+    Ask {
+        questions: Value,
+        title: String,
+    },
 }
 
 struct AppState {
@@ -86,63 +95,83 @@ fn print_nothing_and_exit() -> ! {
     std::process::exit(0);
 }
 
-fn hook_allow() -> String {
-    serde_json::json!({
-        "decision": "allow",
-        "hookSpecificOutput": { "permissionDecision": "allow" }
-    })
-    .to_string()
-}
-
-/// hook-mode decision -> Claude Code PermissionRequest JSON.
-fn output_hook(decision: &str, feedback: Option<&str>) -> ! {
-    let json = match decision {
+/// hook-mode decision -> Claude Code PermissionRequest output schema:
+///   {"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow|deny","message":...}}}
+fn hook_decision_json(decision: &str, feedback: Option<&str>) -> Value {
+    let inner = match decision {
         "approved" => serde_json::json!({
-            "decision": "allow",
-            "hookSpecificOutput": { "permissionDecision": "allow" }
+            "hookEventName": "PermissionRequest",
+            "decision": { "behavior": "allow" }
         }),
         "annotated" => serde_json::json!({
-            "decision": "deny",
-            "reason": feedback.unwrap_or("User requested changes via knock"),
-            "hookSpecificOutput": { "permissionDecision": "deny" }
+            "hookEventName": "PermissionRequest",
+            "decision": {
+                "behavior": "deny",
+                "message": feedback.unwrap_or("User requested changes via knock")
+            }
         }),
         // dismissed
         _ => serde_json::json!({
-            "decision": "deny",
-            "reason": "User dismissed the plan review in knock",
-            "hookSpecificOutput": { "permissionDecision": "deny" }
+            "hookEventName": "PermissionRequest",
+            "decision": {
+                "behavior": "deny",
+                "message": "User dismissed the plan review in knock"
+            }
         }),
     };
-    print_and_exit(json.to_string());
+    serde_json::json!({ "hookSpecificOutput": inner })
 }
 
-/// annotate-mode decision -> plannotator contract.
-fn output_annotate(decision: &str, feedback: Option<&str>, json: bool) -> ! {
+fn output_hook(decision: &str, feedback: Option<&str>) -> ! {
+    print_and_exit(hook_decision_json(decision, feedback).to_string());
+}
+
+/// Extract the plan markdown from a PermissionRequest payload.
+/// tool_input.plan is the real ExitPlanMode field; context.plan is a fallback.
+fn extract_plan(payload: &Value) -> &str {
+    payload
+        .get("tool_input")
+        .and_then(|t| t.get("plan"))
+        .and_then(|p| p.as_str())
+        .or_else(|| {
+            payload
+                .get("context")
+                .and_then(|c| c.get("plan"))
+                .and_then(|p| p.as_str())
+        })
+        .unwrap_or("")
+}
+
+/// annotate-mode decision -> plannotator contract line, or None = print nothing.
+fn annotate_contract(decision: &str, feedback: Option<&str>, json: bool) -> Option<String> {
     match decision {
-        "approved" => {
-            if json {
-                print_and_exit(serde_json::json!({ "decision": "approved" }).to_string())
-            } else {
-                print_and_exit("The user approved.".to_string())
-            }
-        }
+        "approved" => Some(if json {
+            serde_json::json!({ "decision": "approved" }).to_string()
+        } else {
+            "The user approved.".to_string()
+        }),
         "annotated" => {
             let fb = feedback.unwrap_or("").trim().to_string();
-            if json {
-                print_and_exit(
-                    serde_json::json!({ "decision": "annotated", "feedback": fb }).to_string(),
-                )
+            Some(if json {
+                serde_json::json!({ "decision": "annotated", "feedback": fb }).to_string()
             } else {
-                print_and_exit(fb)
-            }
+                fb
+            })
         }
         _ => {
             if json {
-                print_and_exit(serde_json::json!({ "decision": "dismissed" }).to_string())
+                Some(serde_json::json!({ "decision": "dismissed" }).to_string())
             } else {
-                print_nothing_and_exit()
+                None
             }
         }
+    }
+}
+
+fn output_annotate(decision: &str, feedback: Option<&str>, json: bool) -> ! {
+    match annotate_contract(decision, feedback, json) {
+        Some(line) => print_and_exit(line),
+        None => print_nothing_and_exit(),
     }
 }
 
@@ -242,9 +271,10 @@ fn launch(state: AppState) {
                 .body(&title)
                 .show();
 
-            let info = MenuItemBuilder::with_id("info", format!("Knock v{}", env!("CARGO_PKG_VERSION")))
-                .enabled(false)
-                .build(app)?;
+            let info =
+                MenuItemBuilder::with_id("info", format!("Knock v{}", env!("CARGO_PKG_VERSION")))
+                    .enabled(false)
+                    .build(app)?;
             let sep = PredefinedMenuItem::separator(app)?;
             let quit = MenuItemBuilder::with_id("quit", "닫기 (Quit)").build(app)?;
             let menu = MenuBuilder::new(app).items(&[&info, &sep, &quit]).build()?;
@@ -274,23 +304,22 @@ fn launch(state: AppState) {
 fn run_hook() {
     let mut buf = String::new();
     let _ = std::io::stdin().read_to_string(&mut buf);
-    let payload: Value = serde_json::from_str(&buf).unwrap_or(Value::Null);
 
-    let plan = payload
-        .get("context")
-        .and_then(|c| c.get("plan"))
-        .and_then(|p| p.as_str())
-        .or_else(|| {
-            payload
-                .get("tool_input")
-                .and_then(|t| t.get("plan"))
-                .and_then(|p| p.as_str())
-        })
-        .unwrap_or("");
+    // Fail-safe: a malformed payload must NOT auto-approve. Emit nothing and let
+    // Claude Code's normal permission flow handle it (a gate should never fail open).
+    let payload: Value = match serde_json::from_str(&buf) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("knock hook: could not parse stdin payload: {}", e);
+            std::process::exit(0);
+        }
+    };
+
+    let plan = extract_plan(&payload);
 
     if plan.trim().is_empty() {
-        // Nothing to review — let the permission flow proceed normally.
-        print_and_exit(hook_allow());
+        // No plan to review (not an ExitPlanMode request) — stay out of the way.
+        std::process::exit(0);
     }
 
     launch(AppState {
@@ -367,4 +396,93 @@ pub fn run() {
         json,
         hook: false,
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hook_approved_allows() {
+        let v = hook_decision_json("approved", None);
+        assert_eq!(
+            v["hookSpecificOutput"]["hookEventName"],
+            "PermissionRequest"
+        );
+        assert_eq!(v["hookSpecificOutput"]["decision"]["behavior"], "allow");
+    }
+
+    #[test]
+    fn hook_annotated_denies_with_message() {
+        let v = hook_decision_json("annotated", Some("fix the KMS policy"));
+        assert_eq!(v["hookSpecificOutput"]["decision"]["behavior"], "deny");
+        assert_eq!(
+            v["hookSpecificOutput"]["decision"]["message"],
+            "fix the KMS policy"
+        );
+    }
+
+    #[test]
+    fn hook_dismissed_denies() {
+        let v = hook_decision_json("dismissed", None);
+        assert_eq!(v["hookSpecificOutput"]["decision"]["behavior"], "deny");
+    }
+
+    #[test]
+    fn extract_plan_prefers_tool_input() {
+        let p =
+            serde_json::json!({ "tool_input": { "plan": "# Plan" }, "context": { "plan": "ctx" } });
+        assert_eq!(extract_plan(&p), "# Plan");
+    }
+
+    #[test]
+    fn extract_plan_falls_back_to_context() {
+        let p = serde_json::json!({ "context": { "plan": "ctx plan" } });
+        assert_eq!(extract_plan(&p), "ctx plan");
+    }
+
+    #[test]
+    fn extract_plan_missing_is_empty() {
+        let p = serde_json::json!({ "tool_name": "ExitPlanMode" });
+        assert_eq!(extract_plan(&p), "");
+    }
+
+    #[test]
+    fn annotate_approved_plain() {
+        assert_eq!(
+            annotate_contract("approved", None, false).unwrap(),
+            "The user approved."
+        );
+    }
+
+    #[test]
+    fn annotate_approved_json() {
+        let s = annotate_contract("approved", None, true).unwrap();
+        assert!(s.contains("\"decision\":\"approved\""));
+    }
+
+    #[test]
+    fn annotate_annotated_returns_feedback() {
+        assert_eq!(
+            annotate_contract("annotated", Some("  needs work  "), false).unwrap(),
+            "needs work"
+        );
+    }
+
+    #[test]
+    fn annotate_dismissed_plain_is_none() {
+        assert!(annotate_contract("dismissed", None, false).is_none());
+    }
+
+    #[test]
+    fn annotate_dismissed_json_some() {
+        let s = annotate_contract("dismissed", None, true).unwrap();
+        assert!(s.contains("\"dismissed\""));
+    }
+
+    #[test]
+    fn render_md_makes_table() {
+        let h = render_md("| a | b |\n|---|---|\n| 1 | 2 |");
+        assert!(h.contains("<table>"));
+    }
 }

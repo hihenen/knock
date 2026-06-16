@@ -27,18 +27,11 @@ case "$arch" in
     ;;
 esac
 
-echo "knock: 최신 릴리스 확인 중..."
-tag="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
-  | grep '"tag_name"' | head -1 | cut -d'"' -f4)"
-if [ -z "$tag" ]; then
-  echo "knock: 릴리스를 찾을 수 없습니다." >&2
-  exit 1
-fi
-
-url="https://github.com/${REPO}/releases/download/${tag}/${binary_name}"
+# Use the /releases/latest/download redirect instead of the rate-limited GitHub API.
+url="https://github.com/${REPO}/releases/latest/download/${binary_name}"
 tmp="$(mktemp)"
 
-echo "knock: ${tag} 다운로드 중..."
+echo "knock: 최신 릴리스 다운로드 중..."
 curl -fsSL -o "$tmp" "$url"
 # Strip Gatekeeper quarantine so the unsigned binary runs without a prompt.
 xattr -c "$tmp" 2>/dev/null || true

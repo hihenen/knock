@@ -50,6 +50,14 @@ curl -fsSL https://raw.githubusercontent.com/hihenen/knock/master/install.sh | b
 
 최신 릴리스 바이너리를 `~/.local/bin/knock` 에 설치 (Gatekeeper quarantine 자동 제거).
 
+### Windows (x64)
+
+```powershell
+irm https://raw.githubusercontent.com/hihenen/knock/master/install.ps1 | iex
+```
+
+`knock.exe` 를 `%LOCALAPPDATA%\knock` 에 설치하고 user PATH 에 추가합니다.
+
 ### 소스 빌드 (CLI)
 
 ```bash

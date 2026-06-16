@@ -1,13 +1,11 @@
 name: release
 
-# Push a tag (e.g. `git tag v0.1.2 && git push --tags`) to:
-#   1. build the arm64 macOS binary
-#   2. create a GitHub Release with the binary attached
-#   3. bump the Homebrew formula in hihenen/homebrew-tap (version/url/sha256)
+# Push a tag (e.g. `git tag v0.1.4 && git push --tags`) to:
+#   1. build the macOS (arm64) and Windows (x64) binaries
+#   2. attach them to a GitHub Release
+#   3. bump the Homebrew formula in hihenen/homebrew-tap (macOS asset)
 #
-# Requires repo secret TAP_TOKEN: a PAT (or fine-grained token) with
-# contents:write on hihenen/homebrew-tap. Without it, the formula-bump step
-# is skipped (release still happens).
+# Requires repo secret TAP_TOKEN (contents:write on hihenen/homebrew-tap) for step 3.
 
 on:
   push:
@@ -18,13 +16,21 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    runs-on: macos-14 # Apple Silicon (arm64)
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            asset: knock-macos-aarch64
+            binpath: src-tauri/target/release/knock
+          - os: windows-latest
+            asset: knock-windows-x64.exe
+            binpath: src-tauri/target/release/knock.exe
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-
       - uses: dtolnay/rust-toolchain@stable
-
       - uses: oven-sh/setup-bun@v2
 
       - name: Install deps
@@ -33,35 +39,34 @@ jobs:
       - name: Build (CLI binary)
         run: bun run tauri build --no-bundle
 
-      - name: Package + checksum
-        run: |
-          cp src-tauri/target/release/knock knock-macos-aarch64
-          SHA=$(shasum -a 256 knock-macos-aarch64 | cut -d' ' -f1)
-          echo "SHA=$SHA" >> "$GITHUB_ENV"
-          echo "Built knock-macos-aarch64 (sha256=$SHA)"
+      - name: Package
+        shell: bash
+        run: cp "${{ matrix.binpath }}" "${{ matrix.asset }}"
 
-      - name: Create release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          TAG="${GITHUB_REF#refs/tags/}"
-          gh release create "$TAG" \
-            --repo "${{ github.repository }}" \
-            --title "Knock $TAG" \
-            --generate-notes \
-            knock-macos-aarch64
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.asset }}
+          generate_release_notes: true
 
-      - name: Bump Homebrew formula
+  formula:
+    needs: build
+    runs-on: macos-14
+    steps:
+      - name: Bump Homebrew formula (macOS asset)
         continue-on-error: true
         env:
           TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
         run: |
           if [ -z "$TAP_TOKEN" ]; then
-            echo "TAP_TOKEN 미설정 — homebrew-tap formula 갱신 스킵 (release 는 완료됨)"
+            echo "TAP_TOKEN 미설정 — homebrew-tap formula 갱신 스킵"
             exit 0
           fi
           TAG="${GITHUB_REF#refs/tags/}"
           VERSION="${TAG#v}"
+          curl -fsSL -o knock-macos-aarch64 \
+            "https://github.com/${{ github.repository }}/releases/download/${TAG}/knock-macos-aarch64"
+          SHA=$(shasum -a 256 knock-macos-aarch64 | cut -d' ' -f1)
           git clone "https://x-access-token:${TAP_TOKEN}@github.com/hihenen/homebrew-tap.git" tap
           cd tap
           sed -i '' -E \
