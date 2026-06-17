@@ -2,6 +2,19 @@
 
 All notable changes to knock are documented here. Versions follow [SemVer](https://semver.org).
 
+## [0.4.2] - 2026-06-18
+
+### Fixed
+- **데몬 창이 안 뜨던 버그** — 데몬이 이미 떠 있는데 새 요청이 올 때, 소켓
+  listener 스레드에서 `window.show()` 를 호출해 macOS 가 (UI 는 메인 스레드만)
+  silently no-op 하던 문제. show + 뱃지 갱신을 `run_on_main_thread` 로 메인
+  스레드에 dispatch 하도록 수정. 멀티세션에서 창이 안정적으로 뜬다.
+
+### Changed
+- **ask 모드를 항상 multi-select(체크박스)로 통일** — 실사용은 "1~2개 선택 +
+  기타에 메모" 가 더 흔해, 단일 라디오로는 표현이 안 됐다. single radio 폐지,
+  옵션은 모두 체크박스, 출력은 항상 label 배열(`{"answers":{"<header>":["..."]}}`).
+
 ## [0.4.1] - 2026-06-18
 
 ### Added

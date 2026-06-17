@@ -319,13 +319,14 @@ function setupAsk(p: AskPayload) {
   // --- build one section per question ---
   const sections: HTMLElement[] = [];
   qs.forEach((q, qi) => {
-    const multi = !!q.multiSelect;
+    // Always multi-select (checkboxes): real use is "pick 1-2 options and/or
+    // add a note in 기타", which a single radio can't express. More flexible.
+    const multi = true;
     const sec = el("section", "ask-q hidden");
     if (q.question) sec.appendChild(el("h2", "ask-q-title", q.question));
-    if (multi)
-      sec.appendChild(
-        el("p", "ask-hint", "복수 선택 — 숫자/Space 로 토글, → 또는 Enter 로 다음"),
-      );
+    sec.appendChild(
+      el("p", "ask-hint", "복수 선택 가능 — 숫자/Space 로 토글, → 또는 Enter 로 다음"),
+    );
 
     const optsWrap = el("div", "ask-options");
     const allOpts = [
@@ -467,10 +468,11 @@ function setupAsk(p: AskPayload) {
       const ok = await invoke<boolean>("touch_id_approve");
       if (!ok) return; // auth cancelled/failed → keep window open
     }
-    const answers: Record<string, string | string[]> = {};
+    // Always multi-select → answers are always string arrays (selected labels
+    // plus any 기타 free text).
+    const answers: Record<string, string[]> = {};
     qs.forEach((q, qi) => {
-      const vals = labelsFor(qi);
-      answers[keyFor(q, qi)] = q.multiSelect ? vals : vals[0] ?? "";
+      answers[keyFor(q, qi)] = labelsFor(qi);
     });
     once(() => sink.ask(answers));
   };

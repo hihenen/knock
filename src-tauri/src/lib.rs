@@ -527,13 +527,21 @@ fn run_daemon() {
                         });
                         qq.len()
                     };
-                    if let Some(win) = h.get_webview_window("main") {
-                        let _ = win.unminimize();
-                        let _ = win.show();
-                        let _ = win.set_focus();
-                        // macOS: bounces the Dock icon + flags the menubar.
-                        let _ = win.request_user_attention(Some(UserAttentionType::Critical));
-                    }
+                    // Window show + badge are UI ops — macOS requires the main
+                    // thread. Calling them from this listener thread silently
+                    // no-ops (the window never appears). Dispatch to main.
+                    let hm = h.clone();
+                    let _ = h.run_on_main_thread(move || {
+                        if let Some(win) = hm.get_webview_window("main") {
+                            let _ = win.unminimize();
+                            let _ = win.show();
+                            let _ = win.set_focus();
+                            // macOS: bounces the Dock icon + flags the menubar.
+                            let _ = win.request_user_attention(Some(UserAttentionType::Critical));
+                        }
+                        update_badge(&hm, len);
+                    });
+                    // notification + emit are thread-safe.
                     let _ = h
                         .notification()
                         .builder()
@@ -541,7 +549,6 @@ fn run_daemon() {
                         .body(format!("대기 중인 요청 {}건", len))
                         .show();
                     let _ = h.emit("queue-changed", ());
-                    update_badge(&h, len);
                 });
                 // serve() only returns on bind failure (another daemon already runs).
                 if served.is_err() {
