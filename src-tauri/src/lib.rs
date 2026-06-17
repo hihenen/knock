@@ -54,6 +54,10 @@ enum Command {
         /// Require Touch ID / Windows Hello to approve (falls back to a button if unavailable).
         #[arg(long)]
         touch_id: bool,
+        /// URL to open in the browser when the user approves (e.g. a Scalr Apply page,
+        /// GitHub PR, ArgoCD app). Makes knock an "action inbox": approve -> jump to the action.
+        #[arg(long)]
+        action_url: Option<String>,
     },
     /// Ask a multiple-choice question (AskUserQuestion schema). Always emits JSON.
     Ask {
@@ -104,6 +108,7 @@ enum Mode {
         html: String,
         title: String,
         gate: bool,
+        action_url: Option<String>,
     },
     Ask {
         questions: Value,
@@ -256,13 +261,19 @@ fn finish(decision: &str, feedback: Option<&str>, state: &AppState) -> ! {
 #[tauri::command]
 fn get_payload(state: tauri::State<AppState>) -> Value {
     match &state.mode {
-        Mode::Annotate { html, title, gate } => serde_json::json!({
+        Mode::Annotate {
+            html,
+            title,
+            gate,
+            action_url,
+        } => serde_json::json!({
             "mode": "annotate",
             "html": html,
             "title": title,
             "gate": gate,
             "touchId": state.touch_id,
             "configTouchId": config_touch_id(),
+            "actionUrl": action_url,
         }),
         Mode::Ask { questions, title } => serde_json::json!({
             "mode": "ask",
@@ -274,6 +285,7 @@ fn get_payload(state: tauri::State<AppState>) -> Value {
         Mode::Settings => serde_json::json!({
             "mode": "settings",
             "touchId": config_touch_id(),
+            "version": env!("CARGO_PKG_VERSION"),
         }),
     }
 }
@@ -329,6 +341,37 @@ fn save_pasted_image(data_url: String) -> Result<String, String> {
     let path = std::env::temp_dir().join(format!("knock-paste-{}.png", ts));
     std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
     Ok(path.to_string_lossy().to_string())
+}
+
+/// Open an http(s) URL in the default browser (action links + bug report).
+#[tauri::command]
+fn open_url(url: String) -> Result<(), String> {
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err("only http(s) URLs are allowed".to_string());
+    }
+    open_external(&url).map_err(|e| e.to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn open_external(url: &str) -> std::io::Result<()> {
+    std::process::Command::new("open")
+        .arg(url)
+        .spawn()
+        .map(|_| ())
+}
+#[cfg(target_os = "windows")]
+fn open_external(url: &str) -> std::io::Result<()> {
+    std::process::Command::new("cmd")
+        .args(["/C", "start", "", url])
+        .spawn()
+        .map(|_| ())
+}
+#[cfg(all(unix, not(target_os = "macos")))]
+fn open_external(url: &str) -> std::io::Result<()> {
+    std::process::Command::new("xdg-open")
+        .arg(url)
+        .spawn()
+        .map(|_| ())
 }
 
 /// Biometric approval (macOS Touch ID / Windows Hello) via robius-authentication.
@@ -467,7 +510,8 @@ fn run_daemon() {
             daemon_resolve,
             save_pasted_image,
             touch_id_approve,
-            save_touch_id
+            save_touch_id,
+            open_url
         ])
         .on_window_event(|window, event| {
             // Closing the window must not kill the daemon — just hide it.
@@ -615,7 +659,8 @@ fn launch(state: AppState) {
             save_pasted_image,
             touch_id_approve,
             save_touch_id,
-            dismiss
+            dismiss,
+            open_url
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { .. } = event {
@@ -956,6 +1001,7 @@ fn run_hook() {
             html,
             title: "Plan 검토".to_string(),
             gate: true,
+            action_url: None,
         },
         json: false,
         hook: true,
@@ -985,6 +1031,7 @@ pub fn run() {
             json,
             title,
             touch_id,
+            action_url,
         } => {
             let md = std::fs::read_to_string(&file).unwrap_or_else(|e| {
                 eprintln!("knock: cannot read {}: {}", file.display(), e);
@@ -1003,10 +1050,16 @@ pub fn run() {
                 "gate": gate,
                 "touchId": touch_id,
                 "configTouchId": config_touch_id(),
+                "actionUrl": action_url,
             });
             try_daemon("annotate", inner, json, false);
             launch(AppState {
-                mode: Mode::Annotate { html, title, gate },
+                mode: Mode::Annotate {
+                    html,
+                    title,
+                    gate,
+                    action_url,
+                },
                 json,
                 hook: false,
                 touch_id,

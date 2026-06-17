@@ -8,6 +8,7 @@ interface AnnotatePayload {
   gate: boolean;
   touchId?: boolean;
   configTouchId?: boolean;
+  actionUrl?: string | null;
 }
 interface AskOption {
   label: string;
@@ -29,6 +30,7 @@ interface AskPayload {
 interface SettingsPayload {
   mode: "settings";
   touchId: boolean;
+  version?: string;
 }
 type Payload = AnnotatePayload | AskPayload | SettingsPayload;
 
@@ -67,6 +69,19 @@ const el = (tag: string, cls?: string, text?: string) => {
   if (text) e.textContent = text;
   return e;
 };
+
+// Open http(s) links from rendered markdown in the real browser, not the webview.
+function makeLinksExternal(container: HTMLElement) {
+  container.querySelectorAll<HTMLAnchorElement>("a[href]").forEach((a) => {
+    a.addEventListener("click", (e) => {
+      const href = a.getAttribute("href") || "";
+      if (href.startsWith("http://") || href.startsWith("https://")) {
+        e.preventDefault();
+        invoke("open_url", { url: href }).catch(() => {});
+      }
+    });
+  });
+}
 
 let submitted = false;
 function once(fn: () => void) {
@@ -119,6 +134,7 @@ function setupAnnotate(p: AnnotatePayload) {
   $("title").textContent = p.title;
   $("content").innerHTML = p.html;
   $("content").classList.remove("hidden");
+  makeLinksExternal($("content"));
   $("annotate-footer").classList.remove("hidden");
 
   const optApprove = $("opt-approve");
@@ -133,9 +149,11 @@ function setupAnnotate(p: AnnotatePayload) {
   const tdWrap = $("td-toggle-wrap");
   const tdToggle = $<HTMLInputElement>("td-toggle");
   const approveLabel = optApprove.querySelector(".ask-opt-label");
+  const hasAction = !!p.actionUrl;
   const reflectLabel = () => {
-    if (approveLabel)
-      approveLabel.textContent = tdToggle.checked ? "🔒 Touch ID 승인" : "✓ 승인";
+    if (!approveLabel) return;
+    const base = tdToggle.checked ? "🔒 Touch ID 승인" : "✓ 승인";
+    approveLabel.textContent = hasAction ? `${base} → 링크 열기` : base;
   };
   if (p.gate) {
     tdWrap.classList.remove("hidden");
@@ -148,10 +166,14 @@ function setupAnnotate(p: AnnotatePayload) {
   }
 
   // Approve, optionally gated behind Touch ID / Windows Hello (per the toggle).
+  // If an actionUrl is set, jump to it in the browser on approval (action inbox).
   const approve = async () => {
     if (tdToggle.checked) {
       const ok = await invoke<boolean>("touch_id_approve");
       if (!ok) return; // auth cancelled/failed → keep window open
+    }
+    if (p.actionUrl) {
+      await invoke("open_url", { url: p.actionUrl }).catch(() => {});
     }
     sendDecision("approved");
   };
@@ -284,6 +306,7 @@ function setupAsk(p: AskPayload) {
     const ctx = el("div", "ask-context markdown");
     ctx.innerHTML = p.contextHtml;
     root.appendChild(ctx);
+    makeLinksExternal(ctx);
   }
 
   const prevBtn = $<HTMLButtonElement>("ask-prev");
@@ -578,6 +601,14 @@ function setupSettings(p: SettingsPayload) {
   toggle.checked = p.touchId;
   toggle.addEventListener("change", () => {
     invoke("save_touch_id", { enabled: toggle.checked });
+  });
+
+  if (p.version) $("version-tag").textContent = `v${p.version}`;
+  $("report-bug").addEventListener("click", (e) => {
+    e.preventDefault();
+    invoke("open_url", {
+      url: "https://github.com/hihenen/knock/issues/new/choose",
+    }).catch(() => {});
   });
 
   const close = () => once(() => invoke("dismiss"));

@@ -2,6 +2,17 @@
 
 All notable changes to knock are documented here. Versions follow [SemVer](https://semver.org).
 
+## [0.4.3] - 2026-06-18
+
+### Added
+- **`--action-url` (action inbox)** — annotate 승인 시 지정한 URL 을 브라우저로
+  자동 오픈. knock 을 "행동 inbox" 로: 승인 한 번에 Scalr Apply / GitHub PR /
+  ArgoCD 등 다음 행동 지점으로 점프한다. 승인 버튼 라벨에 `→ 링크 열기` 표시.
+- **본문 markdown 링크 clickable** — annotate/ask context 안의 http(s) 링크를
+  클릭하면 webview 가 아니라 실제 브라우저로 열린다 (`open_url`).
+- **버그 신고** — settings 창에 "🐞 버그 신고" 링크 + 현재 버전 표시. GitHub
+  Issues 로 연결. `.github/ISSUE_TEMPLATE` 에 bug / feature 양식 추가.
+
 ## [0.4.2] - 2026-06-18
 
 ### Fixed

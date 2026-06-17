@@ -1,0 +1,43 @@
+name: 🐞 Bug report
+description: knock 버그를 신고합니다 / Report a knock bug
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: 무슨 일이 있었나요? / What happened?
+      description: 기대한 동작과 실제 동작을 적어주세요 / Expected vs actual behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: 재현 단계 / Steps to reproduce
+      placeholder: |
+        1. knock ask /tmp/q.json
+        2. ...
+        3. ...
+  - type: input
+    id: version
+    attributes:
+      label: knock 버전 / version
+      description: "`knock --version` 출력"
+      placeholder: "knock 0.4.2"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: OS
+      options:
+        - macOS
+        - Windows
+        - Linux
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 로그 / Logs (선택)
+      description: 관련 터미널 출력이나 에러 메시지가 있으면 붙여주세요.
+      render: shell

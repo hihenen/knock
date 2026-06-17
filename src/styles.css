@@ -500,3 +500,16 @@ body {
 .td-toggle input:checked + .td-switch::after { transform: translateX(16px); }
 .td-toggle input:focus-visible + .td-switch { outline: 2px solid var(--accent, #3b82f6); outline-offset: 2px; }
 .td-text { font-size: 12px; font-weight: 600; color: var(--muted, #6b7280); white-space: nowrap; }
+
+/* ── settings meta (bug report + version) ──────────────────────── */
+.settings-meta {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-top: 18px; padding-top: 14px;
+  border-top: 1px solid var(--border); font-size: 13px;
+}
+.settings-meta a { color: var(--accent, #3b82f6); text-decoration: none; }
+.settings-meta a:hover { text-decoration: underline; }
+.version-tag { color: var(--muted, #9aa0a6); }
+
+/* rendered-markdown links open in the real browser (makeLinksExternal) */
+.markdown a, .ask-context a { color: var(--accent, #3b82f6); cursor: pointer; }
