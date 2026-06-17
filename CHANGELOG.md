@@ -2,6 +2,20 @@
 
 All notable changes to knock are documented here. Versions follow [SemVer](https://semver.org).
 
+## [0.4.0] - 2026-06-17
+
+### Added
+- **Windows 지원** — 단일창 큐 / 데몬 / 상주가 Windows 에서도 동작한다.
+  - IPC 를 `interprocess` 로 통일: macOS/Linux 는 Unix 도메인 소켓, Windows 는
+    Named Pipe.
+  - `knock daemon install` / `uninstall` / `status` 가 Windows 에서는 레지스트리
+    Run 키(`HKCU\...\Run`)로 로그인 상주를 등록한다.
+  - 생체 인증은 Windows Hello, 새 요청 시 작업표시줄 flash 로 주의 환기.
+
+### Notes
+- Windows 컴파일은 CI(windows-latest)로 검증. Dock 뱃지 숫자는 macOS/Linux 전용
+  (Windows 는 트레이 + 창 flash 로 대체).
+
 ## [0.3.0] - 2026-06-17
 
 ### Added
