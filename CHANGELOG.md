@@ -2,6 +2,21 @@
 
 All notable changes to knock are documented here. Versions follow [SemVer](https://semver.org).
 
+## [0.2.0] - 2026-06-17
+
+### Added
+- **단일창 큐 (멀티 세션)** — 여러 에이전트 세션이 knock 을 동시에 호출해도
+  창이 여러 개 겹치지 않고 하나의 창에 대기 목록으로 모인다. 첫 호출이 백그라운드
+  데몬을 띄우고, 이후 모든 `annotate`/`ask`/hook 호출은 Unix 소켓으로 요청을
+  위임한 뒤 결정을 기다린다. 데몬은 대기 요청 리스트를 보여주고, 처리하면 해당
+  호출자에게만 결정을 회신한다. 데몬이 없으면 기존 단일창으로 안전하게 fallback.
+- **승인 창 헤더 Touch ID 토글** — 승인 창 헤더 우측의 🔒 토글로 그 자리에서
+  생체인증을 켜고 끈다. 변경은 `config.json` 에 저장되어 다음 critical 게이트와
+  tray/settings 토글에도 동일하게 반영된다.
+
+### Notes
+- 큐/데몬은 Unix(macOS) 전용. Windows 는 기존 단일창 동작.
+
 ## [0.1.8] - 2026-06-17
 
 ### Added

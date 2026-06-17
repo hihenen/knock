@@ -15,9 +15,19 @@ use clap::{Parser, Subcommand};
 use serde_json::Value;
 use tauri::menu::{CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
-use tauri::{Manager, UserAttentionType, WindowEvent};
+use tauri::{Emitter, Manager, UserAttentionType, WindowEvent};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 use tauri_plugin_notification::NotificationExt;
+
+mod ipc;
+
+use std::sync::{Arc, Mutex};
+
+/// Wrap `generate_context!` in one place — calling the macro twice (single-shot
+/// + daemon builders) would define the `_EMBED_INFO_PLIST` symbol twice.
+fn build_context() -> tauri::Context {
+    tauri::generate_context!()
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -225,6 +235,7 @@ fn get_payload(state: tauri::State<AppState>) -> Value {
             "title": title,
             "gate": gate,
             "touchId": state.touch_id,
+            "configTouchId": config_touch_id(),
         }),
         Mode::Ask { questions, title } => serde_json::json!({
             "mode": "ask",
@@ -329,6 +340,223 @@ fn dismiss(state: tauri::State<AppState>) {
     finish("dismissed", None, &state);
 }
 
+// ---------------------------------------------------------------------------
+// Daemon mode: one window, a queue of requests from many client invocations.
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+struct QueueEntry {
+    id: String,
+    kind: String,
+    payload: Value,
+    responder: ipc::Responder,
+}
+
+#[cfg(unix)]
+struct DaemonState {
+    queue: Arc<Mutex<Vec<QueueEntry>>>,
+}
+
+/// The pending queue, shaped for the frontend list (no responders).
+#[cfg(unix)]
+#[tauri::command]
+fn daemon_queue(state: tauri::State<DaemonState>) -> Value {
+    let q = state.queue.lock().unwrap();
+    let items: Vec<Value> = q
+        .iter()
+        .map(|e| {
+            let title = e
+                .payload
+                .get("title")
+                .and_then(|t| t.as_str())
+                .unwrap_or("Knock")
+                .to_string();
+            serde_json::json!({
+                "id": e.id,
+                "kind": e.kind,
+                "title": title,
+                "payload": e.payload,
+            })
+        })
+        .collect();
+    serde_json::json!({ "mode": "queue", "items": items, "touchId": config_touch_id() })
+}
+
+/// Resolve one queued request: reply to its client and drop it from the queue.
+#[cfg(unix)]
+#[tauri::command]
+fn daemon_resolve(
+    app: tauri::AppHandle,
+    id: String,
+    decision: String,
+    feedback: Option<String>,
+    answers: Option<Value>,
+    state: tauri::State<DaemonState>,
+) {
+    let entry = {
+        let mut q = state.queue.lock().unwrap();
+        q.iter().position(|e| e.id == id).map(|pos| q.remove(pos))
+    };
+    if let Some(entry) = entry {
+        let mut resp = serde_json::json!({ "decision": decision });
+        if let Some(f) = feedback {
+            resp["feedback"] = Value::String(f);
+        }
+        if let Some(a) = answers {
+            resp["answers"] = a;
+        }
+        entry.responder.reply(&resp);
+    }
+    let empty = state.queue.lock().unwrap().is_empty();
+    let _ = app.emit("queue-changed", ());
+    if empty {
+        if let Some(win) = app.get_webview_window("main") {
+            let _ = win.hide();
+        }
+    }
+}
+
+#[cfg(unix)]
+fn run_daemon() {
+    let queue: Arc<Mutex<Vec<QueueEntry>>> = Arc::new(Mutex::new(Vec::new()));
+
+    tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .manage(DaemonState {
+            queue: queue.clone(),
+        })
+        .invoke_handler(tauri::generate_handler![
+            daemon_queue,
+            daemon_resolve,
+            save_pasted_image,
+            touch_id_approve,
+            save_touch_id
+        ])
+        .on_window_event(|window, event| {
+            // Closing the window must not kill the daemon — just hide it.
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
+        .setup(move |app| {
+            let sc = Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyK);
+            let _ = app
+                .global_shortcut()
+                .on_shortcut(sc, |app, _shortcut, event| {
+                    if event.state() == ShortcutState::Pressed {
+                        if let Some(win) = app.get_webview_window("main") {
+                            let _ = win.unminimize();
+                            let _ = win.show();
+                            let _ = win.set_focus();
+                        }
+                    }
+                });
+
+            // Start hidden; the window appears when the first request arrives.
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.set_always_on_top(true);
+                let _ = win.hide();
+            }
+
+            // Socket listener: push each incoming request and wake the window.
+            let handle = app.handle().clone();
+            let q = queue.clone();
+            std::thread::spawn(move || {
+                let h = handle.clone();
+                let served = ipc::serve(move |incoming| {
+                    let payload = incoming.payload;
+                    let id = payload
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let kind = payload
+                        .get("kind")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("annotate")
+                        .to_string();
+                    let inner = payload
+                        .get("payload")
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!({}));
+                    {
+                        let mut qq = q.lock().unwrap();
+                        qq.push(QueueEntry {
+                            id,
+                            kind,
+                            payload: inner,
+                            responder: incoming.responder,
+                        });
+                    }
+                    if let Some(win) = h.get_webview_window("main") {
+                        let _ = win.unminimize();
+                        let _ = win.show();
+                        let _ = win.set_focus();
+                        let _ = win.request_user_attention(Some(UserAttentionType::Critical));
+                    }
+                    let _ = h
+                        .notification()
+                        .builder()
+                        .title("Knock — 새 승인 요청")
+                        .body("대기 중인 요청이 있습니다")
+                        .show();
+                    let _ = h.emit("queue-changed", ());
+                });
+                // serve() only returns on bind failure (another daemon already runs).
+                if served.is_err() {
+                    std::process::exit(0);
+                }
+            });
+
+            // Tray with the Touch ID toggle (same as single-shot mode).
+            let info = MenuItemBuilder::with_id(
+                "info",
+                format!("Knock v{} (daemon)", env!("CARGO_PKG_VERSION")),
+            )
+            .enabled(false)
+            .build(app)?;
+            let sep = PredefinedMenuItem::separator(app)?;
+            let touch_toggle =
+                CheckMenuItemBuilder::with_id("touch_id", "Touch ID for critical gates")
+                    .checked(config_touch_id())
+                    .build(app)?;
+            let sep2 = PredefinedMenuItem::separator(app)?;
+            let quit = MenuItemBuilder::with_id("quit", "종료 (Quit daemon)").build(app)?;
+            let menu = MenuBuilder::new(app)
+                .items(&[&info, &sep, &touch_toggle, &sep2, &quit])
+                .build()?;
+            let toggle_handle = touch_toggle.clone();
+            if let Some(icon) = app.default_window_icon().cloned() {
+                let _ = TrayIconBuilder::with_id("knock")
+                    .icon(icon)
+                    .tooltip("Knock daemon")
+                    .menu(&menu)
+                    .show_menu_on_left_click(true)
+                    .on_menu_event(move |app, event| match event.id().as_ref() {
+                        "quit" => {
+                            ipc::cleanup();
+                            app.exit(0);
+                        }
+                        "touch_id" => {
+                            let next = !config_touch_id();
+                            let _ = set_config_touch_id(next);
+                            let _ = toggle_handle.set_checked(next);
+                        }
+                        _ => {}
+                    })
+                    .build(app)?;
+            }
+
+            Ok(())
+        })
+        .run(build_context())
+        .expect("error while running knock daemon");
+
+    ipc::cleanup();
+}
+
 fn launch(state: AppState) {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
@@ -386,12 +614,10 @@ fn launch(state: AppState) {
                     .enabled(false)
                     .build(app)?;
             let sep = PredefinedMenuItem::separator(app)?;
-            let touch_toggle = CheckMenuItemBuilder::with_id(
-                "touch_id",
-                "Touch ID for critical gates",
-            )
-            .checked(config_touch_id())
-            .build(app)?;
+            let touch_toggle =
+                CheckMenuItemBuilder::with_id("touch_id", "Touch ID for critical gates")
+                    .checked(config_touch_id())
+                    .build(app)?;
             let sep2 = PredefinedMenuItem::separator(app)?;
             let quit = MenuItemBuilder::with_id("quit", "닫기 (Quit)").build(app)?;
             let menu = MenuBuilder::new(app)
@@ -421,9 +647,49 @@ fn launch(state: AppState) {
 
             Ok(())
         })
-        .run(tauri::generate_context!())
+        .run(build_context())
         .expect("error while running knock");
 }
+
+/// Try to hand this request to the daemon (single-window queue). If the daemon
+/// answers, convert the decision to this invocation's stdout contract and exit.
+/// Returns normally only if the daemon is unreachable (caller falls back to launch).
+#[cfg(unix)]
+fn try_daemon(kind: &str, inner: Value, json: bool, hook: bool) {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let id = format!("{}-{}", std::process::id(), ts);
+    let req = serde_json::json!({
+        "id": id,
+        "kind": kind,
+        "json": json,
+        "hook": hook,
+        "payload": inner,
+    });
+    if let Some(resp) = ipc::client_request(&req) {
+        let decision = resp
+            .get("decision")
+            .and_then(|v| v.as_str())
+            .unwrap_or("dismissed");
+        let feedback = resp.get("feedback").and_then(|v| v.as_str());
+        if kind == "ask" {
+            match resp.get("answers") {
+                Some(ans) => print_and_exit(serde_json::json!({ "answers": ans }).to_string()),
+                None => print_and_exit(serde_json::json!({ "decision": "dismissed" }).to_string()),
+            }
+        }
+        if hook {
+            output_hook(decision, feedback);
+        }
+        output_annotate(decision, feedback, json);
+    }
+    // daemon unreachable → caller falls back to the single-shot window
+}
+
+#[cfg(not(unix))]
+fn try_daemon(_kind: &str, _inner: Value, _json: bool, _hook: bool) {}
 
 /// Hook mode: read a Claude Code PermissionRequest payload on stdin, show the plan,
 /// and emit an allow/deny decision. Never blocks if there's no plan to review.
@@ -448,9 +714,20 @@ fn run_hook() {
         std::process::exit(0);
     }
 
+    let html = render_md(plan);
+    let inner = serde_json::json!({
+        "mode": "annotate",
+        "html": html.clone(),
+        "title": "Plan 검토",
+        "gate": true,
+        "touchId": false,
+        "configTouchId": config_touch_id(),
+    });
+    try_daemon("annotate", inner, false, true);
+
     launch(AppState {
         mode: Mode::Annotate {
-            html: render_md(plan),
+            html,
             title: "Plan 검토".to_string(),
             gate: true,
         },
@@ -467,10 +744,16 @@ pub fn run() {
         run_hook();
         return;
     }
+    // Hidden entry: the long-lived single-window daemon (spawned by clients).
+    #[cfg(unix)]
+    if argv.get(1).map(|s| s.as_str()) == Some("__daemon") {
+        run_daemon();
+        return;
+    }
 
     let cli = Cli::parse();
 
-    let (mode, json, touch_id) = match cli.command {
+    match cli.command {
         Command::Annotate {
             file,
             gate,
@@ -487,15 +770,22 @@ pub fn run() {
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_else(|| "Knock".to_string())
             });
-            (
-                Mode::Annotate {
-                    html: render_md(&md),
-                    title,
-                    gate,
-                },
+            let html = render_md(&md);
+            let inner = serde_json::json!({
+                "mode": "annotate",
+                "html": html.clone(),
+                "title": title.clone(),
+                "gate": gate,
+                "touchId": touch_id,
+                "configTouchId": config_touch_id(),
+            });
+            try_daemon("annotate", inner, json, false);
+            launch(AppState {
+                mode: Mode::Annotate { html, title, gate },
                 json,
+                hook: false,
                 touch_id,
-            )
+            });
         }
         Command::Ask { file, title } => {
             let raw = std::fs::read_to_string(&file).unwrap_or_else(|e| {
@@ -516,17 +806,27 @@ pub fn run() {
                         .map(|s| s.to_string())
                 })
                 .unwrap_or_else(|| "확인 필요".to_string());
-            (Mode::Ask { questions, title }, true, false)
+            let inner = serde_json::json!({
+                "mode": "ask",
+                "questions": questions.clone(),
+                "title": title.clone(),
+            });
+            try_daemon("ask", inner, true, false);
+            launch(AppState {
+                mode: Mode::Ask { questions, title },
+                json: true,
+                hook: false,
+                touch_id: false,
+            });
         }
-        Command::Settings => (Mode::Settings, false, false),
-    };
-
-    launch(AppState {
-        mode,
-        json,
-        hook: false,
-        touch_id,
-    });
+        // Settings is always a single-shot window (never queued through the daemon).
+        Command::Settings => launch(AppState {
+            mode: Mode::Settings,
+            json: false,
+            hook: false,
+            touch_id: false,
+        }),
+    }
 }
 
 #[cfg(test)]
