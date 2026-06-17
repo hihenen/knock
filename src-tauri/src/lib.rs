@@ -235,6 +235,7 @@ fn get_payload(state: tauri::State<AppState>) -> Value {
             "title": title,
             "gate": gate,
             "touchId": state.touch_id,
+            "configTouchId": config_touch_id(),
         }),
         Mode::Ask { questions, title } => serde_json::json!({
             "mode": "ask",
@@ -720,6 +721,7 @@ fn run_hook() {
         "title": "Plan 검토",
         "gate": true,
         "touchId": false,
+        "configTouchId": config_touch_id(),
     });
     try_daemon("annotate", inner, false, true);
 
@@ -775,6 +777,7 @@ pub fn run() {
                 "title": title.clone(),
                 "gate": gate,
                 "touchId": touch_id,
+                "configTouchId": config_touch_id(),
             });
             try_daemon("annotate", inner, json, false);
             launch(AppState {

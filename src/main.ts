@@ -7,6 +7,7 @@ interface AnnotatePayload {
   title: string;
   gate: boolean;
   touchId?: boolean;
+  configTouchId?: boolean;
 }
 interface AskOption {
   label: string;
@@ -96,13 +97,28 @@ function setupAnnotate(p: AnnotatePayload) {
 
   if (!p.gate) optApprove.classList.add("hidden");
 
-  if (p.touchId) {
-    const label = optApprove.querySelector(".ask-opt-label");
-    if (label) label.textContent = "🔒 Touch ID 승인";
+  // Header Touch ID toggle — reflects the saved config and also applies to this
+  // approval. Flipping it persists to config (next critical gates) immediately.
+  const tdWrap = $("td-toggle-wrap");
+  const tdToggle = $<HTMLInputElement>("td-toggle");
+  const approveLabel = optApprove.querySelector(".ask-opt-label");
+  const reflectLabel = () => {
+    if (approveLabel)
+      approveLabel.textContent = tdToggle.checked ? "🔒 Touch ID 승인" : "✓ 승인";
+  };
+  if (p.gate) {
+    tdWrap.classList.remove("hidden");
+    tdToggle.checked = p.configTouchId ?? p.touchId ?? false;
+    reflectLabel();
+    tdToggle.addEventListener("change", () => {
+      invoke("save_touch_id", { enabled: tdToggle.checked });
+      reflectLabel();
+    });
   }
-  // Approve, optionally gated behind Touch ID / Windows Hello.
+
+  // Approve, optionally gated behind Touch ID / Windows Hello (per the toggle).
   const approve = async () => {
-    if (p.touchId) {
+    if (tdToggle.checked) {
       const ok = await invoke<boolean>("touch_id_approve");
       if (!ok) return; // auth cancelled/failed → keep window open
     }
