@@ -23,6 +23,8 @@ interface AskPayload {
   mode: "ask";
   title: string;
   questions: { questions?: AskQuestion[] };
+  contextHtml?: string | null;
+  configTouchId?: boolean;
 }
 interface SettingsPayload {
   mode: "settings";
@@ -262,9 +264,27 @@ interface QState {
 function setupAsk(p: AskPayload) {
   const badgeEl = $("badge");
   $("title").textContent = p.title;
+
   const root = $("ask-root");
   root.classList.remove("hidden");
   $("ask-footer").classList.remove("hidden");
+
+  // Header Touch ID toggle — same config as annotate; gates the final submit.
+  const tdWrap = $("td-toggle-wrap");
+  const tdToggle = $<HTMLInputElement>("td-toggle");
+  tdWrap.classList.remove("hidden");
+  tdToggle.checked = p.configTouchId ?? false;
+  tdToggle.addEventListener("change", () => {
+    invoke("save_touch_id", { enabled: tdToggle.checked });
+  });
+
+  // Optional background/context markdown, rendered at the top of the same
+  // scroll area as the questions (so long context + options scroll together).
+  if (p.contextHtml) {
+    const ctx = el("div", "ask-context markdown");
+    ctx.innerHTML = p.contextHtml;
+    root.appendChild(ctx);
+  }
 
   const prevBtn = $<HTMLButtonElement>("ask-prev");
   const nextBtn = $<HTMLButtonElement>("ask-next");
@@ -438,10 +458,14 @@ function setupAsk(p: AskPayload) {
   };
   const goPrev = () => showStep(step - 1);
 
-  const doSubmit = () => {
+  const doSubmit = async () => {
     if (!allAnswered()) {
       showStep(N);
       return;
+    }
+    if (tdToggle.checked) {
+      const ok = await invoke<boolean>("touch_id_approve");
+      if (!ok) return; // auth cancelled/failed → keep window open
     }
     const answers: Record<string, string | string[]> = {};
     qs.forEach((q, qi) => {
@@ -641,7 +665,15 @@ async function renderDaemon() {
   }
   if (!q || q.mode !== "queue") return;
   if (q.items.length === 1) {
-    openDetail(q.items[0]);
+    try {
+      openDetail(q.items[0]);
+    } catch (e) {
+      // Safety net: never leave a blank window — surface the error.
+      console.error(e);
+      const c = $("content");
+      c.classList.remove("hidden");
+      c.textContent = "표시 중 오류가 발생했습니다. knock 을 다시 실행해 주세요.";
+    }
     return;
   }
   renderList(q.items);

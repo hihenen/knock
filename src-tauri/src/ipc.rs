@@ -141,10 +141,21 @@ pub fn serve<F>(on_request: F) -> std::io::Result<()>
 where
     F: Fn(Incoming) + Send + 'static,
 {
-    let listener = ListenerOptions::new()
-        .name(pipe_name()?)
-        .try_overwrite(true) // replace a stale Unix socket file automatically
-        .create_sync()?;
+    // Single-daemon guarantee: if a *live* daemon already answers, step aside.
+    // (try_overwrite must NOT be used — it would steal a running daemon's socket.)
+    if connect().is_some() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AddrInUse,
+            "knock daemon already running",
+        ));
+    }
+    // No live daemon, but a stale socket file may remain from a crash — clear it.
+    #[cfg(unix)]
+    {
+        let _ = std::fs::remove_file(unix_sock_path());
+    }
+
+    let listener = ListenerOptions::new().name(pipe_name()?).create_sync()?;
 
     for conn in listener.incoming() {
         let mut stream = match conn {

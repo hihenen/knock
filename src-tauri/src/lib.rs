@@ -134,6 +134,18 @@ fn render_md(md: &str) -> String {
     out
 }
 
+/// Render the optional `context` markdown (background for an ask) to HTML.
+/// Returns null when absent/empty so the frontend can skip the context panel.
+fn ask_context_html(questions: &Value) -> Value {
+    questions
+        .get("context")
+        .and_then(|c| c.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| Value::String(render_md(s)))
+        .unwrap_or(Value::Null)
+}
+
 fn print_and_exit(line: String) -> ! {
     let stdout = std::io::stdout();
     let mut lock = stdout.lock();
@@ -256,6 +268,8 @@ fn get_payload(state: tauri::State<AppState>) -> Value {
             "mode": "ask",
             "questions": questions,
             "title": title,
+            "contextHtml": ask_context_html(questions),
+            "configTouchId": config_touch_id(),
         }),
         Mode::Settings => serde_json::json!({
             "mode": "settings",
@@ -1014,6 +1028,8 @@ pub fn run() {
                 "mode": "ask",
                 "questions": questions.clone(),
                 "title": title.clone(),
+                "contextHtml": ask_context_html(&questions),
+                "configTouchId": config_touch_id(),
             });
             try_daemon("ask", inner, true, false);
             launch(AppState {

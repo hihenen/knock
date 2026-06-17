@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Knock",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "identifier": "io.github.hihenen.knock",
   "build": {
     "beforeDevCommand": "bun run dev",
@@ -15,10 +15,10 @@
       {
         "label": "main",
         "title": "Knock",
-        "width": 960,
-        "height": 840,
-        "minWidth": 560,
-        "minHeight": 480,
+        "width": 1120,
+        "height": 980,
+        "minWidth": 640,
+        "minHeight": 540,
         "center": true,
         "focus": true,
         "alwaysOnTop": true,

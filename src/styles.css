@@ -67,7 +67,7 @@ body {
 /* ---- Markdown body ---- */
 .markdown {
   flex: 1 1 auto;
-  overflow-y: auto;
+  overflow-y: scroll;
   padding: 20px 24px;
 }
 
@@ -271,8 +271,46 @@ body {
 /* ---- Ask mode ---- */
 .ask {
   flex: 1 1 auto;
-  overflow-y: auto;
+  overflow-y: scroll;
   padding: 18px 24px;
+}
+
+/* context markdown rendered above the questions, separated by a divider.
+   Keep .markdown typography but neutralize its flex/scroll layout — the
+   parent .ask is the single scroll container. */
+.ask-context {
+  flex: none;
+  overflow: visible;
+  padding: 0 0 20px;
+  margin-bottom: 20px;
+  border-bottom: 3px solid #b8bcc6;
+}
+
+/* Always-visible, styled scrollbars (macOS overlay scrollbars otherwise hide
+   until you scroll — long markdown should advertise that it scrolls). */
+.markdown,
+.ask {
+  scrollbar-gutter: stable;
+}
+.markdown::-webkit-scrollbar,
+.ask::-webkit-scrollbar {
+  width: 12px;
+}
+.markdown::-webkit-scrollbar-track,
+.ask::-webkit-scrollbar-track {
+  background: transparent;
+}
+.markdown::-webkit-scrollbar-thumb,
+.ask::-webkit-scrollbar-thumb {
+  background: #b8bcc6;
+  border-radius: 6px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+.markdown::-webkit-scrollbar-thumb:hover,
+.ask::-webkit-scrollbar-thumb:hover {
+  background: #9aa0ac;
+  background-clip: content-box;
 }
 .ask-q {
   margin-bottom: 22px;

@@ -2,6 +2,21 @@
 
 All notable changes to knock are documented here. Versions follow [SemVer](https://semver.org).
 
+## [0.4.1] - 2026-06-18
+
+### Added
+- **ask 모드 맥락(context) 본문** — ask JSON 에 `context` (markdown) 필드를 넣으면
+  질문 위에 배경/비교표/결론이 렌더된다. 결정 근거를 창 안에서 바로 볼 수 있다.
+- **ask 모드 Touch ID 토글** — 승인 창과 동일하게 ask 헤더에도 🔒 토글. 켜면
+  제출에 생체 인증을 건다.
+- 창 크기 확대(1120×980) + 본문 스크롤바 상시 표시(긴 markdown 대비). context 와
+  질문이 하나의 스크롤 영역에서 함께 스크롤된다.
+
+### Fixed
+- **데몬 중복 버그** — `interprocess` 의 `try_overwrite(true)` 가 *살아있는*
+  데몬의 소켓까지 덮어써 여러 세션에서 데몬이 중복으로 뜨던 문제. 살아있는
+  데몬이 있으면 새 데몬이 양보하도록 단일 데몬을 보장한다.
+
 ## [0.4.0] - 2026-06-17
 
 ### Added
