@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 interface AnnotatePayload {
   mode: "annotate";
@@ -28,6 +29,33 @@ interface SettingsPayload {
 }
 type Payload = AnnotatePayload | AskPayload | SettingsPayload;
 
+interface QueueItem {
+  id: string;
+  kind: "annotate" | "ask";
+  title: string;
+  payload: AnnotatePayload | AskPayload;
+}
+interface QueuePayload {
+  mode: "queue";
+  items: QueueItem[];
+  touchId: boolean;
+}
+
+// Where a finished decision goes. Default = single-shot (process exits on submit).
+// In daemon mode this is swapped for one that resolves a specific queued request
+// and reloads the page to show the next item / the list.
+type Sink = {
+  annotate: (decision: string, feedback?: string) => void;
+  ask: (answers: Record<string, string | string[]>) => void;
+  dismiss: () => void;
+};
+let sink: Sink = {
+  annotate: (decision, feedback) =>
+    invoke("submit", { decision, feedback: feedback ?? null }),
+  ask: (answers) => invoke("submit_answers", { answers }),
+  dismiss: () => invoke("dismiss"),
+};
+
 const $ = <T extends HTMLElement>(id: string) =>
   document.getElementById(id) as T;
 const el = (tag: string, cls?: string, text?: string) => {
@@ -51,7 +79,7 @@ function sendDecision(
   decision: "approved" | "annotated" | "dismissed",
   feedback?: string,
 ) {
-  once(() => invoke("submit", { decision, feedback: feedback ?? null }));
+  once(() => sink.annotate(decision, feedback));
 }
 
 function setupAnnotate(p: AnnotatePayload) {
@@ -375,14 +403,14 @@ function setupAsk(p: AskPayload) {
       const vals = labelsFor(qi);
       answers[keyFor(q, qi)] = q.multiSelect ? vals : vals[0] ?? "";
     });
-    once(() => invoke("submit_answers", { answers }));
+    once(() => sink.ask(answers));
   };
 
   prevBtn.addEventListener("click", goPrev);
   nextBtn.addEventListener("click", goNext);
   submitBtn.addEventListener("click", doSubmit);
   $("ask-dismiss").addEventListener("click", () =>
-    once(() => invoke("dismiss")),
+    once(() => sink.dismiss()),
   );
 
   root.addEventListener("focusin", (e) => {
@@ -405,7 +433,7 @@ function setupAsk(p: AskPayload) {
     }
     if (e.key === "Escape") {
       e.preventDefault();
-      once(() => invoke("dismiss"));
+      once(() => sink.dismiss());
       return;
     }
 
@@ -491,7 +519,91 @@ function setupSettings(p: SettingsPayload) {
   });
 }
 
+// =====================================================================
+// daemon mode — one window, a queue of requests from many sessions
+// =====================================================================
+function daemonSink(id: string): Sink {
+  const resolve = (
+    decision: string,
+    feedback: string | null,
+    answers: Record<string, string | string[]> | null,
+  ) => {
+    invoke("daemon_resolve", { id, decision, feedback, answers });
+    // Let the IPC reply flush, then reload to show the next item / the list.
+    setTimeout(() => location.reload(), 60);
+  };
+  return {
+    annotate: (d, f) => resolve(d, f ?? null, null),
+    ask: (a) => resolve("answered", null, a),
+    dismiss: () => resolve("dismissed", null, null),
+  };
+}
+
+function openDetail(item: QueueItem) {
+  sink = daemonSink(item.id);
+  if (item.kind === "ask") setupAsk(item.payload as AskPayload);
+  else setupAnnotate(item.payload as AnnotatePayload);
+}
+
+function setupDaemon(q: QueuePayload) {
+  // Single pending request → open it directly (a one-item list is pointless).
+  if (q.items.length === 1) {
+    openDetail(q.items[0]);
+    return;
+  }
+
+  $("badge").textContent =
+    q.items.length === 0 ? "대기 없음" : `대기 ${q.items.length}건`;
+  $("title").textContent = "승인 대기 목록";
+  const content = $("content");
+  content.classList.remove("hidden");
+  content.innerHTML = "";
+
+  if (q.items.length === 0) {
+    const p = el("p", "queue-empty", "대기 중인 요청이 없습니다.");
+    content.appendChild(p);
+  } else {
+    const list = el("div", "queue-list");
+    q.items.forEach((item) => {
+      const card = el("div", "queue-card");
+      card.tabIndex = 0;
+      const kind = el(
+        "span",
+        "queue-kind",
+        item.kind === "ask" ? "질문" : "승인",
+      );
+      const title = el("span", "queue-title", item.title);
+      card.appendChild(kind);
+      card.appendChild(title);
+      const open = () => openDetail(item);
+      card.addEventListener("click", open);
+      card.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          open();
+        }
+      });
+      list.appendChild(card);
+    });
+    content.appendChild(list);
+  }
+
+  // While on the list, refresh when the queue changes (new request / resolved).
+  listen("queue-changed", () => location.reload());
+}
+
 async function init() {
+  // Daemon first: if a queue command answers, we're the single-window daemon.
+  try {
+    const q = await invoke<QueuePayload>("daemon_queue");
+    if (q && q.mode === "queue") {
+      setupDaemon(q);
+      return;
+    }
+  } catch {
+    /* not the daemon → legacy single-shot window */
+  }
+
   let payload: Payload;
   try {
     payload = await invoke<Payload>("get_payload");

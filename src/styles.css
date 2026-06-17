@@ -419,3 +419,23 @@ body {
     --warn-hover: #e0a23a;
   }
 }
+
+/* ── daemon queue list ─────────────────────────────────────────── */
+.queue-list { display: flex; flex-direction: column; gap: 8px; padding: 4px 0; }
+.queue-card {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 14px; border: 1px solid var(--border, #e3e3e6);
+  border-radius: 10px; cursor: pointer; background: var(--card, #fff);
+  transition: border-color .12s, background .12s;
+}
+.queue-card:hover, .queue-card:focus {
+  border-color: var(--accent, #3b82f6);
+  background: var(--card-hover, #f5f8ff); outline: none;
+}
+.queue-kind {
+  flex: none; font-size: 12px; font-weight: 600;
+  padding: 2px 8px; border-radius: 999px;
+  background: var(--chip, #eef1f6); color: var(--chip-fg, #4b5563);
+}
+.queue-title { font-size: 14px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.queue-empty { color: var(--muted, #9aa0a6); font-size: 14px; padding: 8px 2px; }
