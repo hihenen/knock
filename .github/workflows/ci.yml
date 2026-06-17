@@ -34,3 +34,21 @@ jobs:
 
       - name: tsc
         run: bunx tsc --noEmit
+
+  windows-check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install JS deps
+        run: bun install
+
+      - name: Build frontend (needed by tauri generate_context!)
+        run: bun run build
+
+      - name: cargo check (windows)
+        run: cargo check --manifest-path src-tauri/Cargo.toml
