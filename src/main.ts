@@ -73,6 +73,35 @@ function once(fn: () => void) {
   fn();
 }
 
+// In the daemon's reused window we re-render in place, so the window-level
+// keydown handler must be swapped (not stacked) on each view.
+let activeKey: ((e: KeyboardEvent) => void) | null = null;
+function setKey(h: ((e: KeyboardEvent) => void) | null) {
+  if (activeKey) window.removeEventListener("keydown", activeKey);
+  activeKey = h;
+  if (h) window.addEventListener("keydown", h);
+}
+
+// Hide every mode section + footer and reset per-view state before rendering
+// the next one (daemon window is reused across requests).
+function resetView() {
+  for (const id of [
+    "content",
+    "ask-root",
+    "settings-root",
+    "annotate-footer",
+    "ask-footer",
+    "settings-footer",
+  ]) {
+    document.getElementById(id)?.classList.add("hidden");
+  }
+  document.getElementById("td-toggle-wrap")?.classList.add("hidden");
+  const ar = document.getElementById("ask-root");
+  if (ar) ar.innerHTML = "";
+  submitted = false;
+  setKey(null);
+}
+
 // =====================================================================
 // annotate mode
 // =====================================================================
@@ -180,7 +209,7 @@ function setupAnnotate(p: AnnotatePayload) {
     else sendDecision("dismissed");
   };
 
-  window.addEventListener("keydown", (e) => {
+  setKey((e) => {
     const inText = document.activeElement === feedback;
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
       e.preventDefault();
@@ -435,7 +464,7 @@ function setupAsk(p: AskPayload) {
   });
 
   // --- keyboard ---
-  window.addEventListener("keydown", (e) => {
+  setKey((e) => {
     const tgt = e.target as HTMLElement | null;
     const inText =
       !!tgt &&
@@ -527,7 +556,7 @@ function setupSettings(p: SettingsPayload) {
 
   const close = () => once(() => invoke("dismiss"));
   $("settings-close").addEventListener("click", close);
-  window.addEventListener("keydown", (e) => {
+  setKey((e) => {
     if (e.key === "Escape" || ((e.metaKey || e.ctrlKey) && e.key === "Enter")) {
       e.preventDefault();
       close();
@@ -538,6 +567,9 @@ function setupSettings(p: SettingsPayload) {
 // =====================================================================
 // daemon mode — one window, a queue of requests from many sessions
 // =====================================================================
+// True while a detail (annotate/ask) is open, so re-renders don't wipe input.
+let daemonBusy = false;
+
 function daemonSink(id: string): Sink {
   const resolve = (
     decision: string,
@@ -545,8 +577,10 @@ function daemonSink(id: string): Sink {
     answers: Record<string, string | string[]> | null,
   ) => {
     invoke("daemon_resolve", { id, decision, feedback, answers });
-    // Let the IPC reply flush, then reload to show the next item / the list.
-    setTimeout(() => location.reload(), 60);
+    daemonBusy = false;
+    submitted = false;
+    // Re-render in place (no page reload) to show the next item / the list.
+    setTimeout(() => void renderDaemon(), 80);
   };
   return {
     annotate: (d, f) => resolve(d, f ?? null, null),
@@ -556,56 +590,61 @@ function daemonSink(id: string): Sink {
 }
 
 function openDetail(item: QueueItem) {
+  daemonBusy = true;
+  resetView();
   sink = daemonSink(item.id);
   if (item.kind === "ask") setupAsk(item.payload as AskPayload);
   else setupAnnotate(item.payload as AnnotatePayload);
 }
 
-function setupDaemon(q: QueuePayload) {
-  // Single pending request → open it directly (a one-item list is pointless).
-  if (q.items.length === 1) {
-    openDetail(q.items[0]);
-    return;
-  }
-
+function renderList(items: QueueItem[]) {
+  resetView();
   $("badge").textContent =
-    q.items.length === 0 ? "대기 없음" : `대기 ${q.items.length}건`;
+    items.length === 0 ? "대기 없음" : `대기 ${items.length}건`;
   $("title").textContent = "승인 대기 목록";
   const content = $("content");
   content.classList.remove("hidden");
   content.innerHTML = "";
 
-  if (q.items.length === 0) {
-    const p = el("p", "queue-empty", "대기 중인 요청이 없습니다.");
-    content.appendChild(p);
-  } else {
-    const list = el("div", "queue-list");
-    q.items.forEach((item) => {
-      const card = el("div", "queue-card");
-      card.tabIndex = 0;
-      const kind = el(
-        "span",
-        "queue-kind",
-        item.kind === "ask" ? "질문" : "승인",
-      );
-      const title = el("span", "queue-title", item.title);
-      card.appendChild(kind);
-      card.appendChild(title);
-      const open = () => openDetail(item);
-      card.addEventListener("click", open);
-      card.addEventListener("keydown", (e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          open();
-        }
-      });
-      list.appendChild(card);
-    });
-    content.appendChild(list);
+  if (items.length === 0) {
+    content.appendChild(el("p", "queue-empty", "대기 중인 요청이 없습니다."));
+    return;
   }
+  const list = el("div", "queue-list");
+  items.forEach((item) => {
+    const card = el("div", "queue-card");
+    card.tabIndex = 0;
+    card.appendChild(el("span", "queue-kind", item.kind === "ask" ? "질문" : "승인"));
+    card.appendChild(el("span", "queue-title", item.title));
+    const open = () => openDetail(item);
+    card.addEventListener("click", open);
+    card.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        open();
+      }
+    });
+    list.appendChild(card);
+  });
+  content.appendChild(list);
+}
 
-  // While on the list, refresh when the queue changes (new request / resolved).
-  listen("queue-changed", () => location.reload());
+// Pull the current queue and render in place. Skipped while a detail is open
+// so it doesn't blow away what the user is typing.
+async function renderDaemon() {
+  if (daemonBusy) return;
+  let q: QueuePayload;
+  try {
+    q = await invoke<QueuePayload>("daemon_queue");
+  } catch {
+    return;
+  }
+  if (!q || q.mode !== "queue") return;
+  if (q.items.length === 1) {
+    openDetail(q.items[0]);
+    return;
+  }
+  renderList(q.items);
 }
 
 async function init() {
@@ -613,7 +652,10 @@ async function init() {
   try {
     const q = await invoke<QueuePayload>("daemon_queue");
     if (q && q.mode === "queue") {
-      setupDaemon(q);
+      await renderDaemon();
+      // Event-driven refresh + a slow poll as a backstop for missed events.
+      listen("queue-changed", () => void renderDaemon());
+      setInterval(() => void renderDaemon(), 2000);
       return;
     }
   } catch {

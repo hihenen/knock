@@ -2,6 +2,22 @@
 
 All notable changes to knock are documented here. Versions follow [SemVer](https://semver.org).
 
+## [0.3.0] - 2026-06-17
+
+### Added
+- **대기 건수 뱃지** — 데몬 큐의 대기 요청 수를 macOS Dock 아이콘 빨간 뱃지와
+  menubar 트레이 아이콘 옆 숫자로 표시한다. 새 요청이 오면 Dock 아이콘이
+  통통 튀어(bounce) 주의를 환기한다.
+- **LaunchAgent 상주** — `knock daemon install` / `uninstall` / `status` 로
+  데몬을 로그인 시 자동 실행되게 등록한다. 등록하면 menubar 트레이가 항상
+  떠 있고 첫 호출의 spawn 지연이 사라진다. (macOS 전용)
+
+### Fixed
+- LaunchAgent 로 미리 떠 있던 데몬(대기 0건 상태)에 요청이 들어올 때 창이
+  빈 화면으로 남던 문제. `location.reload()` 의존을 제거하고 in-place 재렌더 +
+  `queue-changed` 이벤트 + 폴링 백업으로 견고하게 바꿨다. 상세를 보는 중에는
+  재렌더를 건너뛰어 입력이 날아가지 않는다.
+
 ## [0.2.0] - 2026-06-17
 
 ### Added

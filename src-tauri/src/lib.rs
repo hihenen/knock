@@ -63,6 +63,21 @@ enum Command {
     },
     /// Open the settings window (toggle Touch ID requirement, etc.).
     Settings,
+    /// Manage the background queue daemon (macOS LaunchAgent).
+    Daemon {
+        #[command(subcommand)]
+        action: DaemonAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum DaemonAction {
+    /// Install a LaunchAgent so the daemon runs at login (menubar tray always present).
+    Install,
+    /// Remove the LaunchAgent and stop the daemon.
+    Uninstall,
+    /// Show whether the LaunchAgent is installed.
+    Status,
 }
 
 fn config_path() -> PathBuf {
@@ -382,7 +397,17 @@ fn daemon_queue(state: tauri::State<DaemonState>) -> Value {
     serde_json::json!({ "mode": "queue", "items": items, "touchId": config_touch_id() })
 }
 
-/// Resolve one queued request: reply to its client and drop it from the queue.
+/// Reflect the pending count on the Dock icon badge and the menubar tray title.
+#[cfg(unix)]
+fn update_badge(app: &tauri::AppHandle, n: usize) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.set_badge_count(if n > 0 { Some(n as i64) } else { None });
+    }
+    if let Some(tray) = app.tray_by_id("knock") {
+        let _ = tray.set_title(if n > 0 { Some(n.to_string()) } else { None });
+    }
+}
+
 #[cfg(unix)]
 #[tauri::command]
 fn daemon_resolve(
@@ -407,9 +432,10 @@ fn daemon_resolve(
         }
         entry.responder.reply(&resp);
     }
-    let empty = state.queue.lock().unwrap().is_empty();
+    let len = state.queue.lock().unwrap().len();
     let _ = app.emit("queue-changed", ());
-    if empty {
+    update_badge(&app, len);
+    if len == 0 {
         if let Some(win) = app.get_webview_window("main") {
             let _ = win.hide();
         }
@@ -481,7 +507,7 @@ fn run_daemon() {
                         .get("payload")
                         .cloned()
                         .unwrap_or_else(|| serde_json::json!({}));
-                    {
+                    let len = {
                         let mut qq = q.lock().unwrap();
                         qq.push(QueueEntry {
                             id,
@@ -489,20 +515,23 @@ fn run_daemon() {
                             payload: inner,
                             responder: incoming.responder,
                         });
-                    }
+                        qq.len()
+                    };
                     if let Some(win) = h.get_webview_window("main") {
                         let _ = win.unminimize();
                         let _ = win.show();
                         let _ = win.set_focus();
+                        // macOS: bounces the Dock icon + flags the menubar.
                         let _ = win.request_user_attention(Some(UserAttentionType::Critical));
                     }
                     let _ = h
                         .notification()
                         .builder()
                         .title("Knock — 새 승인 요청")
-                        .body("대기 중인 요청이 있습니다")
+                        .body(format!("대기 중인 요청 {}건", len))
                         .show();
                     let _ = h.emit("queue-changed", ());
+                    update_badge(&h, len);
                 });
                 // serve() only returns on bind failure (another daemon already runs).
                 if served.is_err() {
@@ -691,6 +720,130 @@ fn try_daemon(kind: &str, inner: Value, json: bool, hook: bool) {
 #[cfg(not(unix))]
 fn try_daemon(_kind: &str, _inner: Value, _json: bool, _hook: bool) {}
 
+// ---------------------------------------------------------------------------
+// LaunchAgent management (macOS): keep the daemon resident across logins.
+// ---------------------------------------------------------------------------
+#[cfg(target_os = "macos")]
+const LAUNCH_AGENT_LABEL: &str = "com.hihenen.knock";
+
+#[cfg(target_os = "macos")]
+fn launch_agent_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_default();
+    PathBuf::from(home).join(format!("Library/LaunchAgents/{}.plist", LAUNCH_AGENT_LABEL))
+}
+
+#[cfg(target_os = "macos")]
+fn daemon_install() {
+    let exe = match std::env::current_exe() {
+        Ok(p) => p.to_string_lossy().to_string(),
+        Err(e) => {
+            eprintln!("knock: cannot resolve own path: {}", e);
+            std::process::exit(2);
+        }
+    };
+    let plist = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{label}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{exe}</string>
+        <string>__daemon</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>LimitLoadToSessionType</key>
+    <string>Aqua</string>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+</dict>
+</plist>
+"#,
+        label = LAUNCH_AGENT_LABEL,
+        exe = exe,
+    );
+    let path = launch_agent_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(&path, plist) {
+        eprintln!("knock: cannot write {}: {}", path.display(), e);
+        std::process::exit(2);
+    }
+    // Reload (bootout then bootstrap) so changes take effect immediately.
+    let uid = format!("gui/{}", users_uid());
+    let _ = std::process::Command::new("launchctl")
+        .args(["bootout", &uid, &path.to_string_lossy()])
+        .output();
+    let status = std::process::Command::new("launchctl")
+        .args(["bootstrap", &uid, &path.to_string_lossy()])
+        .output();
+    match status {
+        Ok(o) if o.status.success() => {
+            println!("knock daemon 설치됨: {}", path.display());
+            println!("로그인 시 자동 실행되고 menubar 트레이가 상주합니다.");
+        }
+        _ => {
+            // bootstrap can fail if already loaded; fall back to legacy load.
+            let _ = std::process::Command::new("launchctl")
+                .args(["load", "-w", &path.to_string_lossy()])
+                .output();
+            println!("knock daemon 설치됨: {}", path.display());
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn daemon_uninstall() {
+    let path = launch_agent_path();
+    let uid = format!("gui/{}", users_uid());
+    let _ = std::process::Command::new("launchctl")
+        .args(["bootout", &uid, &path.to_string_lossy()])
+        .output();
+    let _ = std::process::Command::new("launchctl")
+        .args(["unload", "-w", &path.to_string_lossy()])
+        .output();
+    let _ = std::fs::remove_file(&path);
+    ipc::cleanup();
+    println!("knock daemon 제거됨. 이후 호출 시 필요할 때만 임시로 실행됩니다.");
+}
+
+#[cfg(target_os = "macos")]
+fn daemon_status() {
+    let path = launch_agent_path();
+    if path.exists() {
+        println!("설치됨: {}", path.display());
+    } else {
+        println!("미설치 (필요 시 임시 데몬으로 동작). 'knock daemon install' 로 상주 등록.");
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn users_uid() -> u32 {
+    extern "C" {
+        fn getuid() -> u32;
+    }
+    unsafe { getuid() }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn daemon_install() {
+    eprintln!("knock daemon install 은 macOS 전용입니다.");
+}
+#[cfg(not(target_os = "macos"))]
+fn daemon_uninstall() {
+    eprintln!("knock daemon uninstall 은 macOS 전용입니다.");
+}
+#[cfg(not(target_os = "macos"))]
+fn daemon_status() {
+    eprintln!("knock daemon 은 macOS 전용입니다.");
+}
+
 /// Hook mode: read a Claude Code PermissionRequest payload on stdin, show the plan,
 /// and emit an allow/deny decision. Never blocks if there's no plan to review.
 fn run_hook() {
@@ -826,6 +979,11 @@ pub fn run() {
             hook: false,
             touch_id: false,
         }),
+        Command::Daemon { action } => match action {
+            DaemonAction::Install => daemon_install(),
+            DaemonAction::Uninstall => daemon_uninstall(),
+            DaemonAction::Status => daemon_status(),
+        },
     }
 }
 
