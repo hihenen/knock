@@ -359,7 +359,6 @@ fn dismiss(state: tauri::State<AppState>) {
 // Daemon mode: one window, a queue of requests from many client invocations.
 // ---------------------------------------------------------------------------
 
-#[cfg(unix)]
 struct QueueEntry {
     id: String,
     kind: String,
@@ -367,13 +366,11 @@ struct QueueEntry {
     responder: ipc::Responder,
 }
 
-#[cfg(unix)]
 struct DaemonState {
     queue: Arc<Mutex<Vec<QueueEntry>>>,
 }
 
 /// The pending queue, shaped for the frontend list (no responders).
-#[cfg(unix)]
 #[tauri::command]
 fn daemon_queue(state: tauri::State<DaemonState>) -> Value {
     let q = state.queue.lock().unwrap();
@@ -397,8 +394,9 @@ fn daemon_queue(state: tauri::State<DaemonState>) -> Value {
     serde_json::json!({ "mode": "queue", "items": items, "touchId": config_touch_id() })
 }
 
-/// Reflect the pending count on the Dock icon badge and the menubar tray title.
-#[cfg(unix)]
+/// Reflect the pending count on the icon badge (macOS Dock / Linux) and the
+/// menubar tray title. On Windows the badge call is a no-op; the tray + window
+/// flash still signal new requests.
 fn update_badge(app: &tauri::AppHandle, n: usize) {
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.set_badge_count(if n > 0 { Some(n as i64) } else { None });
@@ -408,7 +406,6 @@ fn update_badge(app: &tauri::AppHandle, n: usize) {
     }
 }
 
-#[cfg(unix)]
 #[tauri::command]
 fn daemon_resolve(
     app: tauri::AppHandle,
@@ -442,7 +439,6 @@ fn daemon_resolve(
     }
 }
 
-#[cfg(unix)]
 fn run_daemon() {
     let queue: Arc<Mutex<Vec<QueueEntry>>> = Arc::new(Mutex::new(Vec::new()));
 
@@ -683,7 +679,6 @@ fn launch(state: AppState) {
 /// Try to hand this request to the daemon (single-window queue). If the daemon
 /// answers, convert the decision to this invocation's stdout contract and exit.
 /// Returns normally only if the daemon is unreachable (caller falls back to launch).
-#[cfg(unix)]
 fn try_daemon(kind: &str, inner: Value, json: bool, hook: bool) {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -716,9 +711,6 @@ fn try_daemon(kind: &str, inner: Value, json: bool, hook: bool) {
     }
     // daemon unreachable → caller falls back to the single-shot window
 }
-
-#[cfg(not(unix))]
-fn try_daemon(_kind: &str, _inner: Value, _json: bool, _hook: bool) {}
 
 // ---------------------------------------------------------------------------
 // LaunchAgent management (macOS): keep the daemon resident across logins.
@@ -831,17 +823,77 @@ fn users_uid() -> u32 {
     unsafe { getuid() }
 }
 
-#[cfg(not(target_os = "macos"))]
+// Windows: register the daemon under the per-user Run key so it starts at login.
+#[cfg(windows)]
+const WIN_RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+#[cfg(windows)]
+const WIN_RUN_VALUE: &str = "knock";
+
+#[cfg(windows)]
 fn daemon_install() {
-    eprintln!("knock daemon install 은 macOS 전용입니다.");
+    let exe = match std::env::current_exe() {
+        Ok(p) => p.to_string_lossy().to_string(),
+        Err(e) => {
+            eprintln!("knock: cannot resolve own path: {}", e);
+            std::process::exit(2);
+        }
+    };
+    // reg add "<key>" /v knock /t REG_SZ /d "\"<exe>\" __daemon" /f
+    let data = format!("\"{}\" __daemon", exe);
+    let status = std::process::Command::new("reg")
+        .args([
+            "add",
+            WIN_RUN_KEY,
+            "/v",
+            WIN_RUN_VALUE,
+            "/t",
+            "REG_SZ",
+            "/d",
+            &data,
+            "/f",
+        ])
+        .status();
+    match status {
+        Ok(s) if s.success() => {
+            println!("knock daemon 설치됨 (로그인 시 자동 실행).");
+            // Start it now too, so the tray shows up immediately.
+            let _ = std::process::Command::new(&exe).arg("__daemon").spawn();
+        }
+        _ => eprintln!("knock: reg add 실패 (관리자 권한/REG 접근 확인)"),
+    }
 }
-#[cfg(not(target_os = "macos"))]
+
+#[cfg(windows)]
 fn daemon_uninstall() {
-    eprintln!("knock daemon uninstall 은 macOS 전용입니다.");
+    let _ = std::process::Command::new("reg")
+        .args(["delete", WIN_RUN_KEY, "/v", WIN_RUN_VALUE, "/f"])
+        .status();
+    ipc::cleanup();
+    println!("knock daemon 제거됨. 이후 호출 시 필요할 때만 임시로 실행됩니다.");
 }
-#[cfg(not(target_os = "macos"))]
+
+#[cfg(windows)]
 fn daemon_status() {
-    eprintln!("knock daemon 은 macOS 전용입니다.");
+    let out = std::process::Command::new("reg")
+        .args(["query", WIN_RUN_KEY, "/v", WIN_RUN_VALUE])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => println!("설치됨 (로그인 시 자동 실행)."),
+        _ => println!("미설치. 'knock daemon install' 로 상주 등록."),
+    }
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+fn daemon_install() {
+    eprintln!("knock daemon install 은 macOS / Windows 전용입니다.");
+}
+#[cfg(not(any(target_os = "macos", windows)))]
+fn daemon_uninstall() {
+    eprintln!("knock daemon uninstall 은 macOS / Windows 전용입니다.");
+}
+#[cfg(not(any(target_os = "macos", windows)))]
+fn daemon_status() {
+    eprintln!("knock daemon 상주는 macOS / Windows 전용입니다.");
 }
 
 /// Hook mode: read a Claude Code PermissionRequest payload on stdin, show the plan,
@@ -898,7 +950,6 @@ pub fn run() {
         return;
     }
     // Hidden entry: the long-lived single-window daemon (spawned by clients).
-    #[cfg(unix)]
     if argv.get(1).map(|s| s.as_str()) == Some("__daemon") {
         run_daemon();
         return;

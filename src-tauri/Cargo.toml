@@ -27,3 +27,4 @@ clap = { version = "4", features = ["derive"] }
 pulldown-cmark = "0.12"
 base64 = "0.22"
 robius-authentication = "0.1"
+interprocess = "2"
