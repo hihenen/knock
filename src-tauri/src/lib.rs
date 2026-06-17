@@ -13,7 +13,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use serde_json::Value;
-use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem};
+use tauri::menu::{CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{Manager, UserAttentionType, WindowEvent};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
@@ -239,8 +239,7 @@ fn get_payload(state: tauri::State<AppState>) -> Value {
 }
 
 /// Persist the Touch ID requirement toggle to the config file.
-#[tauri::command]
-fn save_touch_id(enabled: bool) -> Result<(), String> {
+fn set_config_touch_id(enabled: bool) -> Result<(), String> {
     let mut cfg = read_config();
     cfg["touch_id"] = serde_json::json!(enabled);
     let path = config_path();
@@ -252,6 +251,11 @@ fn save_touch_id(enabled: bool) -> Result<(), String> {
         serde_json::to_string_pretty(&cfg).unwrap_or_else(|_| "{}".to_string()),
     )
     .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn save_touch_id(enabled: bool) -> Result<(), String> {
+    set_config_touch_id(enabled)
 }
 
 #[tauri::command]
@@ -382,19 +386,35 @@ fn launch(state: AppState) {
                     .enabled(false)
                     .build(app)?;
             let sep = PredefinedMenuItem::separator(app)?;
+            let touch_toggle = CheckMenuItemBuilder::with_id(
+                "touch_id",
+                "Touch ID for critical gates",
+            )
+            .checked(config_touch_id())
+            .build(app)?;
+            let sep2 = PredefinedMenuItem::separator(app)?;
             let quit = MenuItemBuilder::with_id("quit", "닫기 (Quit)").build(app)?;
-            let menu = MenuBuilder::new(app).items(&[&info, &sep, &quit]).build()?;
+            let menu = MenuBuilder::new(app)
+                .items(&[&info, &sep, &touch_toggle, &sep2, &quit])
+                .build()?;
+            let toggle_handle = touch_toggle.clone();
             if let Some(icon) = app.default_window_icon().cloned() {
                 let _ = TrayIconBuilder::with_id("knock")
                     .icon(icon)
                     .tooltip("Knock — 응답 대기 중")
                     .menu(&menu)
                     .show_menu_on_left_click(true)
-                    .on_menu_event(|app, event| {
-                        if event.id().as_ref() == "quit" {
+                    .on_menu_event(move |app, event| match event.id().as_ref() {
+                        "quit" => {
                             let state = app.state::<AppState>();
                             finish("dismissed", None, &state);
                         }
+                        "touch_id" => {
+                            let next = !config_touch_id();
+                            let _ = set_config_touch_id(next);
+                            let _ = toggle_handle.set_checked(next);
+                        }
+                        _ => {}
                     })
                     .build(app)?;
             }

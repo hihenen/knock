@@ -2,6 +2,13 @@
 
 All notable changes to knock are documented here. Versions follow [SemVer](https://semver.org).
 
+## [0.1.8] - 2026-06-17
+
+### Added
+- **메뉴바 트레이 토글** — knock 창이 떠 있을 때 menubar 트레이 아이콘 메뉴에
+  `Touch ID for critical gates` 체크 항목 추가. `knock settings` 를 따로 실행하지
+  않아도 클릭 한 번으로 켜고 끌 수 있으며, `~/.config/knock/config.json` 에 즉시 저장.
+
 ## [0.1.7] - 2026-06-17
 
 ### Added
