@@ -24,15 +24,15 @@ curl -fsSL https://raw.githubusercontent.com/hihenen/knock/master/install.sh | b
 /reload-plugins
 ```
 
-**여기까지면 기본 경험이 다 됩니다** — plan mode 를 빠져나갈 때 knock 창이 떠서 검토·승인(hook)하고, **여러 세션이 동시에 호출해도 한 창에 큐로 모입니다(설치만으로 기본 동작)**. Touch ID 는 승인 창 헤더의 🔒 토글로 그 자리에서 켜면 됩니다.
-
-**3. (선택) 더 매끄럽게**
+**3. 데몬 상주** (필수)
 
 ```bash
 knock daemon install   # 로그인 시 데몬 상주 → menubar 트레이 항상 표시 + 첫 호출 지연 0
 ```
 
-에이전트가 **승인·질문·웹 행동(Scalr Apply·PR 등)까지** knock 으로 띄우게 하려면 프로젝트 `CLAUDE.md` 에 [스니펫](#claudemd-에-다음을-추가)을 추가하세요 (plan 승인 외 자동화).
+여러 세션이 동시에 호출해도 한 창에 큐로 모이고, menubar 트레이가 항상 떠 있어 대기 건수(뱃지)를 바로 봅니다. Touch ID 는 승인 창 헤더의 🔒 토글로 그 자리에서 켜면 됩니다.
+
+**4. (선택) 에이전트 자동화** — 승인·질문·웹 행동(Scalr Apply·PR 등)까지 knock 으로 띄우게 하려면 프로젝트 `CLAUDE.md` 에 [스니펫](#claudemd-에-다음을-추가)을 추가하세요 (plan 승인 외 자동화).
 
 > **업데이트**: 새 버전이 나오면 knock 창 상단 배너로 알립니다. `brew upgrade hihenen/tap/knock` (+ `/plugin marketplace update knock` → `/reload-plugins`)
 
