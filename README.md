@@ -24,16 +24,15 @@ curl -fsSL https://raw.githubusercontent.com/hihenen/knock/master/install.sh | b
 /reload-plugins
 ```
 
-**여기까지면 plan 승인은 자동**입니다 — plan mode 를 빠져나갈 때 knock 창이 떠서 검토·승인 (hook).
+**여기까지면 기본 경험이 다 됩니다** — plan mode 를 빠져나갈 때 knock 창이 떠서 검토·승인(hook)하고, **여러 세션이 동시에 호출해도 한 창에 큐로 모입니다(설치만으로 기본 동작)**. Touch ID 는 승인 창 헤더의 🔒 토글로 그 자리에서 켜면 됩니다.
 
-**3. owner 처럼 쓰려면 (권장)**
+**3. (선택) 더 매끄럽게**
 
 ```bash
-knock daemon install   # 멀티세션 단일창 + 로그인 상주 (여러 세션이 한 창으로)
-knock settings         # critical 승인에 Touch ID 요구 (선택)
+knock daemon install   # 로그인 시 데몬 상주 → menubar 트레이 항상 표시 + 첫 호출 지연 0
 ```
 
-그리고 에이전트가 **승인·질문·웹 행동(Scalr Apply·PR 등)까지** knock 으로 띄우게 하려면 프로젝트 `CLAUDE.md` 에 [스니펫](#에이전트가-owner-처럼-쓰게-claudemd-스니펫)을 추가하세요. 이게 "owner 와 같은 경험"의 핵심입니다.
+에이전트가 **승인·질문·웹 행동(Scalr Apply·PR 등)까지** knock 으로 띄우게 하려면 프로젝트 `CLAUDE.md` 에 [스니펫](#claudemd-에-다음을-추가)을 추가하세요 (plan 승인 외 자동화).
 
 > **업데이트**: 새 버전이 나오면 knock 창 상단 배너로 알립니다. `brew upgrade hihenen/tap/knock` (+ `/plugin marketplace update knock` → `/reload-plugins`)
 
@@ -41,38 +40,21 @@ knock settings         # critical 승인에 Touch ID 요구 (선택)
 
 ## 설치 (자세히)
 
-### Homebrew (Apple Silicon)
+### macOS (Apple Silicon)
+
+**Homebrew — 권장** (Gatekeeper quarantine 을 brew 가 자동 처리, 경고 없음)
 
 ```bash
 brew install hihenen/tap/knock
 ```
 
-Gatekeeper quarantine 을 brew 가 자동 처리 — "손상됨 / 확인 불가" 경고 없음.
-
-### install.sh (한 줄)
+**install.sh** (Homebrew 없이, `~/.local/bin/knock` 에 설치 + quarantine 자동 제거)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/hihenen/knock/master/install.sh | bash
 ```
 
-최신 릴리스 바이너리를 `~/.local/bin/knock` 에 설치 (Gatekeeper quarantine 자동 제거).
-
-### Windows (x64)
-
-```powershell
-irm https://raw.githubusercontent.com/hihenen/knock/master/install.ps1 | iex
-```
-
-`knock.exe` 를 `%LOCALAPPDATA%\knock` 에 설치하고 user PATH 에 추가합니다.
-
-### 소스 빌드 (CLI)
-
-```bash
-cd src-tauri && cargo build --release   # 또는: bun run tauri build --no-bundle
-cp target/release/knock ~/.local/bin/knock
-```
-
-### 바이너리 다운로드 (Apple Silicon)
+**바이너리 직접 다운로드**
 
 ```bash
 curl -L https://github.com/hihenen/knock/releases/latest/download/knock-macos-aarch64 -o knock
@@ -80,6 +62,25 @@ chmod +x knock
 xattr -c knock          # Gatekeeper quarantine 제거 (다운로드 빌드라 필요)
 mv knock ~/.local/bin/
 knock --version
+```
+
+### Windows (x64)
+
+**install.ps1 — 권장** (`knock.exe` 를 `%LOCALAPPDATA%\knock` 에 설치 + user PATH 추가)
+
+```powershell
+irm https://raw.githubusercontent.com/hihenen/knock/master/install.ps1 | iex
+```
+
+**바이너리 직접 다운로드** — [releases](https://github.com/hihenen/knock/releases/latest) 에서 `knock-windows-x64.exe` 를 받아 PATH 에 둡니다.
+
+> Windows 도 기능은 동일합니다 — 멀티세션 단일창(named pipe), 생체 인증(Windows Hello), `knock daemon install`(레지스트리 Run 키 상주). Dock 뱃지 대신 작업표시줄 알림.
+
+### 소스 빌드 (모든 플랫폼)
+
+```bash
+cd src-tauri && cargo build --release   # 또는: bun run tauri build --no-bundle
+cp target/release/knock ~/.local/bin/knock
 ```
 
 > ⚠️ knock 은 **CLI 도구**입니다. `.app` 더블클릭이 아니라 `knock annotate <md>` / `knock ask <json>` 처럼 인자와 함께 실행합니다. (인자 없이 실행하면 즉시 종료)
@@ -102,9 +103,9 @@ CLI 설치 후, Claude Code 에서 스킬 플러그인을 추가하면 에이전
 
 플러그인에는 `PermissionRequest` + `ExitPlanMode` hook 이 포함되어, **plan mode 를 빠져나갈 때 자동으로 knock 창**이 떠서 plan 을 검토·승인합니다 — **CLAUDE.md 지침 없이도 동작**. (승인 → plan 진행 / 변경요청·닫기 → plan 거부 + 피드백)
 
-### 에이전트가 owner 처럼 쓰게 (CLAUDE.md 스니펫)
+### CLAUDE.md 에 다음을 추가
 
-plan 승인은 hook 으로 자동이지만, **그 외 결정·승인·질문·웹 행동**까지 에이전트가 knock 으로 띄우게 하려면 프로젝트(또는 글로벌) `CLAUDE.md` 에 아래를 추가하세요. 이게 "owner 와 같은 경험"의 핵심입니다:
+plan 승인은 hook 으로 자동이지만, **그 외 결정·승인·질문·웹 행동**까지 에이전트가 knock 으로 띄우게 하려면 프로젝트(또는 글로벌) `CLAUDE.md` 에 아래를 추가·반영하게 하세요:
 
 ```markdown
 ## knock — 데스크톱 승인/질문 게이트
