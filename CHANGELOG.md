@@ -2,6 +2,17 @@
 
 All notable changes to knock are documented here. Versions follow [SemVer](https://semver.org).
 
+## [0.4.4] - 2026-06-18
+
+### Added
+- **업데이트 알림** — 시작 시 GitHub Releases `latest` 를 확인(24h throttle, 실패
+  시 silent)하고, 새 버전이 있으면 상단에 비침습 배너를 띄운다. `brew upgrade`
+  명령 복사 + 릴리스 노트 링크 + 버전별 닫기(다시 안 뜸). Tauri 자동 설치는
+  Homebrew 와 충돌하므로 *알림만, 설치는 brew*.
+- **릴리스 노트 링크** — settings 창에 "📋 릴리스 노트" + 현재 버전 표시.
+- **GitHub Release 노트 자동 첨부** — release 워크플로가 CHANGELOG 의 해당 버전
+  섹션을 release body 로 넣는다 (커밋 자동 노트와 함께).
+
 ## [0.4.3] - 2026-06-18
 
 ### Added

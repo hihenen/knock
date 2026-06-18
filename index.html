@@ -19,6 +19,14 @@
       </label>
     </header>
 
+    <!-- update-available banner (dismissible, per-version) -->
+    <div id="update-banner" class="update-banner hidden">
+      <span id="update-text"></span>
+      <button id="update-copy" class="ub-btn" type="button">brew upgrade 복사</button>
+      <a id="update-notes" class="ub-btn" href="#">릴리스 노트</a>
+      <button id="update-dismiss" class="ub-btn ub-x" type="button" title="이 버전 알림 끄기">✕</button>
+    </div>
+
     <!-- annotate mode -->
     <main id="content" class="markdown hidden"></main>
 
@@ -38,7 +46,8 @@
         </div>
       </label>
       <div class="settings-meta">
-        <a href="#" id="report-bug">🐞 버그 신고 / Report a bug</a>
+        <a href="#" id="report-bug">🐞 버그 신고</a>
+        <a href="#" id="release-notes">📋 릴리스 노트</a>
         <span id="version-tag" class="version-tag"></span>
       </div>
     </div>

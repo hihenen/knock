@@ -513,3 +513,21 @@ body {
 
 /* rendered-markdown links open in the real browser (makeLinksExternal) */
 .markdown a, .ask-context a { color: var(--accent, #3b82f6); cursor: pointer; }
+
+/* ── update-available banner ───────────────────────────────────── */
+.update-banner {
+  flex: 0 0 auto;
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 16px;
+  background: #eef4ff; border-bottom: 1px solid #c9d9f5;
+  font-size: 13px; color: #1d3a6b;
+}
+#update-text { flex: 1 1 auto; }
+.ub-btn {
+  flex: 0 0 auto; font-size: 12px; font-weight: 600;
+  padding: 3px 10px; border-radius: 6px;
+  border: 1px solid #b8cdf0; background: #fff;
+  color: var(--accent, #3b82f6); cursor: pointer; text-decoration: none;
+}
+.ub-btn:hover { background: #f0f5ff; }
+.ub-x { border: none; background: transparent; color: var(--muted, #888); padding: 3px 6px; }

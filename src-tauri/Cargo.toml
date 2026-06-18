@@ -1,6 +1,6 @@
 [package]
 name = "knock"
-version = "0.4.3"
+version = "0.4.4"
 description = "Desktop approval/annotation gate for AI agents"
 authors = ["hihenen"]
 edition = "2021"

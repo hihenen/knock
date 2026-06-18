@@ -43,10 +43,23 @@ jobs:
         shell: bash
         run: cp "${{ matrix.binpath }}" "${{ matrix.asset }}"
 
+      - name: Extract changelog section for this tag
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          # Pull the "## [VERSION] ..." section out of CHANGELOG.md.
+          awk -v v="$VERSION" '
+            $0 ~ "^## \\[" v "\\]" {f=1; next}
+            f && /^## \[/ {f=0}
+            f {print}
+          ' CHANGELOG.md > release-notes.md
+          [ -s release-notes.md ] || echo "See CHANGELOG.md" > release-notes.md
+
       - name: Attach to release
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ matrix.asset }}
+          body_path: release-notes.md
           generate_release_notes: true
 
   formula:

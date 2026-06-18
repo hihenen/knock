@@ -83,6 +83,73 @@ function makeLinksExternal(container: HTMLElement) {
   });
 }
 
+// =====================================================================
+// update-available check (notify-don't-install; brew upgrade for installs)
+// =====================================================================
+const REPO = "hihenen/knock";
+const BREW_CMD = "brew upgrade hihenen/tap/knock";
+
+function cmpVer(a: string, b: string): number {
+  const pa = a.split(".").map((n) => parseInt(n, 10) || 0);
+  const pb = b.split(".").map((n) => parseInt(n, 10) || 0);
+  for (let i = 0; i < 3; i++) {
+    if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) - (pb[i] || 0);
+  }
+  return 0;
+}
+
+async function fetchLatest(): Promise<string | null> {
+  const now = Date.now();
+  const last = +(localStorage.getItem("knock_update_check") || 0);
+  const cached = localStorage.getItem("knock_latest");
+  // 24h throttle to respect GitHub's 60 req/hr unauthenticated limit.
+  if (last && now - last < 86_400_000 && cached) return cached;
+  try {
+    const res = await fetch(
+      `https://api.github.com/repos/${REPO}/releases/latest`,
+    );
+    if (!res.ok) return cached;
+    const data = await res.json();
+    const latest = String(data.tag_name || "").replace(/^v/, "");
+    if (latest) {
+      localStorage.setItem("knock_update_check", String(now));
+      localStorage.setItem("knock_latest", latest);
+    }
+    return latest || cached;
+  } catch {
+    return cached; // fail silent on network error
+  }
+}
+
+async function checkUpdateBanner() {
+  let current: string;
+  try {
+    current = await invoke<string>("app_version");
+  } catch {
+    return;
+  }
+  const latest = await fetchLatest();
+  if (!latest || cmpVer(latest, current) <= 0) return; // already latest
+  if (localStorage.getItem("knock_dismissed_update") === latest) return;
+
+  const banner = $("update-banner");
+  $("update-text").textContent = `🆕 knock v${latest} 사용 가능 — ${BREW_CMD}`;
+  $("update-copy").addEventListener("click", () => {
+    navigator.clipboard?.writeText(BREW_CMD).catch(() => {});
+  });
+  $("update-notes").addEventListener("click", (e) => {
+    e.preventDefault();
+    invoke("open_url", {
+      url: `https://github.com/${REPO}/releases/latest`,
+    }).catch(() => {});
+  });
+  $("update-dismiss").addEventListener("click", () => {
+    localStorage.setItem("knock_dismissed_update", latest);
+    banner.classList.add("hidden");
+  });
+  banner.classList.remove("hidden");
+}
+
 let submitted = false;
 function once(fn: () => void) {
   if (submitted) return;
@@ -610,6 +677,12 @@ function setupSettings(p: SettingsPayload) {
       url: "https://github.com/hihenen/knock/issues/new/choose",
     }).catch(() => {});
   });
+  $("release-notes").addEventListener("click", (e) => {
+    e.preventDefault();
+    invoke("open_url", {
+      url: "https://github.com/hihenen/knock/releases",
+    }).catch(() => {});
+  });
 
   const close = () => once(() => invoke("dismiss"));
   $("settings-close").addEventListener("click", close);
@@ -713,6 +786,8 @@ async function renderDaemon() {
 }
 
 async function init() {
+  // Non-blocking, fail-silent update-available check (shows a dismissible banner).
+  void checkUpdateBanner();
   // Daemon first: if a queue command answers, we're the single-window daemon.
   try {
     const q = await invoke<QueuePayload>("daemon_queue");

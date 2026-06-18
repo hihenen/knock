@@ -343,6 +343,12 @@ fn save_pasted_image(data_url: String) -> Result<String, String> {
     Ok(path.to_string_lossy().to_string())
 }
 
+/// Current app version (for the update-available check against GitHub Releases).
+#[tauri::command]
+fn app_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
 /// Open an http(s) URL in the default browser (action links + bug report).
 #[tauri::command]
 fn open_url(url: String) -> Result<(), String> {
@@ -511,7 +517,8 @@ fn run_daemon() {
             save_pasted_image,
             touch_id_approve,
             save_touch_id,
-            open_url
+            open_url,
+            app_version
         ])
         .on_window_event(|window, event| {
             // Closing the window must not kill the daemon — just hide it.
@@ -660,7 +667,8 @@ fn launch(state: AppState) {
             touch_id_approve,
             save_touch_id,
             dismiss,
-            open_url
+            open_url,
+            app_version
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { .. } = event {
