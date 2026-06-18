@@ -24,11 +24,18 @@ curl -fsSL https://raw.githubusercontent.com/hihenen/knock/master/install.sh | b
 /reload-plugins
 ```
 
-**끝.** plan mode 를 빠져나갈 때 knock 창이 자동으로 떠서 plan 을 검토·승인합니다 (hook). 에이전트는 `knock-annotate`(승인) / `knock-ask`(질문) 스킬로도 호출합니다.
+**여기까지면 plan 승인은 자동**입니다 — plan mode 를 빠져나갈 때 knock 창이 떠서 검토·승인 (hook).
 
-> **업데이트**: `brew upgrade hihenen/tap/knock` (+ `/plugin marketplace update knock` → `/reload-plugins`)
->
-> **ask 까지 자동으로** 쓰려면 프로젝트 `CLAUDE.md` 에 한 줄: `객관식 질문은 AskUserQuestion 대신 knock ask, 승인 게이트는 knock annotate 를 쓴다.`
+**3. owner 처럼 쓰려면 (권장)**
+
+```bash
+knock daemon install   # 멀티세션 단일창 + 로그인 상주 (여러 세션이 한 창으로)
+knock settings         # critical 승인에 Touch ID 요구 (선택)
+```
+
+그리고 에이전트가 **승인·질문·웹 행동(Scalr Apply·PR 등)까지** knock 으로 띄우게 하려면 프로젝트 `CLAUDE.md` 에 [스니펫](#에이전트가-owner-처럼-쓰게-claudemd-스니펫)을 추가하세요. 이게 "owner 와 같은 경험"의 핵심입니다.
+
+> **업데이트**: 새 버전이 나오면 knock 창 상단 배너로 알립니다. `brew upgrade hihenen/tap/knock` (+ `/plugin marketplace update knock` → `/reload-plugins`)
 
 ---
 
@@ -95,13 +102,20 @@ CLI 설치 후, Claude Code 에서 스킬 플러그인을 추가하면 에이전
 
 플러그인에는 `PermissionRequest` + `ExitPlanMode` hook 이 포함되어, **plan mode 를 빠져나갈 때 자동으로 knock 창**이 떠서 plan 을 검토·승인합니다 — **CLAUDE.md 지침 없이도 동작**. (승인 → plan 진행 / 변경요청·닫기 → plan 거부 + 피드백)
 
-### ask 까지 적극 쓰려면 (CLAUDE.md 스니펫)
+### 에이전트가 owner 처럼 쓰게 (CLAUDE.md 스니펫)
 
-plan 승인은 hook 으로 자동이지만, "에이전트가 질문할 때 `AskUserQuestion` 대신 `knock ask` 를 쓰게" 하려면 프로젝트 `CLAUDE.md` 에 한 줄 추가하세요:
+plan 승인은 hook 으로 자동이지만, **그 외 결정·승인·질문·웹 행동**까지 에이전트가 knock 으로 띄우게 하려면 프로젝트(또는 글로벌) `CLAUDE.md` 에 아래를 추가하세요. 이게 "owner 와 같은 경험"의 핵심입니다:
 
-```
-사용자에게 객관식 질문이 필요하면 AskUserQuestion 대신 `knock ask <json>` 을,
-승인 게이트는 `knock annotate <md> --gate --json` 을 쓴다.
+```markdown
+## knock — 데스크톱 승인/질문 게이트
+- 사용자에게 **승인**이 필요하면 채팅 대신 `knock annotate <md> --gate --json` 게이트를 띄운다.
+- **객관식 질문**은 AskUserQuestion 대신 `knock ask <json>`. JSON 최상위 `context` 에
+  배경·비교표·결론을 markdown 으로 담아 결정 근거를 창에서 바로 보게 한다.
+- 사용자가 **웹에서 클릭·승인**해야 하면(Scalr Apply / GitHub PR / ArgoCD / 대시보드 등)
+  `--action-url <URL>` 을 넣어, 승인 한 번에 브라우저로 그 행동 지점으로 점프하게 한다.
+  (슬랙 알림에 묻혀 행동 타이밍 놓치는 문제 해결 — knock 이 "행동 inbox")
+- prd·IAM·destructive 같은 critical 승인엔 `--touch-id` (knock settings 로 켠 경우).
+- knock 응답: annotate=`{"decision":"approved|annotated|dismissed"}`, ask=`{"answers":{"<h>":["..."]}}`(항상 배열).
 ```
 
 > 플러그인은 **스킬 + hook** 을 제공합니다. `knock` CLI 는 위 **설치** 단계(brew / install.sh)로 따로 설치하세요.
@@ -120,6 +134,7 @@ knock annotate plan.md --gate --json
 | `--json` | 결과를 JSON 으로 출력 (없으면 평문) |
 | `--title T` | 헤더 제목 (기본: 파일명) |
 | `--touch-id` | macOS Touch ID / Windows Hello 로 승인 (생체 없으면 시스템 암호 / 버튼 fallback) |
+| `--action-url <URL>` | 승인 시 브라우저로 그 URL 자동 오픈 (Scalr Apply / PR / 대시보드 — **action inbox**). 본문 markdown 링크도 클릭 시 외부 브라우저로 열림 |
 
 **stdout 계약**:
 
@@ -135,15 +150,15 @@ knock annotate plan.md --gate --json
 knock ask questions.json
 ```
 
-입력 JSON 은 Claude Code 의 **AskUserQuestion 스키마와 동형**:
+입력 JSON 은 Claude Code 의 **AskUserQuestion 스키마와 동형** (+ 선택적 `context`):
 
 ```json
 {
+  "context": "## 배경\n\n결정 근거(배경·비교표·결론)를 markdown 으로. 선택지 위에 렌더된다.",
   "questions": [
     {
       "header": "구현 방향",
       "question": "어느 방향으로 갈까?",
-      "multiSelect": false,
       "options": [
         { "label": "A안", "description": "설명..." },
         { "label": "B안", "description": "설명..." }
@@ -153,23 +168,24 @@ knock ask questions.json
 }
 ```
 
+- **`context` (선택)** — 결정에 배경이 필요하면 최상위 `context` 에 markdown 을 담는다. 질문 위에 렌더되어 근거를 창에서 바로 본다.
+- **항상 체크박스(multi-select)** — 1개~여러 개 선택 + "기타" 자유입력. `multiSelect` 필드는 무시.
+
 한 질문씩(wizard) 보여주고 마지막에 선택 요약 → 제출. 항상 JSON 출력:
 
 | 결과 | 출력 |
 |------|------|
-| 답변 | `{"answers":{"구현 방향":"A안","복수질문":["X","Y"]}}` |
+| 답변 | `{"answers":{"구현 방향":["A안","B안"]}}` — **항상 string 배열** (선택 label + 기타 텍스트) |
 | 닫기 | `{"decision":"dismissed"}` |
-
-(단일선택 = 문자열, 복수선택 = 배열, 기타 = 입력 텍스트)
 
 ## 키보드 (ask 질문)
 
 | 키 | 동작 |
 |----|------|
 | `↑` `↓` | 옵션 포커스 이동 |
-| `1`~`9` | 해당 옵션 선택 (선택만) |
-| `Space` | 단일: 1번=선택 / 2번=다음 · 복수: 토글 |
-| `Enter` | 단일: 선택+다음 · 복수: 다음 |
+| `1`~`9` | 해당 옵션 토글 |
+| `Space` | 옵션 토글 (선택/해제) |
+| `Enter` | 다음 질문 |
 | `→` `←` | 다음 / 이전 질문 |
 | `Cmd+Enter` | 제출 |
 | `Esc` | 닫기 |
@@ -184,6 +200,28 @@ knock settings
 
 설정 창에서 토글:
 - **🔒 critical 게이트에 Touch ID 요구** → `~/.config/knock/config.json` 의 `{"touch_id": true}` 로 저장. 에이전트가 이 값을 읽어 prd/IAM/destructive 같은 중요 승인에 Touch ID 를 적용 (환경변수 불필요, 한 번만 켜면 영구).
+
+설정 창 하단에 **버그 신고**(GitHub Issues) · **릴리스 노트** 링크와 현재 버전이 표시됩니다.
+
+## 데몬 상주 (멀티세션 단일창)
+
+여러 에이전트 세션이 동시에 knock 을 호출해도 **창이 여러 개 겹치지 않고 하나의 창에 대기 목록(큐)** 으로 모입니다. 로그인 시 데몬을 상주시키면 menubar 트레이가 항상 떠 있고 첫 호출 지연이 사라집니다:
+
+```bash
+knock daemon install     # 로그인 시 자동 실행 (macOS LaunchAgent / Windows 레지스트리 Run 키)
+knock daemon status      # 설치 여부 확인
+knock daemon uninstall   # 해제
+```
+
+미설치 시에도 첫 호출 때 데몬이 자동으로 떠서 동작합니다(상주만 안 할 뿐). 새 요청이 오면 Dock 아이콘이 튀고(bounce) 뱃지 숫자(대기 건수)가 표시됩니다.
+
+## 업데이트
+
+새 버전이 나오면 knock 창 상단에 **배너로 알립니다** (시작 시 GitHub Releases 확인, 24h 간격, 버전별로 한 번만). 배너에서 `brew upgrade` 명령 복사 · 릴리스 노트 열기 · 닫기 가능. 업데이트는 Homebrew 관리를 존중해 **자동 설치하지 않고 안내만** 합니다:
+
+```bash
+brew upgrade hihenen/tap/knock
+```
 
 ## 알람
 
