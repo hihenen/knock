@@ -1,6 +1,6 @@
 ---
 name: knock-annotate
-description: Open knock's desktop approval/annotation window for a markdown file and respond to the returned decision. Native window with OS notification + Dock attention.
+description: Open knock's desktop approval/annotation window for a markdown file and respond to the returned decision. Native window with OS notification + Dock attention. Optional --action-url jumps to a URL (Scalr Apply / PR / dashboard) on approval.
 allowed-tools: Bash(knock:*)
 disable-model-invocation: true
 ---
@@ -22,4 +22,6 @@ The output above will be one of:
 ## Usage notes
 
 - `knock annotate <file.md> --gate --json` — `--gate` shows an explicit Approve button, `--json` returns structured output.
-- The window is always-on-top, fires an OS notification, and bounces the Dock so the user notices even when not looking at the chat.
+- **`--action-url <URL>` (action inbox)** — the "next action" tied to this approval (a Scalr Apply page, GitHub PR, ArgoCD Application, Jira ticket, dashboard, etc.). On approval, the browser jumps straight to that URL. Use this whenever the user has to click/approve something **in a web UI** — instead of dropping a "go here and click" link in chat that drowns in notifications, knock becomes an action inbox: one approval → jump to the action.
+- **`--touch-id`** — require Touch ID / Windows Hello for critical gates (prd change / IAM expansion / destructive). Falls back to system password if no biometric hardware.
+- The window is always-on-top, fires an OS notification, and bounces the Dock so the user notices even when not looking at the chat. http(s) links inside the markdown body (PR diff, dashboard, ticket) open in the external browser when clicked.
