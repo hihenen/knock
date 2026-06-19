@@ -136,7 +136,7 @@ knock annotate plan.md --gate --json
 | `--json` | 결과를 JSON 으로 출력 (없으면 평문) |
 | `--title T` | 헤더 제목 (기본: 파일명) |
 | `--touch-id` | macOS Touch ID / Windows Hello 로 승인 (생체 없으면 시스템 암호 / 버튼 fallback) |
-| `--action-url <URL>` | 승인 시 브라우저로 그 URL 자동 오픈 (Scalr Apply / PR / 대시보드 — **action inbox**). 본문 markdown 링크도 클릭 시 외부 브라우저로 열림 |
+| `--action-url <URL>` | 승인 시 브라우저로 그 URL 자동 오픈 (Scalr Apply / PR / 대시보드 — **action inbox**). 로컬 문서는 절대경로 `file:///abs/path/mockup.html` (HTML 목업·PDF·이미지 — 문서만, 실행 파일 거부). 본문 markdown 링크도 클릭 시 외부 브라우저로 열림 |
 
 **stdout 계약**:
 
