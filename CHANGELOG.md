@@ -2,6 +2,18 @@
 
 All notable changes to knock are documented here. Versions follow [SemVer](https://semver.org).
 
+## [0.4.5] - 2026-06-19
+
+### Added
+- **로컬 문서 열기 (`file://`)** — annotate 본문의 markdown 링크나 `--action-url`
+  에 `file:///abs/path/mockup.html` 같은 로컬 경로를 주면 외부 브라우저로 엽니다
+  (HTML 목업·PDF·이미지 등 검토용). 보안상 **문서/이미지 확장자만 허용**하고
+  실행 파일(.app/.sh 등)은 거부합니다. http(s) 는 그대로 동작.
+
+### Notes
+- ask 의 "기타(직접 입력)" 옵션은 모든 질문에 자동 포함되어 있습니다 — 선택하면
+  자유 텍스트 입력칸이 열리고 답변 배열에 포함됩니다.
+
 ## [0.4.4] - 2026-06-18
 
 ### Added

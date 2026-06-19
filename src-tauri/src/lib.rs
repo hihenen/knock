@@ -349,13 +349,26 @@ fn app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
-/// Open an http(s) URL in the default browser (action links + bug report).
+/// Open a URL in the default browser/app. Allows http(s) (action links, bug
+/// report) and file:// to *documents/images only* (e.g. a local HTML mockup) —
+/// executables are refused so an annotation can't be used to run arbitrary files.
 #[tauri::command]
 fn open_url(url: String) -> Result<(), String> {
-    if !(url.starts_with("http://") || url.starts_with("https://")) {
-        return Err("only http(s) URLs are allowed".to_string());
+    if url.starts_with("http://") || url.starts_with("https://") {
+        return open_external(&url).map_err(|e| e.to_string());
     }
-    open_external(&url).map_err(|e| e.to_string())
+    if url.starts_with("file://") {
+        let lower = url.to_lowercase();
+        let allowed = [
+            ".html", ".htm", ".pdf", ".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".md",
+            ".txt", ".json", ".csv", ".log",
+        ];
+        if !allowed.iter().any(|ext| lower.ends_with(ext)) {
+            return Err("file:// URLs are limited to documents/images".to_string());
+        }
+        return open_external(&url).map_err(|e| e.to_string());
+    }
+    Err("only http(s) or file:// (documents) URLs are allowed".to_string())
 }
 
 #[cfg(target_os = "macos")]

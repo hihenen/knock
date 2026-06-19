@@ -75,7 +75,11 @@ function makeLinksExternal(container: HTMLElement) {
   container.querySelectorAll<HTMLAnchorElement>("a[href]").forEach((a) => {
     a.addEventListener("click", (e) => {
       const href = a.getAttribute("href") || "";
-      if (href.startsWith("http://") || href.startsWith("https://")) {
+      if (
+        href.startsWith("http://") ||
+        href.startsWith("https://") ||
+        href.startsWith("file://")
+      ) {
         e.preventDefault();
         invoke("open_url", { url: href }).catch(() => {});
       }
