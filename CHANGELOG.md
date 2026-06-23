@@ -2,6 +2,22 @@
 
 All notable changes to knock are documented here. Versions follow [SemVer](https://semver.org).
 
+## [0.4.6] - 2026-06-24
+
+### Fixed
+- **승인 시 브라우저 탭이 여러 개 열리고 이전 항목의 링크가 열리던 버그** — 데몬
+  단일창에서 큐로 여러 건을 처리할 때, 승인/질문 화면의 정적 버튼에 리스너가
+  누적되어 N번째 승인 시 이전 항목들의 `approve`(각자의 stale `--action-url`)가
+  함께 발화하던 문제. 재렌더 전에 리스너를 가진 요소를 clone-replace 해 누적
+  리스너를 제거. approve 에도 1회 가드 추가(키보드+클릭 중복 방지).
+
+### Added
+- **critical 게이트 승인 창에 한글 요약** — `gh pr merge`/시크릿 삭제/terraform
+  apply 등 위험 명령이 무엇을 하는지(어느 repo 의 어떤 PR 머지, 어떤 secret-id
+  삭제, 어떤 S3 버킷 등) 대상까지 한글로 요약해 한눈에 승인 판단 가능
+  (`hooks/examples/knock-critical-gate.sh`).
+- README 설치 가이드를 macOS / Windows 자기완결 복붙 흐름으로 완전 분리.
+
 ## [0.4.5] - 2026-06-19
 
 ### Added

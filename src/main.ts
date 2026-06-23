@@ -170,9 +170,32 @@ function setKey(h: ((e: KeyboardEvent) => void) | null) {
   if (h) window.addEventListener("keydown", h);
 }
 
+// The daemon reuses one window across many queued requests. The setup
+// functions bind click/change/paste listeners onto STATIC elements (opt-approve,
+// ask-submit, td-toggle, ...). Those listeners are NOT auto-removed on re-render,
+// so without this they STACK: approving the Nth item would fire every prior
+// item's approve closure too — opening a browser tab for each stale actionUrl
+// (the "multiple tabs / unrelated old link" bug). Clone-replacing the
+// listener-bearing containers drops all accumulated listeners; the next setup
+// binds fresh ones. getElementById still resolves (clone keeps ids).
+function dropStaleListeners() {
+  for (const id of [
+    "td-toggle-wrap", // td-toggle (header)
+    "annotate-footer", // opt-approve, opt-cancel, feedback, send + focusin
+    "ask-footer", // ask-dismiss, ask-prev, ask-next, ask-submit
+    "ask-root", // focusin (children are innerHTML-reset below)
+    "settings-root", // touch-id-toggle, report-bug, release-notes
+    "settings-footer",
+  ]) {
+    const e = document.getElementById(id);
+    if (e) e.replaceWith(e.cloneNode(true));
+  }
+}
+
 // Hide every mode section + footer and reset per-view state before rendering
 // the next one (daemon window is reused across requests).
 function resetView() {
+  dropStaleListeners();
   for (const id of [
     "content",
     "ask-root",
@@ -238,10 +261,16 @@ function setupAnnotate(p: AnnotatePayload) {
 
   // Approve, optionally gated behind Touch ID / Windows Hello (per the toggle).
   // If an actionUrl is set, jump to it in the browser on approval (action inbox).
+  let approving = false;
   const approve = async () => {
+    if (approving || submitted) return; // never open the URL / resolve twice
+    approving = true;
     if (tdToggle.checked) {
       const ok = await invoke<boolean>("touch_id_approve");
-      if (!ok) return; // auth cancelled/failed → keep window open
+      if (!ok) {
+        approving = false;
+        return; // auth cancelled/failed → keep window open
+      }
     }
     if (p.actionUrl) {
       await invoke("open_url", { url: p.actionUrl }).catch(() => {});
