@@ -107,6 +107,9 @@ body {
 .markdown pre code {
   background: none;
   padding: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 .markdown table {
   border-collapse: collapse;
