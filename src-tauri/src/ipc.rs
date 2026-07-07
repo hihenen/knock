@@ -81,6 +81,24 @@ pub fn client_request(req: &Value) -> Option<Value> {
     }
 }
 
+/// Like `client_request` but NEVER spawns a daemon — returns `None` when no
+/// daemon is already live. Used by the permission hook to check for a
+/// pre-authorization grant: no daemon ⇒ no grant ⇒ fall through to the normal
+/// gate, without paying the cost (and side effects) of starting a daemon.
+pub fn client_request_existing(req: &Value) -> Option<Value> {
+    let mut stream = connect()?;
+    let line = serde_json::to_string(req).ok()? + "\n";
+    stream.write_all(line.as_bytes()).ok()?;
+    stream.flush().ok()?;
+    let mut resp = String::new();
+    let mut reader = BufReader::new(&mut stream);
+    match reader.read_line(&mut resp) {
+        Ok(0) => None,
+        Ok(_) => serde_json::from_str(&resp).ok(),
+        Err(_) => None,
+    }
+}
+
 fn connect() -> Option<Stream> {
     Stream::connect(pipe_name().ok()?).ok()
 }

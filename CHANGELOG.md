@@ -2,6 +2,27 @@
 
 All notable changes to knock are documented here. Versions follow [SemVer](https://semver.org).
 
+## [Unreleased]
+
+### Added
+- **ask 확인 → 실행 승인 함께 전송 (owner pre-authorization)** — `knock ask` 요약
+  화면에 "이 선택을 실행 승인으로 함께 전송" 체크박스 추가(default OFF). 켜면
+  답변과 함께 데몬에 **단회용·5분 TTL grant** 를 기록하고, 바로 다음에 뜨는 knock
+  PermissionRequest 게이트가 창을 띄우지 않고 자동 승인(consume)함. auto mode 에서
+  owner 승인 직후 실행이 게이트에 다시 막히던 흐름을 해소. grant 는 단 1회만
+  소비되고 만료되면 폐기되며, TTL 정책은 webview 가 아닌 Rust(신뢰 경계)가 소유.
+  데몬 미가동 시엔 grant 가 없으므로 정상 게이트로 fail-closed.
+  grant 는 knock 의 **모든 게이트**가 소비한다 — `ExitPlanMode` PermissionRequest
+  훅(무인자 hook 모드)과 `knock annotate --gate`(critical-gate.sh 가 호출하는 위험
+  작업 승인)를 모두 창 없이 자동 통과. 단, knock 이 게이트하지 않는 작업(예: knock
+  필터에 안 걸리는 일반 Bash, 또는 Claude Code 자체 auto-mode classifier 가 막는
+  건)은 이 grant 로 통과되지 않는다 — 그 경로는 knock 밖이기 때문.
+- **`open_url` 토글** — menubar 트레이에 "Open action URL on approve" 체크박스 추가
+  (default ON, `~/.config/knock/config.json` 의 `{"open_url": false}` 로 OFF 영구
+  저장). OFF 면 승인 시 `--action-url` 자동 점프 안 함 + URL 을 클립보드에 복사 →
+  다수 게이트 연속 승인 시 브라우저 탭 폭주 회피. 본문 markdown 링크 클릭은
+  토글과 무관. `touch_id` 토글과 동일 패턴.
+
 ## [0.4.6] - 2026-06-24
 
 ### Fixed

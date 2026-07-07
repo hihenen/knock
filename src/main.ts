@@ -8,6 +8,7 @@ interface AnnotatePayload {
   gate: boolean;
   touchId?: boolean;
   configTouchId?: boolean;
+  configOpenUrl?: boolean;
   actionUrl?: string | null;
 }
 interface AskOption {
@@ -51,13 +52,18 @@ interface QueuePayload {
 // and reloads the page to show the next item / the list.
 type Sink = {
   annotate: (decision: string, feedback?: string) => void;
-  ask: (answers: Record<string, string | string[]>) => void;
+  // `grant` = the owner ticked "send as execution approval"; carries a TTL so the
+  // next knock permission gate auto-approves once.
+  ask: (answers: Record<string, string | string[]>, grant?: boolean) => void;
   dismiss: () => void;
 };
+
 let sink: Sink = {
   annotate: (decision, feedback) =>
     invoke("submit", { decision, feedback: feedback ?? null }),
-  ask: (answers) => invoke("submit_answers", { answers }),
+  // Only the boolean intent crosses the boundary; the TTL policy lives in Rust.
+  ask: (answers, grant) =>
+    invoke("submit_answers", { answers, grant: !!grant }),
   dismiss: () => invoke("dismiss"),
 };
 
@@ -273,7 +279,19 @@ function setupAnnotate(p: AnnotatePayload) {
       }
     }
     if (p.actionUrl) {
-      await invoke("open_url", { url: p.actionUrl }).catch(() => {});
+      if (p.configOpenUrl ?? true) {
+        await invoke("open_url", { url: p.actionUrl }).catch(() => {});
+      } else {
+        // Toggle OFF: skip auto-jump. Copy URL so owner can open manually
+        // without losing the action target. Console log as a fallback for
+        // headless/clipboard-denied environments.
+        console.log("knock: action URL (auto-open disabled):", p.actionUrl);
+        try {
+          await navigator.clipboard.writeText(p.actionUrl);
+        } catch {
+          // clipboard unavailable (no user gesture, denied) — ignore
+        }
+      }
     }
     sendDecision("approved");
   };
@@ -523,6 +541,21 @@ function setupAsk(p: AskPayload) {
   summary.appendChild(el("h2", "ask-q-title", "선택 내용 확인"));
   const summaryList = el("div", "summary-list");
   summary.appendChild(summaryList);
+
+  // Opt-in: also emit a single-use execution approval so the next knock
+  // permission gate auto-approves (owner pre-authorization). Default off.
+  const grantWrap = el("label", "ask-grant") as HTMLLabelElement;
+  const grantCb = document.createElement("input");
+  grantCb.type = "checkbox";
+  grantWrap.appendChild(grantCb);
+  grantWrap.appendChild(
+    el(
+      "span",
+      "ask-grant-label",
+      "이 선택을 실행 승인으로 함께 전송 — 다음 knock 게이트 1회 자동 승인 (5분)",
+    ),
+  );
+  summary.appendChild(grantWrap);
   sections.push(summary);
   root.appendChild(summary);
 
@@ -597,7 +630,7 @@ function setupAsk(p: AskPayload) {
     qs.forEach((q, qi) => {
       answers[keyFor(q, qi)] = labelsFor(qi);
     });
-    once(() => sink.ask(answers));
+    once(() => sink.ask(answers, grantCb.checked));
   };
 
   prevBtn.addEventListener("click", goPrev);
@@ -738,8 +771,9 @@ function daemonSink(id: string): Sink {
     decision: string,
     feedback: string | null,
     answers: Record<string, string | string[]> | null,
+    grant: boolean = false,
   ) => {
-    invoke("daemon_resolve", { id, decision, feedback, answers });
+    invoke("daemon_resolve", { id, decision, feedback, answers, grant });
     daemonBusy = false;
     submitted = false;
     // Re-render in place (no page reload) to show the next item / the list.
@@ -747,7 +781,7 @@ function daemonSink(id: string): Sink {
   };
   return {
     annotate: (d, f) => resolve(d, f ?? null, null),
-    ask: (a) => resolve("answered", null, a),
+    ask: (a, grant) => resolve("answered", null, a, !!grant),
     dismiss: () => resolve("dismissed", null, null),
   };
 }

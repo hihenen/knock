@@ -22,6 +22,29 @@ use tauri_plugin_notification::NotificationExt;
 mod ipc;
 
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+/// How long an ask-confirm pre-authorization stays valid (single-use) before the
+/// owner has to approve again. Short by design: a grant is "I just approved this
+/// now", not a standing permission.
+const GRANT_TTL_SECS: u64 = 300;
+
+/// Unconsumed single-use pre-authorizations, each as its expiry instant. Lives in
+/// the daemon so an ask-confirm in one session can satisfy the very next
+/// PermissionRequest gate (see `run_hook`) without showing the window again.
+type Grants = Arc<Mutex<Vec<Instant>>>;
+
+/// Drop expired grants, then spend the oldest live one (single-use). Returns
+/// whether a grant was spent. Extracted so the consume policy is unit-testable.
+fn take_live_grant(grants: &mut Vec<Instant>, now: Instant) -> bool {
+    grants.retain(|&exp| exp > now);
+    if grants.is_empty() {
+        false
+    } else {
+        grants.remove(0);
+        true
+    }
+}
 
 /// Wrap `generate_context!` in one place — calling the macro twice (single-shot
 /// + daemon builders) would define the `_EMBED_INFO_PLIST` symbol twice.
@@ -101,6 +124,17 @@ fn config_touch_id() -> bool {
         .get("touch_id")
         .and_then(|v| v.as_bool())
         .unwrap_or(false)
+}
+
+/// Whether the approve closure should auto-open `--action-url` in the browser.
+/// Default = true (preserves pre-toggle behavior). Set false to skip auto-jump;
+/// the frontend will copy the URL to the clipboard instead so the owner can
+/// open it manually without losing context.
+fn config_open_url() -> bool {
+    read_config()
+        .get("open_url")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true)
 }
 
 enum Mode {
@@ -273,6 +307,7 @@ fn get_payload(state: tauri::State<AppState>) -> Value {
             "gate": gate,
             "touchId": state.touch_id,
             "configTouchId": config_touch_id(),
+            "configOpenUrl": config_open_url(),
             "actionUrl": action_url,
         }),
         Mode::Ask { questions, title } => serde_json::json!({
@@ -281,6 +316,7 @@ fn get_payload(state: tauri::State<AppState>) -> Value {
             "title": title,
             "contextHtml": ask_context_html(questions),
             "configTouchId": config_touch_id(),
+            "configOpenUrl": config_open_url(),
         }),
         Mode::Settings => serde_json::json!({
             "mode": "settings",
@@ -310,6 +346,26 @@ fn save_touch_id(enabled: bool) -> Result<(), String> {
     set_config_touch_id(enabled)
 }
 
+/// Persist the auto-open action URL toggle.
+fn set_config_open_url(enabled: bool) -> Result<(), String> {
+    let mut cfg = read_config();
+    cfg["open_url"] = serde_json::json!(enabled);
+    let path = config_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&cfg).unwrap_or_else(|_| "{}".to_string()),
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn save_open_url(enabled: bool) -> Result<(), String> {
+    set_config_open_url(enabled)
+}
+
 #[tauri::command]
 fn submit(decision: String, feedback: Option<String>, state: tauri::State<AppState>) {
     if state.hook {
@@ -319,7 +375,13 @@ fn submit(decision: String, feedback: Option<String>, state: tauri::State<AppSta
 }
 
 #[tauri::command]
-fn submit_answers(answers: Value) {
+fn submit_answers(answers: Value, grant: Option<bool>) {
+    // Single-shot mode has no resident state, so record the pre-authorization in
+    // the daemon over IPC (spawning one if needed) — best-effort; the answer is
+    // returned regardless.
+    if grant == Some(true) {
+        let _ = ipc::client_request(&serde_json::json!({ "kind": "grant" }));
+    }
     print_and_exit(serde_json::json!({ "answers": answers }).to_string());
 }
 
@@ -444,6 +506,7 @@ struct QueueEntry {
 
 struct DaemonState {
     queue: Arc<Mutex<Vec<QueueEntry>>>,
+    grants: Grants,
 }
 
 /// The pending queue, shaped for the frontend list (no responders).
@@ -489,8 +552,19 @@ fn daemon_resolve(
     decision: String,
     feedback: Option<String>,
     answers: Option<Value>,
+    grant: Option<bool>,
     state: tauri::State<DaemonState>,
 ) {
+    // The owner ticked "send as execution approval" on an ask: record a
+    // single-use pre-authorization the next gate can consume. The TTL policy is
+    // owned here (not the webview) — the frontend only sends the boolean intent.
+    if grant == Some(true) {
+        state
+            .grants
+            .lock()
+            .unwrap()
+            .push(Instant::now() + Duration::from_secs(GRANT_TTL_SECS));
+    }
     let entry = {
         let mut q = state.queue.lock().unwrap();
         q.iter().position(|e| e.id == id).map(|pos| q.remove(pos))
@@ -517,12 +591,14 @@ fn daemon_resolve(
 
 fn run_daemon() {
     let queue: Arc<Mutex<Vec<QueueEntry>>> = Arc::new(Mutex::new(Vec::new()));
+    let grants: Grants = Arc::new(Mutex::new(Vec::new()));
 
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(DaemonState {
             queue: queue.clone(),
+            grants: grants.clone(),
         })
         .invoke_handler(tauri::generate_handler![
             daemon_queue,
@@ -530,6 +606,7 @@ fn run_daemon() {
             save_pasted_image,
             touch_id_approve,
             save_touch_id,
+            save_open_url,
             open_url,
             app_version
         ])
@@ -563,6 +640,7 @@ fn run_daemon() {
             // Socket listener: push each incoming request and wake the window.
             let handle = app.handle().clone();
             let q = queue.clone();
+            let g = grants.clone();
             std::thread::spawn(move || {
                 let h = handle.clone();
                 let served = ipc::serve(move |incoming| {
@@ -577,6 +655,29 @@ fn run_daemon() {
                         .and_then(|v| v.as_str())
                         .unwrap_or("annotate")
                         .to_string();
+
+                    // Pre-authorization protocol — answered inline, never queued,
+                    // so the window is not disturbed:
+                    //   "consume" (from the permission hook): hand back one live
+                    //     grant, single-use, or "none".
+                    //   "grant"   (from single-shot submit_answers): record one.
+                    if kind == "consume" {
+                        let granted =
+                            take_live_grant(&mut g.lock().unwrap(), Instant::now());
+                        incoming.responder.reply(&serde_json::json!({
+                            "decision": if granted { "approved" } else { "none" }
+                        }));
+                        return;
+                    }
+                    if kind == "grant" {
+                        g.lock()
+                            .unwrap()
+                            .push(Instant::now() + Duration::from_secs(GRANT_TTL_SECS));
+                        incoming
+                            .responder
+                            .reply(&serde_json::json!({ "decision": "granted" }));
+                        return;
+                    }
                     let inner = payload
                         .get("payload")
                         .cloned()
@@ -632,12 +733,17 @@ fn run_daemon() {
                 CheckMenuItemBuilder::with_id("touch_id", "Touch ID for critical gates")
                     .checked(config_touch_id())
                     .build(app)?;
+            let open_url_toggle =
+                CheckMenuItemBuilder::with_id("open_url", "Open action URL on approve")
+                    .checked(config_open_url())
+                    .build(app)?;
             let sep2 = PredefinedMenuItem::separator(app)?;
             let quit = MenuItemBuilder::with_id("quit", "종료 (Quit daemon)").build(app)?;
             let menu = MenuBuilder::new(app)
-                .items(&[&info, &sep, &touch_toggle, &sep2, &quit])
+                .items(&[&info, &sep, &touch_toggle, &open_url_toggle, &sep2, &quit])
                 .build()?;
             let toggle_handle = touch_toggle.clone();
+            let open_url_handle = open_url_toggle.clone();
             if let Some(icon) = app.default_window_icon().cloned() {
                 let _ = TrayIconBuilder::with_id("knock")
                     .icon(icon)
@@ -653,6 +759,11 @@ fn run_daemon() {
                             let next = !config_touch_id();
                             let _ = set_config_touch_id(next);
                             let _ = toggle_handle.set_checked(next);
+                        }
+                        "open_url" => {
+                            let next = !config_open_url();
+                            let _ = set_config_open_url(next);
+                            let _ = open_url_handle.set_checked(next);
                         }
                         _ => {}
                     })
@@ -679,6 +790,7 @@ fn launch(state: AppState) {
             save_pasted_image,
             touch_id_approve,
             save_touch_id,
+            save_open_url,
             dismiss,
             open_url,
             app_version
@@ -730,12 +842,17 @@ fn launch(state: AppState) {
                 CheckMenuItemBuilder::with_id("touch_id", "Touch ID for critical gates")
                     .checked(config_touch_id())
                     .build(app)?;
+            let open_url_toggle =
+                CheckMenuItemBuilder::with_id("open_url", "Open action URL on approve")
+                    .checked(config_open_url())
+                    .build(app)?;
             let sep2 = PredefinedMenuItem::separator(app)?;
             let quit = MenuItemBuilder::with_id("quit", "닫기 (Quit)").build(app)?;
             let menu = MenuBuilder::new(app)
-                .items(&[&info, &sep, &touch_toggle, &sep2, &quit])
+                .items(&[&info, &sep, &touch_toggle, &open_url_toggle, &sep2, &quit])
                 .build()?;
             let toggle_handle = touch_toggle.clone();
+            let open_url_handle = open_url_toggle.clone();
             if let Some(icon) = app.default_window_icon().cloned() {
                 let _ = TrayIconBuilder::with_id("knock")
                     .icon(icon)
@@ -751,6 +868,11 @@ fn launch(state: AppState) {
                             let next = !config_touch_id();
                             let _ = set_config_touch_id(next);
                             let _ = toggle_handle.set_checked(next);
+                        }
+                        "open_url" => {
+                            let next = !config_open_url();
+                            let _ = set_config_open_url(next);
+                            let _ = open_url_handle.set_checked(next);
                         }
                         _ => {}
                     })
@@ -999,10 +1121,22 @@ fn run_hook() {
         }
     };
 
+    // Pre-authorization first — before the plan check — so it also applies to
+    // non-plan gates (e.g. a Bash matcher). If the owner already confirmed via an
+    // ask-confirm, spend one live grant and allow without showing the window.
+    // Never spawns a daemon (no daemon ⇒ no grant ⇒ normal gate); fails closed on
+    // any error.
+    if let Some(resp) = ipc::client_request_existing(&serde_json::json!({ "kind": "consume" })) {
+        if resp.get("decision").and_then(|v| v.as_str()) == Some("approved") {
+            output_hook("approved", None);
+        }
+    }
+
     let plan = extract_plan(&payload);
 
     if plan.trim().is_empty() {
-        // No plan to review (not an ExitPlanMode request) — stay out of the way.
+        // No plan to review (e.g. a Bash gate with no pending grant) — stay out of
+        // the way and let Claude Code's normal permission flow decide.
         std::process::exit(0);
     }
 
@@ -1014,6 +1148,7 @@ fn run_hook() {
         "gate": true,
         "touchId": false,
         "configTouchId": config_touch_id(),
+        "configOpenUrl": config_open_url(),
     });
     try_daemon("annotate", inner, false, true);
 
@@ -1054,6 +1189,19 @@ pub fn run() {
             touch_id,
             action_url,
         } => {
+            // Pre-authorization: a `--gate` annotation (the critical gate) can be
+            // satisfied by a live grant the owner set via an ask-confirm — spend
+            // it and approve without showing the window. Only gates consume grants
+            // (a non-gate annotation is just a viewer). Never spawns a daemon.
+            if gate {
+                if let Some(resp) =
+                    ipc::client_request_existing(&serde_json::json!({ "kind": "consume" }))
+                {
+                    if resp.get("decision").and_then(|v| v.as_str()) == Some("approved") {
+                        output_annotate("approved", None, json);
+                    }
+                }
+            }
             let md = std::fs::read_to_string(&file).unwrap_or_else(|e| {
                 eprintln!("knock: cannot read {}: {}", file.display(), e);
                 std::process::exit(2);
@@ -1071,6 +1219,7 @@ pub fn run() {
                 "gate": gate,
                 "touchId": touch_id,
                 "configTouchId": config_touch_id(),
+                "configOpenUrl": config_open_url(),
                 "actionUrl": action_url,
             });
             try_daemon("annotate", inner, json, false);
@@ -1111,6 +1260,7 @@ pub fn run() {
                 "title": title.clone(),
                 "contextHtml": ask_context_html(&questions),
                 "configTouchId": config_touch_id(),
+                "configOpenUrl": config_open_url(),
             });
             try_daemon("ask", inner, true, false);
             launch(AppState {
@@ -1138,6 +1288,33 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grant_is_single_use_then_empty() {
+        let now = Instant::now();
+        let mut g = vec![now + Duration::from_secs(300)];
+        assert!(take_live_grant(&mut g, now)); // first consume spends it
+        assert!(!take_live_grant(&mut g, now)); // second finds nothing
+    }
+
+    #[test]
+    fn grant_expires() {
+        let now = Instant::now();
+        // A grant that expired one second ago must not be consumable.
+        let mut g = vec![now - Duration::from_secs(1)];
+        assert!(!take_live_grant(&mut g, now));
+        assert!(g.is_empty()); // and it is pruned
+    }
+
+    #[test]
+    fn grant_takes_oldest_first() {
+        let now = Instant::now();
+        let older = now + Duration::from_secs(100);
+        let newer = now + Duration::from_secs(200);
+        let mut g = vec![older, newer];
+        assert!(take_live_grant(&mut g, now));
+        assert_eq!(g, vec![newer]); // oldest spent, newer remains
+    }
 
     #[test]
     fn hook_approved_allows() {

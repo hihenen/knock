@@ -262,6 +262,7 @@ knock settings
 
 설정 창에서 토글:
 - **🔒 critical 게이트에 Touch ID 요구** → `~/.config/knock/config.json` 의 `{"touch_id": true}` 로 저장. 에이전트가 이 값을 읽어 prd/IAM/destructive 같은 중요 승인에 Touch ID 를 적용 (환경변수 불필요, 한 번만 켜면 영구).
+- **🌐 Open action URL on approve** (default ON) → menubar 트레이의 체크박스로 토글. OFF 면 승인 시 `--action-url` 자동 점프를 끄고 대신 URL 을 클립보드에 복사 (`{"open_url": false}`). 다수 게이트 연속 승인 시 탭 폭주 회피.
 
 설정 창 하단에 **버그 신고**(GitHub Issues) · **릴리스 노트** 링크와 현재 버전이 표시됩니다.
 
