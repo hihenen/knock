@@ -4,6 +4,8 @@ All notable changes to knock are documented here. Versions follow [SemVer](https
 
 ## [Unreleased]
 
+## [0.4.7] - 2026-07-07
+
 ### Added
 - **ask 확인 → 실행 승인 함께 전송 (owner pre-authorization)** — `knock ask` 요약
   화면에 "이 선택을 실행 승인으로 함께 전송" 체크박스 추가(default OFF). 켜면
