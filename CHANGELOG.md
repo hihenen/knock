@@ -4,6 +4,14 @@ All notable changes to knock are documented here. Versions follow [SemVer](https
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-07-13
+
+### Added
+- **게이트 헤더 음성/반복 빠른 컨트롤** — 게이트 창 헤더에 음성 드롭다운
+  (기본·F1~F5·M1~M5)과 반복 횟수 입력칸을 추가. 설정 창을 열지 않아도
+  낭독 음성과 배달 알림 반복 횟수를 그 자리에서 바꿀 수 있고, 변경 즉시
+  config(`tts_voice`·`tts_repeat`)에 저장되어 다음 게이트부터 반영된다.
+
 ## [0.5.0] - 2026-07-13
 
 ### Added
