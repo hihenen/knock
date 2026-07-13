@@ -12,6 +12,11 @@
     <header class="topbar">
       <span class="badge" id="badge">승인 요청</span>
       <h1 id="title">Knock</h1>
+      <label id="tts-toggle-wrap" class="td-toggle hidden" title="게이트 알림 음성 낭독(TTS) 켜기/끄기">
+        <input type="checkbox" id="tts-header-toggle" />
+        <span class="td-switch"></span>
+        <span class="td-text">🔊 소리</span>
+      </label>
       <label id="td-toggle-wrap" class="td-toggle hidden" title="critical 게이트 승인에 Touch ID 요구">
         <input type="checkbox" id="td-toggle" />
         <span class="td-switch"></span>
@@ -50,12 +55,55 @@
         <div class="toggle-text">
           <div class="toggle-label">🔊 승인·질문 알림 음성 낭독 (TTS)</div>
           <div class="toggle-desc">
-            새 게이트가 뜨면 제목을 소리로 읽어줍니다. 기본은 OS 내장 음성
+            새 게이트가 뜨면 소리로 읽어줍니다. 기본은 OS 내장 음성
             (macOS say · Windows SAPI). 온디바이스 Supertonic 엔진은
             <code>knock tts install</code> 로 켤 수 있습니다.
           </div>
         </div>
       </label>
+
+      <!-- TTS 세부 옵션 (TTS 켜졌을 때만 표시) -->
+      <div id="tts-options" class="tts-options hidden">
+        <label class="tts-opt-row">
+          <span class="tts-opt-label">낭독 범위</span>
+          <select id="tts-scope">
+            <option value="title">제목만 (헤더 알림)</option>
+            <option value="full">내용까지 브리핑</option>
+          </select>
+        </label>
+        <label class="tts-opt-row">
+          <span class="tts-opt-label">스타일</span>
+          <select id="tts-style">
+            <option value="plain">일반</option>
+            <option value="delivery">배달 알림 (반복)</option>
+          </select>
+        </label>
+        <label class="tts-opt-row">
+          <span class="tts-opt-label">보이스</span>
+          <select id="tts-voice">
+            <option value="">기본 (배달=F1)</option>
+            <option value="F1">F1 (여성)</option>
+            <option value="F2">F2 (여성)</option>
+            <option value="F3">F3 (여성)</option>
+            <option value="F4">F4 (여성)</option>
+            <option value="F5">F5 (여성)</option>
+            <option value="M1">M1 (남성)</option>
+            <option value="M2">M2 (남성)</option>
+            <option value="M3">M3 (남성)</option>
+            <option value="M4">M4 (남성)</option>
+            <option value="M5">M5 (남성)</option>
+          </select>
+        </label>
+        <label class="tts-opt-row" id="tts-repeat-row">
+          <span class="tts-opt-label">반복 횟수</span>
+          <input type="number" id="tts-repeat" min="1" max="10" step="1" />
+        </label>
+        <label class="tts-opt-row tts-opt-col" id="tts-phrase-row">
+          <span class="tts-opt-label">배달 문구 <code>{n}</code>=건수</span>
+          <input type="text" id="tts-phrase" placeholder="노크 주문! 대기중인 요청 {n}건입니다." />
+        </label>
+      </div>
+
       <div class="settings-meta">
         <a href="#" id="report-bug">🐞 버그 신고</a>
         <a href="#" id="release-notes">📋 릴리스 노트</a>
