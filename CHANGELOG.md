@@ -4,6 +4,14 @@ All notable changes to knock are documented here. Versions follow [SemVer](https
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-07-13
+
+### Fixed
+- **여러 노크 동시 도착 시 TTS 겹침/꼬임** — 각 알림이 개별 스레드로 동시에
+  재생돼 소리가 뒤엉키던 문제. 이제 전용 워커 스레드가 **한 번에 하나씩만**
+  재생하고, 짧은 시간에 몰린 알림은 **최신 것만**(대기 건수는 누적이므로) 재생해
+  파일업/겹침을 없앤다.
+
 ## [0.5.1] - 2026-07-13
 
 ### Added

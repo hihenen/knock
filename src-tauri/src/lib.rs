@@ -385,10 +385,42 @@ fn speak_new_request(len: usize, title: &str, body: &str) {
     }
 }
 
-/// Speak `text` aloud `times` times, best-effort and non-blocking. Never fails
-/// the caller. For the Supertonic engine the phrase is synthesized ONCE and the
-/// WAV replayed `times` times (cheap); the OS-native voice re-speaks per repeat.
-/// `female` selects a bright female voice (Supertonic F1 / macOS Yuna·Samantha).
+struct TtsJob {
+    text: String,
+    times: u32,
+    female: bool,
+}
+
+/// Single pending TTS job + its condvar. A lone worker thread drains this, so
+/// only ONE announcement ever plays at a time (no overlapping/garbled audio
+/// when many knocks arrive at once). New jobs REPLACE the pending one
+/// (coalesce): when a burst arrives we announce just the latest state (the
+/// count is cumulative anyway) instead of piling up N sequential clips.
+static TTS_SLOT: std::sync::OnceLock<(Mutex<Option<TtsJob>>, std::sync::Condvar)> =
+    std::sync::OnceLock::new();
+static TTS_WORKER: std::sync::Once = std::sync::Once::new();
+
+fn tts_slot() -> &'static (Mutex<Option<TtsJob>>, std::sync::Condvar) {
+    TTS_SLOT.get_or_init(|| (Mutex::new(None), std::sync::Condvar::new()))
+}
+
+/// Synthesize + play one job to completion (blocking; runs on the worker).
+fn tts_play_job(job: &TtsJob) {
+    if config_tts_engine() == "supertonic" {
+        let lang = if job.text.chars().any(|c| ('\u{ac00}'..='\u{d7a3}').contains(&c)) {
+            "ko"
+        } else {
+            "en"
+        };
+        if tts_supertonic(&job.text, lang, job.times, job.female) {
+            return;
+        }
+    }
+    speak_os_native(&job.text, job.times, job.female);
+}
+
+/// Queue `text` (spoken `times` times) for the serial TTS worker. Never blocks
+/// the caller. `female` selects a bright female voice.
 fn speak_ex(text: &str, times: u32, female: bool) {
     if !config_tts() || times == 0 {
         return;
@@ -401,24 +433,30 @@ fn speak_ex(text: &str, times: u32, female: bool) {
     // tedious); short title/delivery lines are well under this.
     let spoken: String = text.chars().take(500).collect();
 
-    // Run on a detached thread: synthesis + playback are slow (~1-3s) and must
-    // not block the caller (UI/daemon listener). The thread outlives this call
-    // and blocks on the player until playback FINISHES, so audio is never cut
-    // short by the caller returning.
-    std::thread::spawn(move || {
-        // Supertonic engine: try the sidecar first; on any miss, fall through.
-        if config_tts_engine() == "supertonic" {
-            let lang = if spoken.chars().any(|c| ('\u{ac00}'..='\u{d7a3}').contains(&c)) {
-                "ko"
-            } else {
-                "en"
+    // Lazily start the single worker thread that plays jobs one at a time.
+    TTS_WORKER.call_once(|| {
+        std::thread::spawn(|| loop {
+            let (m, cv) = tts_slot();
+            let job = {
+                let mut pending = m.lock().unwrap();
+                while pending.is_none() {
+                    pending = cv.wait(pending).unwrap();
+                }
+                pending.take().unwrap()
             };
-            if tts_supertonic(&spoken, lang, times, female) {
-                return;
-            }
-        }
-        speak_os_native(&spoken, times, female);
+            tts_play_job(&job);
+        });
     });
+
+    // Replace any still-pending (unplayed) job with this latest one, then wake
+    // the worker. A job already playing finishes uninterrupted.
+    let (m, cv) = tts_slot();
+    *m.lock().unwrap() = Some(TtsJob {
+        text: spoken,
+        times,
+        female,
+    });
+    cv.notify_one();
 }
 
 /// The zero-dependency OS-native voice path (macOS `say`, Windows SAPI,
