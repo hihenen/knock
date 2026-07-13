@@ -646,6 +646,7 @@ fn get_payload(state: tauri::State<AppState>) -> Value {
             "configTouchId": config_touch_id(),
             "configOpenUrl": config_open_url(),
             "configTts": config_tts(),
+            "configTtsScope": config_tts_scope(),
             "actionUrl": action_url,
         }),
         Mode::Ask { questions, title } => serde_json::json!({
@@ -656,6 +657,7 @@ fn get_payload(state: tauri::State<AppState>) -> Value {
             "configTouchId": config_touch_id(),
             "configOpenUrl": config_open_url(),
             "configTts": config_tts(),
+            "configTtsScope": config_tts_scope(),
         }),
         Mode::Settings => serde_json::json!({
             "mode": "settings",
@@ -1694,6 +1696,7 @@ fn run_hook() {
         "configTouchId": config_touch_id(),
         "configOpenUrl": config_open_url(),
         "configTts": config_tts(),
+            "configTtsScope": config_tts_scope(),
     });
     try_daemon("annotate", inner, false, true);
 
@@ -1766,6 +1769,7 @@ pub fn run() {
                 "configTouchId": config_touch_id(),
                 "configOpenUrl": config_open_url(),
             "configTts": config_tts(),
+            "configTtsScope": config_tts_scope(),
                 "actionUrl": action_url,
             });
             try_daemon("annotate", inner, json, false);
@@ -1808,6 +1812,7 @@ pub fn run() {
                 "configTouchId": config_touch_id(),
                 "configOpenUrl": config_open_url(),
             "configTts": config_tts(),
+            "configTtsScope": config_tts_scope(),
             });
             try_daemon("ask", inner, true, false);
             launch(AppState {
