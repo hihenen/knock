@@ -647,6 +647,8 @@ fn get_payload(state: tauri::State<AppState>) -> Value {
             "configOpenUrl": config_open_url(),
             "configTts": config_tts(),
             "configTtsScope": config_tts_scope(),
+            "configTtsVoice": config_tts_voice().unwrap_or_default(),
+            "configTtsRepeat": config_tts_repeat(),
             "actionUrl": action_url,
         }),
         Mode::Ask { questions, title } => serde_json::json!({
@@ -658,6 +660,8 @@ fn get_payload(state: tauri::State<AppState>) -> Value {
             "configOpenUrl": config_open_url(),
             "configTts": config_tts(),
             "configTtsScope": config_tts_scope(),
+            "configTtsVoice": config_tts_voice().unwrap_or_default(),
+            "configTtsRepeat": config_tts_repeat(),
         }),
         Mode::Settings => serde_json::json!({
             "mode": "settings",
@@ -1697,6 +1701,8 @@ fn run_hook() {
         "configOpenUrl": config_open_url(),
         "configTts": config_tts(),
             "configTtsScope": config_tts_scope(),
+            "configTtsVoice": config_tts_voice().unwrap_or_default(),
+            "configTtsRepeat": config_tts_repeat(),
     });
     try_daemon("annotate", inner, false, true);
 
@@ -1770,6 +1776,8 @@ pub fn run() {
                 "configOpenUrl": config_open_url(),
             "configTts": config_tts(),
             "configTtsScope": config_tts_scope(),
+            "configTtsVoice": config_tts_voice().unwrap_or_default(),
+            "configTtsRepeat": config_tts_repeat(),
                 "actionUrl": action_url,
             });
             try_daemon("annotate", inner, json, false);
@@ -1813,6 +1821,8 @@ pub fn run() {
                 "configOpenUrl": config_open_url(),
             "configTts": config_tts(),
             "configTtsScope": config_tts_scope(),
+            "configTtsVoice": config_tts_voice().unwrap_or_default(),
+            "configTtsRepeat": config_tts_repeat(),
             });
             try_daemon("ask", inner, true, false);
             launch(AppState {

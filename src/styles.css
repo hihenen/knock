@@ -554,6 +554,17 @@ body {
 .tts-opt-row input[type="number"] { width: 72px; }
 .tts-opt-row.tts-opt-col input { width: auto; }
 
+/* 게이트 헤더의 음성/반복 빠른 컨트롤 */
+.hdr-controls { display: inline-flex; align-items: center; gap: 6px; }
+.hdr-controls select,
+.hdr-controls input {
+  font: inherit; font-size: 12px; padding: 3px 6px;
+  border: 1px solid var(--border); border-radius: 7px;
+  background: var(--bg, #fff); color: var(--fg, inherit);
+}
+.hdr-controls input[type="number"] { width: 46px; }
+.hdr-ctrl-x { font-size: 12px; opacity: 0.7; }
+
 /* rendered-markdown links open in the real browser (makeLinksExternal) */
 .markdown a, .ask-context a { color: var(--accent, #3b82f6); cursor: pointer; }
 
