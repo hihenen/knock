@@ -4,6 +4,26 @@ All notable changes to knock are documented here. Versions follow [SemVer](https
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-13
+
+### Added
+- **음성 알림 (opt-in TTS)** — 새 승인/질문 게이트가 뜰 때 소리로 읽어준다.
+  자리를 비운 사이 알림을 소리로 알아채는 AFK 시나리오를 위한 기능. 기본은
+  무음이라 기존 동작에 영향 없음.
+  - **엔진 2종**: OS-native(macOS `say`·Windows SAPI·Linux `spd-say`/`espeak`,
+    의존성 0) / 온디바이스 **Supertonic**(native Rust + ONNX 사이드카). 코어
+    바이너리엔 ONNX 런타임을 링크하지 않아 오프라인·경량 유지. Supertonic 은
+    `knock tts install` 로 opt-in 설치(모델 ~398MB 다운로드).
+  - **낭독 범위**(`tts_scope`): 제목만 / 본문 내용까지 브리핑. 게이트 헤더의
+    📄 내용 토글 또는 설정 창에서 전환.
+  - **스타일**(`tts_style`): 일반 / 배달 알림(밝은 여성 보이스로 N회 반복).
+    문구는 사용자 편집(`tts_phrase`, `{n}`=대기 건수, 기본 "노크 주문!"),
+    반복 횟수 설정(`tts_repeat`, 1–10).
+  - **보이스**(`tts_voice`): Supertonic F1–F5 / M1–M5, OS-native 는 Yuna/Samantha.
+  - **토글 3층**: 게이트 헤더 🔊 소리 토글 · menubar 트레이 · 설정 창. 모두
+    config `tts` 로 수렴.
+  - `knock tts status | install | uninstall` 서브커맨드.
+
 ## [0.4.7] - 2026-07-07
 
 ### Added
