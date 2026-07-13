@@ -31,6 +31,7 @@ interface AskPayload {
 interface SettingsPayload {
   mode: "settings";
   touchId: boolean;
+  tts?: boolean;
   version?: string;
 }
 type Payload = AnnotatePayload | AskPayload | SettingsPayload;
@@ -734,6 +735,12 @@ function setupSettings(p: SettingsPayload) {
   toggle.checked = p.touchId;
   toggle.addEventListener("change", () => {
     invoke("save_touch_id", { enabled: toggle.checked });
+  });
+
+  const ttsToggle = $<HTMLInputElement>("tts-toggle");
+  ttsToggle.checked = p.tts ?? false;
+  ttsToggle.addEventListener("change", () => {
+    invoke("save_tts", { enabled: ttsToggle.checked });
   });
 
   if (p.version) $("version-tag").textContent = `v${p.version}`;
