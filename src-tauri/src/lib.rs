@@ -95,6 +95,11 @@ enum Command {
         #[command(subcommand)]
         action: DaemonAction,
     },
+    /// Manage the opt-in on-device Supertonic TTS engine (native Rust + ONNX).
+    Tts {
+        #[command(subcommand)]
+        action: TtsAction,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -105,6 +110,17 @@ enum DaemonAction {
     Uninstall,
     /// Show whether the LaunchAgent is installed.
     Status,
+}
+
+#[derive(Subcommand, Debug)]
+enum TtsAction {
+    /// Show TTS state: current engine, and whether the Supertonic sidecar is ready.
+    Status,
+    /// Print setup instructions + expected layout for the Supertonic sidecar,
+    /// and switch the TTS engine to "supertonic".
+    Install,
+    /// Switch the TTS engine back to the OS-native voice (does not delete assets).
+    Uninstall,
 }
 
 fn config_path() -> PathBuf {
@@ -135,6 +151,327 @@ fn config_open_url() -> bool {
         .get("open_url")
         .and_then(|v| v.as_bool())
         .unwrap_or(true)
+}
+
+/// Whether to speak alerts aloud when a new gate/question arrives.
+/// Default = false (opt-in — keeps the silent, dependency-free baseline).
+/// Uses only OS-native TTS (macOS `say`, Windows SAPI, Linux `spd-say`/`espeak`)
+/// so the binary stays tiny and offline. A future opt-in Supertonic sidecar
+/// can hook the same `speak()` seam.
+fn config_tts() -> bool {
+    read_config()
+        .get("tts")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// TTS engine selector: "os" (default) uses the built-in platform voice;
+/// "supertonic" routes to the opt-in on-device Supertonic sidecar (see
+/// `tts_supertonic`). Any unknown value falls back to "os".
+fn config_tts_engine() -> String {
+    read_config()
+        .get("tts_engine")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "os".to_string())
+}
+
+/// Directory holding the opt-in Supertonic sidecar + its ONNX/voice assets.
+/// Kept out of the core binary so the released knock stays ~9.5MB and offline.
+fn tts_dir() -> PathBuf {
+    let base = std::env::var("HOME").unwrap_or_default();
+    PathBuf::from(base).join(".config/knock/tts")
+}
+
+/// Path to the Supertonic sidecar binary (a native Rust + ONNX Runtime build,
+/// `ort`-based, adapted from supertone-inc/supertonic's `rust/` example).
+fn tts_sidecar_bin() -> PathBuf {
+    let name = if cfg!(windows) {
+        "knock-tts.exe"
+    } else {
+        "knock-tts"
+    };
+    tts_dir().join(name)
+}
+
+/// True when the Supertonic sidecar + a default voice style are present.
+fn supertonic_ready() -> bool {
+    tts_sidecar_bin().is_file() && tts_dir().join("assets/onnx").is_dir()
+}
+
+/// Speak via the Supertonic sidecar: synthesize `text` to a WAV, then play it
+/// through the OS audio player. Returns false on any failure so the caller can
+/// fall back to the OS-native voice — never a silent dead-end.
+///
+/// The sidecar IS supertone-inc/supertonic's stock `example_onnx` binary
+/// (renamed `knock-tts`), so we drive its real CLI: `--onnx-dir/--voice-style/
+/// --text/--lang/--save-dir/--n-test`. It names outputs `<sanitized>_<n>.wav`,
+/// so we hand it a fresh empty dir and grab whatever `.wav` lands there.
+fn tts_supertonic(text: &str, lang: &str, times: u32, female: bool) -> bool {
+    if !supertonic_ready() {
+        return false;
+    }
+    let dir = tts_dir();
+    // Unique subdir per call so overlapping alerts never delete a WAV that a
+    // prior afplay is still reading (that was the "sound cuts off" bug).
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    let out_dir = dir.join("out").join(format!("{pid}-{n}"));
+    if std::fs::create_dir_all(&out_dir).is_err() {
+        return false;
+    }
+    let synth = std::process::Command::new(tts_sidecar_bin())
+        .arg("--onnx-dir")
+        .arg(dir.join("assets/onnx"))
+        .arg("--voice-style")
+        .arg({
+            // Explicit `tts_voice` (e.g. "F3") wins; else default by gender.
+            let v = config_tts_voice()
+                .unwrap_or_else(|| if female { "F1".into() } else { "M1".into() });
+            dir.join(format!("assets/voice_styles/{v}.json"))
+        })
+        .arg("--text")
+        .arg(text)
+        .arg("--lang")
+        .arg(lang)
+        .arg("--save-dir")
+        .arg(&out_dir)
+        .arg("--n-test")
+        .arg("1")
+        .status();
+    if !matches!(synth, Ok(s) if s.success()) {
+        return false;
+    }
+    // Pick the single WAV the sidecar just wrote.
+    let wav = std::fs::read_dir(&out_dir)
+        .ok()
+        .and_then(|rd| {
+            rd.filter_map(|e| e.ok().map(|e| e.path()))
+                .find(|p| p.extension().is_some_and(|x| x == "wav"))
+        });
+    let played = match wav {
+        // Synthesized once, replayed `times` times (each play blocks to the end).
+        Some(p) => {
+            let mut ok = false;
+            for _ in 0..times.max(1) {
+                ok = play_wav(&p) || ok;
+            }
+            ok
+        }
+        None => false,
+    };
+    // Playback is done — safe to remove this call's own dir (never touches
+    // another concurrent call's dir, so nothing gets cut off).
+    let _ = std::fs::remove_dir_all(&out_dir);
+    played
+}
+
+/// Play a WAV file through the platform's built-in audio player, blocking until
+/// playback finishes (the caller runs on a detached thread, so this is fine and
+/// guarantees the audio is never cut short). Best-effort.
+fn play_wav(path: &std::path::Path) -> bool {
+    #[cfg(target_os = "macos")]
+    let status = std::process::Command::new("afplay").arg(path).status();
+    #[cfg(target_os = "windows")]
+    let status = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            &format!(
+                "(New-Object Media.SoundPlayer '{}').PlaySync()",
+                path.display().to_string().replace('\'', "''")
+            ),
+        ])
+        .status();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let status = std::process::Command::new("paplay")
+        .arg(path)
+        .status()
+        .or_else(|_| std::process::Command::new("aplay").arg(path).status());
+    matches!(status, Ok(s) if s.success())
+}
+
+/// Speak `text` aloud, best-effort and non-blocking. Never fails the caller.
+/// Dispatches to the opt-in Supertonic sidecar when selected & ready, otherwise
+/// the platform's built-in TTS. Detects Korean to pass the right language code.
+/// Explicit Supertonic voice style ("F1".."F5" / "M1".."M5"), or None to pick
+/// by gender. Sanitized to the known IDs so it can't point at arbitrary paths.
+fn config_tts_voice() -> Option<String> {
+    let v = read_config()
+        .get("tts_voice")
+        .and_then(|v| v.as_str())?
+        .to_string();
+    let ok = matches!(v.as_str(),
+        "F1" | "F2" | "F3" | "F4" | "F5" | "M1" | "M2" | "M3" | "M4" | "M5");
+    ok.then_some(v)
+}
+
+/// Default delivery announcement; `{n}` is replaced with the pending count.
+const DEFAULT_DELIVERY_PHRASE: &str = "노크 주문! 대기중인 요청 {n}건입니다.";
+
+/// User-editable delivery announcement template ({n} = pending count).
+fn config_tts_phrase() -> String {
+    read_config()
+        .get("tts_phrase")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(DEFAULT_DELIVERY_PHRASE)
+        .to_string()
+}
+
+/// Repeat count for the delivery-style announcement (default 3, clamped 1..=10).
+fn config_tts_repeat() -> u32 {
+    read_config()
+        .get("tts_repeat")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(3)
+        .clamp(1, 10) as u32
+}
+
+/// TTS announcement style: "plain" (default) or "delivery" — a playful,
+/// Baemin-order-call vibe. Any unknown value falls back to "plain".
+fn config_tts_style() -> String {
+    read_config()
+        .get("tts_style")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "plain".to_string())
+}
+
+/// TTS reading scope: "title" (default, reads just the gate title) or "full"
+/// (title + the body content). Any unknown value falls back to "title".
+fn config_tts_scope() -> String {
+    read_config()
+        .get("tts_scope")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "title".to_string())
+}
+
+/// Strip HTML tags to plain speakable text and collapse whitespace.
+fn html_to_text(html: &str) -> String {
+    let mut out = String::new();
+    let mut in_tag = false;
+    for c in html.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Announce a gate by voice. `len` is the pending-queue count, `body` the
+/// plain-text content (tag-stripped, read only when scope = "full").
+/// Style "delivery" = a cheerful bright-female order-call repeated N times
+/// (config `tts_repeat`); otherwise one plain line.
+fn speak_new_request(len: usize, title: &str, body: &str) {
+    if config_tts_style() == "delivery" {
+        // Order-call, bright female voice, repeated N times. Phrase is a
+        // user-editable template with `{n}` = pending count.
+        let phrase = config_tts_phrase().replace("{n}", &len.to_string());
+        speak_ex(&phrase, config_tts_repeat(), true);
+    } else {
+        let content = if config_tts_scope() == "full" && !body.is_empty() {
+            format!("{title}. {body}")
+        } else {
+            title.to_string()
+        };
+        speak_ex(&format!("노크. {content}"), 1, false);
+    }
+}
+
+/// Speak `text` aloud `times` times, best-effort and non-blocking. Never fails
+/// the caller. For the Supertonic engine the phrase is synthesized ONCE and the
+/// WAV replayed `times` times (cheap); the OS-native voice re-speaks per repeat.
+/// `female` selects a bright female voice (Supertonic F1 / macOS Yuna·Samantha).
+fn speak_ex(text: &str, times: u32, female: bool) {
+    if !config_tts() || times == 0 {
+        return;
+    }
+    let text = text.trim();
+    if text.is_empty() {
+        return;
+    }
+    // Cap length so full-content reads stay bounded (PRD-length bodies would be
+    // tedious); short title/delivery lines are well under this.
+    let spoken: String = text.chars().take(500).collect();
+
+    // Run on a detached thread: synthesis + playback are slow (~1-3s) and must
+    // not block the caller (UI/daemon listener). The thread outlives this call
+    // and blocks on the player until playback FINISHES, so audio is never cut
+    // short by the caller returning.
+    std::thread::spawn(move || {
+        // Supertonic engine: try the sidecar first; on any miss, fall through.
+        if config_tts_engine() == "supertonic" {
+            let lang = if spoken.chars().any(|c| ('\u{ac00}'..='\u{d7a3}').contains(&c)) {
+                "ko"
+            } else {
+                "en"
+            };
+            if tts_supertonic(&spoken, lang, times, female) {
+                return;
+            }
+        }
+        speak_os_native(&spoken, times, female);
+    });
+}
+
+/// The zero-dependency OS-native voice path (macOS `say`, Windows SAPI,
+/// Linux `spd-say`/`espeak`). Speaks `times` times, blocking per repeat so they
+/// don't overlap. Runs on the detached speak thread, so blocking is fine.
+fn speak_os_native(spoken: &str, times: u32, female: bool) {
+    let _ = female; // used only on macOS below; silence unused on other targets
+    // Pick a bright female voice when requested: Korean → Yuna, else Samantha.
+    #[cfg(target_os = "macos")]
+    let voice: Option<&str> = if female {
+        if spoken.chars().any(|c| ('\u{ac00}'..='\u{d7a3}').contains(&c)) {
+            Some("Yuna")
+        } else {
+            Some("Samantha")
+        }
+    } else {
+        None
+    };
+    for _ in 0..times.max(1) {
+        #[cfg(target_os = "macos")]
+        {
+            let mut c = std::process::Command::new("say");
+            if let Some(v) = voice {
+                c.args(["-v", v]);
+            }
+            let _ = c.arg(spoken).status();
+        }
+        #[cfg(target_os = "windows")]
+        {
+            // Escape single quotes for the PowerShell single-quoted string.
+            let esc = spoken.replace('\'', "''");
+            let _ = std::process::Command::new("powershell")
+                .args([
+                    "-NoProfile",
+                    "-Command",
+                    &format!(
+                        "Add-Type -AssemblyName System.Speech; \
+                         (New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak('{esc}')"
+                    ),
+                ])
+                .status();
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            // spd-say preferred; espeak is the common fallback.
+            let r = std::process::Command::new("spd-say")
+                .args(["--wait", spoken])
+                .status();
+            if r.is_err() {
+                let _ = std::process::Command::new("espeak").arg(spoken).status();
+            }
+        }
+    }
 }
 
 enum Mode {
@@ -308,6 +645,8 @@ fn get_payload(state: tauri::State<AppState>) -> Value {
             "touchId": state.touch_id,
             "configTouchId": config_touch_id(),
             "configOpenUrl": config_open_url(),
+            "configTts": config_tts(),
+            "configTtsScope": config_tts_scope(),
             "actionUrl": action_url,
         }),
         Mode::Ask { questions, title } => serde_json::json!({
@@ -317,10 +656,18 @@ fn get_payload(state: tauri::State<AppState>) -> Value {
             "contextHtml": ask_context_html(questions),
             "configTouchId": config_touch_id(),
             "configOpenUrl": config_open_url(),
+            "configTts": config_tts(),
+            "configTtsScope": config_tts_scope(),
         }),
         Mode::Settings => serde_json::json!({
             "mode": "settings",
             "touchId": config_touch_id(),
+            "tts": config_tts(),
+            "ttsStyle": config_tts_style(),
+            "ttsScope": config_tts_scope(),
+            "ttsVoice": config_tts_voice().unwrap_or_default(),
+            "ttsRepeat": config_tts_repeat(),
+            "ttsPhrase": config_tts_phrase(),
             "version": env!("CARGO_PKG_VERSION"),
         }),
     }
@@ -364,6 +711,153 @@ fn set_config_open_url(enabled: bool) -> Result<(), String> {
 #[tauri::command]
 fn save_open_url(enabled: bool) -> Result<(), String> {
     set_config_open_url(enabled)
+}
+
+/// Persist the speak-alerts (TTS) toggle.
+fn set_config_tts(enabled: bool) -> Result<(), String> {
+    let mut cfg = read_config();
+    cfg["tts"] = serde_json::json!(enabled);
+    let path = config_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&cfg).unwrap_or_else(|_| "{}".to_string()),
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn save_tts(enabled: bool) -> Result<(), String> {
+    set_config_tts(enabled)
+}
+
+/// Generic setter for the TTS option keys, used by the settings window.
+/// Whitelisted so the UI can't write arbitrary config keys.
+#[tauri::command]
+fn save_tts_opt(key: String, value: Value) -> Result<(), String> {
+    const ALLOWED: &[&str] = &[
+        "tts_style",
+        "tts_scope",
+        "tts_voice",
+        "tts_repeat",
+        "tts_phrase",
+    ];
+    if !ALLOWED.contains(&key.as_str()) {
+        return Err(format!("disallowed tts key: {key}"));
+    }
+    let mut cfg = read_config();
+    cfg[key] = value;
+    let path = config_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&cfg).unwrap_or_else(|_| "{}".to_string()),
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// Persist the TTS engine selector ("os" | "supertonic").
+fn set_config_tts_engine(engine: &str) -> Result<(), String> {
+    let mut cfg = read_config();
+    cfg["tts_engine"] = serde_json::json!(engine);
+    let path = config_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&cfg).unwrap_or_else(|_| "{}".to_string()),
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// `knock tts status` — report engine + sidecar readiness.
+fn tts_status() {
+    println!("TTS 켜짐(config): {}", config_tts());
+    println!("엔진: {}", config_tts_engine());
+    println!("Supertonic 사이드카: {}", tts_sidecar_bin().display());
+    println!(
+        "Supertonic 준비됨: {}",
+        if supertonic_ready() { "예" } else { "아니오" }
+    );
+}
+
+/// `knock tts install` — Supertonic ships as an opt-in native sidecar rather
+/// than being bundled (keeps the core binary ~9.5MB & offline). Print the
+/// expected layout, then flip the engine so `speak()` prefers it once present.
+fn tts_install() {
+    let dir = tts_dir();
+    if let Err(e) = std::fs::create_dir_all(dir.join("assets")) {
+        eprintln!("knock: cannot create {}: {}", dir.display(), e);
+    }
+    let _ = set_config_tts_engine("supertonic");
+    println!("Supertonic 엔진으로 전환했습니다.\n");
+
+    // 1) Download the ONNX model + preset voices from Hugging Face (idempotent).
+    //    ~398MB — the reason Supertonic is opt-in and never bundled in the core.
+    const HF: &str = "https://huggingface.co/Supertone/supertonic-3/resolve/main";
+    let assets: &[&str] = &[
+        "onnx/duration_predictor.onnx",
+        "onnx/text_encoder.onnx",
+        "onnx/tts.json",
+        "onnx/unicode_indexer.json",
+        "onnx/vector_estimator.onnx",
+        "onnx/vocoder.onnx",
+        "voice_styles/M1.json",
+        "voice_styles/F1.json",
+    ];
+    println!("ONNX 모델·보이스 다운로드 (~398MB, Hugging Face)...");
+    let mut ok = true;
+    for rel in assets {
+        let dest = dir.join("assets").join(rel);
+        if dest.is_file() {
+            println!("  = {rel} (이미 있음)");
+            continue;
+        }
+        if let Some(p) = dest.parent() {
+            let _ = std::fs::create_dir_all(p);
+        }
+        println!("  ↓ {rel}");
+        let status = std::process::Command::new("curl")
+            .args(["-fsSL", &format!("{HF}/{rel}"), "-o"])
+            .arg(&dest)
+            .status();
+        if !matches!(status, Ok(s) if s.success()) {
+            eprintln!("  ! {rel} 다운로드 실패");
+            ok = false;
+        }
+    }
+
+    // 2) The sidecar binary: no prebuilt release yet, so guide the local build.
+    if tts_sidecar_bin().is_file() {
+        println!("\n사이드카 바이너리: 이미 배치됨 ({})", tts_sidecar_bin().display());
+    } else {
+        println!("\n남은 1가지 — 사이드카 바이너리 (supertonic stock `example_onnx`):");
+        println!("  git clone https://github.com/supertone-inc/supertonic");
+        println!("  cd supertonic/rust && cargo build --release");
+        println!(
+            "  cp target/release/example_onnx {}",
+            tts_sidecar_bin().display()
+        );
+    }
+
+    println!("\n모델 라이선스: OpenRAIL-M · 사이드카 코드: MIT");
+    println!("배치 확인: knock tts status  (→ '준비됨: 예')");
+    println!("준비 전까지 knock 은 OS 기본 음성으로 폴백합니다 (무음 아님).");
+    if !ok {
+        eprintln!("\n일부 에셋 다운로드가 실패했습니다. 네트워크 확인 후 다시 실행하세요.");
+    }
+}
+
+/// `knock tts uninstall` — revert to the OS-native voice. Assets are left in
+/// place so re-enabling is instant; delete `~/.config/knock/tts` to reclaim disk.
+fn tts_uninstall() {
+    let _ = set_config_tts_engine("os");
+    println!("OS 기본 음성으로 되돌렸습니다. (에셋은 {} 에 보존)", tts_dir().display());
 }
 
 #[tauri::command]
@@ -607,6 +1101,8 @@ fn run_daemon() {
             touch_id_approve,
             save_touch_id,
             save_open_url,
+            save_tts,
+            save_tts_opt,
             open_url,
             app_version
         ])
@@ -682,6 +1178,16 @@ fn run_daemon() {
                         .get("payload")
                         .cloned()
                         .unwrap_or_else(|| serde_json::json!({}));
+                    // Pull title/body for the spoken announcement before `inner`
+                    // is moved into the queue below.
+                    let spoken_title = inner
+                        .get("title")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("새 요청")
+                        .to_string();
+                    let spoken_body = html_to_text(
+                        inner.get("html").and_then(|v| v.as_str()).unwrap_or(""),
+                    );
                     let len = {
                         let mut qq = q.lock().unwrap();
                         qq.push(QueueEntry {
@@ -713,6 +1219,7 @@ fn run_daemon() {
                         .title("Knock — 새 승인 요청")
                         .body(format!("대기 중인 요청 {}건", len))
                         .show();
+                    speak_new_request(len, &spoken_title, &spoken_body);
                     let _ = h.emit("queue-changed", ());
                 });
                 // serve() only returns on bind failure (another daemon already runs).
@@ -737,13 +1244,25 @@ fn run_daemon() {
                 CheckMenuItemBuilder::with_id("open_url", "Open action URL on approve")
                     .checked(config_open_url())
                     .build(app)?;
+            let tts_toggle = CheckMenuItemBuilder::with_id("tts", "Speak alerts (TTS)")
+                .checked(config_tts())
+                .build(app)?;
             let sep2 = PredefinedMenuItem::separator(app)?;
             let quit = MenuItemBuilder::with_id("quit", "종료 (Quit daemon)").build(app)?;
             let menu = MenuBuilder::new(app)
-                .items(&[&info, &sep, &touch_toggle, &open_url_toggle, &sep2, &quit])
+                .items(&[
+                    &info,
+                    &sep,
+                    &touch_toggle,
+                    &open_url_toggle,
+                    &tts_toggle,
+                    &sep2,
+                    &quit,
+                ])
                 .build()?;
             let toggle_handle = touch_toggle.clone();
             let open_url_handle = open_url_toggle.clone();
+            let tts_handle = tts_toggle.clone();
             if let Some(icon) = app.default_window_icon().cloned() {
                 let _ = TrayIconBuilder::with_id("knock")
                     .icon(icon)
@@ -764,6 +1283,11 @@ fn run_daemon() {
                             let next = !config_open_url();
                             let _ = set_config_open_url(next);
                             let _ = open_url_handle.set_checked(next);
+                        }
+                        "tts" => {
+                            let next = !config_tts();
+                            let _ = set_config_tts(next);
+                            let _ = tts_handle.set_checked(next);
                         }
                         _ => {}
                     })
@@ -791,6 +1315,8 @@ fn launch(state: AppState) {
             touch_id_approve,
             save_touch_id,
             save_open_url,
+            save_tts,
+            save_tts_opt,
             dismiss,
             open_url,
             app_version
@@ -821,10 +1347,12 @@ fn launch(state: AppState) {
                 let _ = win.request_user_attention(Some(UserAttentionType::Critical));
             }
 
-            let (heading, title) = match &app.state::<AppState>().mode {
-                Mode::Annotate { title, .. } => ("Knock — 승인 요청", title.clone()),
-                Mode::Ask { title, .. } => ("Knock — 확인 필요", title.clone()),
-                Mode::Settings => ("Knock — 설정", "설정".to_string()),
+            let (heading, title, body) = match &app.state::<AppState>().mode {
+                Mode::Annotate { title, html, .. } => {
+                    ("Knock — 승인 요청", title.clone(), html_to_text(html))
+                }
+                Mode::Ask { title, .. } => ("Knock — 확인 필요", title.clone(), String::new()),
+                Mode::Settings => ("Knock — 설정", "설정".to_string(), String::new()),
             };
             let _ = app
                 .notification()
@@ -832,6 +1360,7 @@ fn launch(state: AppState) {
                 .title(heading)
                 .body(&title)
                 .show();
+            speak_new_request(1, &title, &body);
 
             let info =
                 MenuItemBuilder::with_id("info", format!("Knock v{}", env!("CARGO_PKG_VERSION")))
@@ -846,13 +1375,25 @@ fn launch(state: AppState) {
                 CheckMenuItemBuilder::with_id("open_url", "Open action URL on approve")
                     .checked(config_open_url())
                     .build(app)?;
+            let tts_toggle = CheckMenuItemBuilder::with_id("tts", "Speak alerts (TTS)")
+                .checked(config_tts())
+                .build(app)?;
             let sep2 = PredefinedMenuItem::separator(app)?;
             let quit = MenuItemBuilder::with_id("quit", "닫기 (Quit)").build(app)?;
             let menu = MenuBuilder::new(app)
-                .items(&[&info, &sep, &touch_toggle, &open_url_toggle, &sep2, &quit])
+                .items(&[
+                    &info,
+                    &sep,
+                    &touch_toggle,
+                    &open_url_toggle,
+                    &tts_toggle,
+                    &sep2,
+                    &quit,
+                ])
                 .build()?;
             let toggle_handle = touch_toggle.clone();
             let open_url_handle = open_url_toggle.clone();
+            let tts_handle = tts_toggle.clone();
             if let Some(icon) = app.default_window_icon().cloned() {
                 let _ = TrayIconBuilder::with_id("knock")
                     .icon(icon)
@@ -873,6 +1414,11 @@ fn launch(state: AppState) {
                             let next = !config_open_url();
                             let _ = set_config_open_url(next);
                             let _ = open_url_handle.set_checked(next);
+                        }
+                        "tts" => {
+                            let next = !config_tts();
+                            let _ = set_config_tts(next);
+                            let _ = tts_handle.set_checked(next);
                         }
                         _ => {}
                     })
@@ -1149,6 +1695,8 @@ fn run_hook() {
         "touchId": false,
         "configTouchId": config_touch_id(),
         "configOpenUrl": config_open_url(),
+        "configTts": config_tts(),
+            "configTtsScope": config_tts_scope(),
     });
     try_daemon("annotate", inner, false, true);
 
@@ -1220,6 +1768,8 @@ pub fn run() {
                 "touchId": touch_id,
                 "configTouchId": config_touch_id(),
                 "configOpenUrl": config_open_url(),
+            "configTts": config_tts(),
+            "configTtsScope": config_tts_scope(),
                 "actionUrl": action_url,
             });
             try_daemon("annotate", inner, json, false);
@@ -1261,6 +1811,8 @@ pub fn run() {
                 "contextHtml": ask_context_html(&questions),
                 "configTouchId": config_touch_id(),
                 "configOpenUrl": config_open_url(),
+            "configTts": config_tts(),
+            "configTtsScope": config_tts_scope(),
             });
             try_daemon("ask", inner, true, false);
             launch(AppState {
@@ -1281,6 +1833,11 @@ pub fn run() {
             DaemonAction::Install => daemon_install(),
             DaemonAction::Uninstall => daemon_uninstall(),
             DaemonAction::Status => daemon_status(),
+        },
+        Command::Tts { action } => match action {
+            TtsAction::Status => tts_status(),
+            TtsAction::Install => tts_install(),
+            TtsAction::Uninstall => tts_uninstall(),
         },
     }
 }

@@ -9,6 +9,8 @@ interface AnnotatePayload {
   touchId?: boolean;
   configTouchId?: boolean;
   configOpenUrl?: boolean;
+  configTts?: boolean;
+  configTtsScope?: string;
   actionUrl?: string | null;
 }
 interface AskOption {
@@ -27,10 +29,18 @@ interface AskPayload {
   questions: { questions?: AskQuestion[] };
   contextHtml?: string | null;
   configTouchId?: boolean;
+  configTts?: boolean;
+  configTtsScope?: string;
 }
 interface SettingsPayload {
   mode: "settings";
   touchId: boolean;
+  tts?: boolean;
+  ttsStyle?: string;
+  ttsScope?: string;
+  ttsVoice?: string;
+  ttsRepeat?: number;
+  ttsPhrase?: string;
   version?: string;
 }
 type Payload = AnnotatePayload | AskPayload | SettingsPayload;
@@ -187,6 +197,8 @@ function setKey(h: ((e: KeyboardEvent) => void) | null) {
 function dropStaleListeners() {
   for (const id of [
     "td-toggle-wrap", // td-toggle (header)
+    "tts-toggle-wrap", // tts-header-toggle (header)
+    "scope-toggle-wrap", // scope-header-toggle (header)
     "annotate-footer", // opt-approve, opt-cancel, feedback, send + focusin
     "ask-footer", // ask-dismiss, ask-prev, ask-next, ask-submit
     "ask-root", // focusin (children are innerHTML-reset below)
@@ -213,6 +225,8 @@ function resetView() {
     document.getElementById(id)?.classList.add("hidden");
   }
   document.getElementById("td-toggle-wrap")?.classList.add("hidden");
+  document.getElementById("tts-toggle-wrap")?.classList.add("hidden");
+  document.getElementById("scope-toggle-wrap")?.classList.add("hidden");
   const ar = document.getElementById("ask-root");
   if (ar) ar.innerHTML = "";
   submitted = false;
@@ -229,6 +243,31 @@ function sendDecision(
   once(() => sink.annotate(decision, feedback));
 }
 
+// Header 🔊 toggle — shown on every gate (annotate/ask) so the owner can mute
+// or unmute the spoken alert right from the window. Persists to config `tts`
+// (same key as the tray + settings toggles), so it survives across gates.
+function wireTtsHeader(configTts?: boolean, configScope?: string) {
+  const wrap = $("tts-toggle-wrap");
+  const toggle = $<HTMLInputElement>("tts-header-toggle");
+  wrap.classList.remove("hidden");
+  toggle.checked = configTts ?? false;
+  toggle.addEventListener("change", () => {
+    invoke("save_tts", { enabled: toggle.checked });
+  });
+
+  // 📄 내용 — quick scope toggle: on = full-content brief, off = title only.
+  const scopeWrap = $("scope-toggle-wrap");
+  const scopeToggle = $<HTMLInputElement>("scope-header-toggle");
+  scopeWrap.classList.remove("hidden");
+  scopeToggle.checked = (configScope ?? "title") === "full";
+  scopeToggle.addEventListener("change", () => {
+    invoke("save_tts_opt", {
+      key: "tts_scope",
+      value: scopeToggle.checked ? "full" : "title",
+    });
+  });
+}
+
 function setupAnnotate(p: AnnotatePayload) {
   $("badge").textContent = "승인 요청";
   $("title").textContent = p.title;
@@ -236,6 +275,7 @@ function setupAnnotate(p: AnnotatePayload) {
   $("content").classList.remove("hidden");
   makeLinksExternal($("content"));
   $("annotate-footer").classList.remove("hidden");
+  wireTtsHeader(p.configTts, p.configTtsScope);
 
   const optApprove = $("opt-approve");
   const optCancel = $("opt-cancel");
@@ -408,6 +448,7 @@ function setupAsk(p: AskPayload) {
   const root = $("ask-root");
   root.classList.remove("hidden");
   $("ask-footer").classList.remove("hidden");
+  wireTtsHeader(p.configTts, p.configTtsScope);
 
   // Header Touch ID toggle — same config as annotate; gates the final submit.
   const tdWrap = $("td-toggle-wrap");
@@ -735,6 +776,57 @@ function setupSettings(p: SettingsPayload) {
   toggle.addEventListener("change", () => {
     invoke("save_touch_id", { enabled: toggle.checked });
   });
+
+  const ttsToggle = $<HTMLInputElement>("tts-toggle");
+  const ttsOptions = $("tts-options");
+  const ttsScope = $<HTMLSelectElement>("tts-scope");
+  const ttsStyle = $<HTMLSelectElement>("tts-style");
+  const ttsVoice = $<HTMLSelectElement>("tts-voice");
+  const ttsRepeat = $<HTMLInputElement>("tts-repeat");
+  const ttsPhrase = $<HTMLInputElement>("tts-phrase");
+  const phraseRow = $("tts-phrase-row");
+  const repeatRow = $("tts-repeat-row");
+
+  // Reflect saved values.
+  ttsToggle.checked = p.tts ?? false;
+  ttsScope.value = p.ttsScope ?? "title";
+  ttsStyle.value = p.ttsStyle ?? "plain";
+  ttsVoice.value = p.ttsVoice ?? "";
+  ttsRepeat.value = String(p.ttsRepeat ?? 3);
+  ttsPhrase.value = p.ttsPhrase ?? "";
+
+  // Show options only when TTS is on; delivery-only rows only in delivery style.
+  const syncVisibility = () => {
+    ttsOptions.classList.toggle("hidden", !ttsToggle.checked);
+    const delivery = ttsStyle.value === "delivery";
+    phraseRow.classList.toggle("hidden", !delivery);
+    repeatRow.classList.toggle("hidden", !delivery);
+  };
+  syncVisibility();
+
+  ttsToggle.addEventListener("change", () => {
+    invoke("save_tts", { enabled: ttsToggle.checked });
+    syncVisibility();
+  });
+  ttsScope.addEventListener("change", () =>
+    invoke("save_tts_opt", { key: "tts_scope", value: ttsScope.value }),
+  );
+  ttsStyle.addEventListener("change", () => {
+    invoke("save_tts_opt", { key: "tts_style", value: ttsStyle.value });
+    syncVisibility();
+  });
+  ttsVoice.addEventListener("change", () =>
+    invoke("save_tts_opt", { key: "tts_voice", value: ttsVoice.value }),
+  );
+  ttsRepeat.addEventListener("change", () =>
+    invoke("save_tts_opt", {
+      key: "tts_repeat",
+      value: Math.min(10, Math.max(1, parseInt(ttsRepeat.value) || 3)),
+    }),
+  );
+  ttsPhrase.addEventListener("change", () =>
+    invoke("save_tts_opt", { key: "tts_phrase", value: ttsPhrase.value }),
+  );
 
   if (p.version) $("version-tag").textContent = `v${p.version}`;
   $("report-bug").addEventListener("click", (e) => {
