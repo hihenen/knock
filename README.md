@@ -44,6 +44,9 @@ knock daemon install   # 로그인 시 데몬 상주 → menubar 트레이 항�
 - 사용자가 **웹에서 클릭·승인**해야 하면(Scalr Apply / GitHub PR / ArgoCD / 대시보드 등)
   `--action-url <URL>` 을 넣어 승인 한 번에 브라우저로 그 행동 지점으로 점프하게 한다.
 - prd·IAM·destructive 같은 critical 승인엔 `--touch-id` (knock settings 로 켠 경우).
+- 사용자가 **브라우저에서 여러 단계를 밟아야** 하면 `--checklist` 를 같이 준다. 승인하면 링크가
+  열리고 요청은 큐에 "진행 중"으로 남아, 작업하다 다시 열어 절차를 보고 끝나면 완료를 누른다.
+  응답은 `{"decision":"approved","completed":true}`.
 - knock 응답: annotate=`{"decision":"approved|annotated|dismissed"}`, ask=`{"answers":{"<h>":["..."]}}`(항상 배열).
 ```
 

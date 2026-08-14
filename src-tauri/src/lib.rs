@@ -81,6 +81,11 @@ enum Command {
         /// GitHub PR, ArgoCD app). Makes knock an "action inbox": approve -> jump to the action.
         #[arg(long)]
         action_url: Option<String>,
+        /// Keep the request in the queue after approval so the owner can re-open
+        /// the steps while working in the browser, then mark it done. Resolves on
+        /// "완료" instead of on approve.
+        #[arg(long)]
+        checklist: bool,
     },
     /// Ask a multiple-choice question (AskUserQuestion schema). Always emits JSON.
     Ask {
@@ -526,6 +531,7 @@ enum Mode {
         title: String,
         gate: bool,
         action_url: Option<String>,
+        checklist: bool,
     },
     Ask {
         questions: Value,
@@ -683,6 +689,7 @@ fn get_payload(state: tauri::State<AppState>) -> Value {
             title,
             gate,
             action_url,
+            checklist,
         } => serde_json::json!({
             "mode": "annotate",
             "html": html,
@@ -696,6 +703,7 @@ fn get_payload(state: tauri::State<AppState>) -> Value {
             "configTtsVoice": config_tts_voice().unwrap_or_default(),
             "configTtsRepeat": config_tts_repeat(),
             "actionUrl": action_url,
+            "checklist": checklist,
         }),
         Mode::Ask { questions, title } => serde_json::json!({
             "mode": "ask",
@@ -1052,6 +1060,9 @@ fn dismiss(state: tauri::State<AppState>) {
 // ---------------------------------------------------------------------------
 
 struct QueueEntry {
+    /// 승인은 받았지만 아직 끝나지 않은 상태(--checklist). 큐에 남아 있어서
+    /// 브라우저에서 작업하다 다시 열어 절차를 볼 수 있고, "완료"를 눌러야 resolve 된다.
+    in_progress: bool,
     id: String,
     kind: String,
     payload: Value,
@@ -1085,6 +1096,7 @@ fn daemon_queue(state: tauri::State<DaemonState>) -> Value {
                 "source": e.source,
                 "createdAt": e.created_at,
                 "payload": e.payload,
+                "inProgress": e.in_progress,
             })
         })
         .collect();
@@ -1108,6 +1120,25 @@ fn update_badge(app: &tauri::AppHandle, n: usize) {
     }
 }
 
+/// `--checklist` 게이트에서 승인이 눌렸을 때. 요청을 resolve 하지 않고 큐에
+/// "진행 중"으로 남긴다. 창은 닫아서(브라우저를 가리지 않게) owner 가 작업하다
+/// 트레이에서 다시 열어 절차를 보고 "완료"를 누를 수 있게 한다.
+///
+/// 승인 즉시 resolve 하면 절차가 화면에서 사라지고, owner 가 끝냈다는 신호도
+/// 받을 수 없다. 그 두 가지를 같이 푸는 자리다.
+#[tauri::command]
+fn daemon_start_action(app: tauri::AppHandle, id: String, state: tauri::State<DaemonState>) {
+    {
+        let mut q = state.queue.lock().unwrap();
+        if let Some(e) = q.iter_mut().find(|e| e.id == id) {
+            e.in_progress = true;
+        }
+    }
+    let len = state.queue.lock().unwrap().len();
+    let _ = app.emit("queue-changed", ());
+    update_badge(&app, len);
+}
+
 #[tauri::command]
 fn daemon_resolve(
     app: tauri::AppHandle,
@@ -1116,6 +1147,7 @@ fn daemon_resolve(
     feedback: Option<String>,
     answers: Option<Value>,
     grant: Option<bool>,
+    completed: Option<bool>,
     state: tauri::State<DaemonState>,
 ) {
     // The owner ticked "send as execution approval" on an ask: record a
@@ -1139,6 +1171,9 @@ fn daemon_resolve(
         }
         if let Some(a) = answers {
             resp["answers"] = a;
+        }
+        if let Some(c) = completed {
+            resp["completed"] = Value::Bool(c);
         }
         entry.responder.reply(&resp);
     }
@@ -1166,6 +1201,7 @@ fn run_daemon() {
         .invoke_handler(tauri::generate_handler![
             daemon_queue,
             daemon_resolve,
+            daemon_start_action,
             hide_window,
             save_pasted_image,
             touch_id_approve,
@@ -1268,6 +1304,7 @@ fn run_daemon() {
                     let len = {
                         let mut qq = q.lock().unwrap();
                         qq.push(QueueEntry {
+                            in_progress: false,
                             id,
                             kind,
                             payload: inner,
@@ -1847,6 +1884,7 @@ fn run_hook() {
             title: "Plan 검토".to_string(),
             gate: true,
             action_url: None,
+            checklist: false,
         },
         json: false,
         hook: true,
@@ -1877,6 +1915,7 @@ pub fn run() {
             title,
             touch_id,
             action_url,
+            checklist,
         } => {
             // Pre-authorization: a `--gate` annotation (the critical gate) can be
             // satisfied by a live grant the owner set via an ask-confirm — spend
@@ -1914,6 +1953,7 @@ pub fn run() {
                 "configTtsVoice": config_tts_voice().unwrap_or_default(),
                 "configTtsRepeat": config_tts_repeat(),
                 "actionUrl": action_url,
+                "checklist": checklist,
             });
             try_daemon("annotate", inner, json, false, None);
             launch(AppState {
@@ -1922,6 +1962,7 @@ pub fn run() {
                     title,
                     gate,
                     action_url,
+                    checklist,
                 },
                 json,
                 hook: false,

@@ -15,6 +15,10 @@ interface AnnotatePayload {
   configTtsVoice?: string;
   configTtsRepeat?: number;
   actionUrl?: string | null;
+  /// 승인 후에도 큐에 남겨 절차를 다시 볼 수 있게 하고, "완료"로 resolve 한다.
+  checklist?: boolean;
+  /// 이 요청이 이미 승인돼 진행 중인가 (큐에서 다시 열었을 때 채워진다).
+  inProgress?: boolean;
 }
 interface AskOption {
   label: string;
@@ -60,6 +64,8 @@ interface QueueItem {
   };
   createdAt?: number;
   payload: AnnotatePayload | AskPayload;
+  /// 승인은 됐지만 아직 완료되지 않은 --checklist 요청.
+  inProgress?: boolean;
 }
 interface QueuePayload {
   mode: "queue";
@@ -71,7 +77,10 @@ interface QueuePayload {
 // In daemon mode this is swapped for one that resolves a specific queued request
 // and reloads the page to show the next item / the list.
 type Sink = {
-  annotate: (decision: string, feedback?: string) => void;
+  annotate: (decision: string, feedback?: string, completed?: boolean) => void;
+  // --checklist 승인: resolve 하지 않고 큐에 "진행 중"으로 남긴다.
+  // 단일창 모드에는 큐가 없어 undefined — 그 경우 기존처럼 즉시 resolve 한다.
+  startAction?: () => void;
   // `grant` = the owner ticked "send as execution approval"; carries a TTL so the
   // next knock permission gate auto-approves once.
   ask: (answers: Record<string, string | string[]>, grant?: boolean) => void;
@@ -279,8 +288,9 @@ function resetView() {
 function sendDecision(
   decision: "approved" | "annotated" | "dismissed",
   feedback?: string,
+  completed?: boolean,
 ) {
-  once(() => sink.annotate(decision, feedback));
+  once(() => sink.annotate(decision, feedback, completed));
 }
 
 // Header 🔊 toggle — shown on every gate (annotate/ask) so the owner can mute
@@ -320,10 +330,20 @@ function setupAnnotate(p: AnnotatePayload) {
   const explicitTouchId = p.touchId === true;
   const approveLabel = optApprove.querySelector(".ask-opt-label");
   const hasAction = !!p.actionUrl;
+  // --checklist 는 승인 시점이 아니라 "완료" 시점에 resolve 한다. 큐에 진행 중으로
+  // 남아 있다가 다시 열리면 버튼이 완료로 바뀐다. startAction 이 없는 단일창
+  // 모드에는 큐가 없으므로 기존처럼 승인 즉시 resolve 한다.
+  const checklistMode = !!p.checklist && !!sink.startAction;
+  const resuming = checklistMode && !!p.inProgress;
   const reflectLabel = () => {
     if (!approveLabel) return;
+    if (resuming) {
+      approveLabel.textContent = "✓ 완료";
+      return;
+    }
     const base = tdToggle.checked ? "🔒 Touch ID 승인" : "✓ 승인";
-    approveLabel.textContent = hasAction ? `${base} → 링크 열기` : base;
+    const suffix = checklistMode ? " → 링크 열기 (완료는 나중에)" : " → 링크 열기";
+    approveLabel.textContent = hasAction ? `${base}${suffix}` : base;
   };
   if (p.gate) {
     tdWrap.classList.remove("hidden");
@@ -354,6 +374,11 @@ function setupAnnotate(p: AnnotatePayload) {
         return; // auth cancelled/failed → keep window open
       }
     }
+    // 다시 열어 "완료"를 누른 경우: 링크를 또 열지 않고 바로 resolve.
+    if (resuming) {
+      sendDecision("approved", undefined, true);
+      return;
+    }
     if (p.actionUrl) {
       if (p.configOpenUrl ?? true) {
         await invoke("open_url", { url: p.actionUrl }).catch(() => {});
@@ -368,6 +393,11 @@ function setupAnnotate(p: AnnotatePayload) {
           // clipboard unavailable (no user gesture, denied) — ignore
         }
       }
+    }
+    if (checklistMode) {
+      // resolve 하지 않는다. 큐에 남겨 두고 창만 닫아 브라우저를 가리지 않는다.
+      sink.startAction!();
+      return;
     }
     sendDecision("approved");
   };
@@ -928,17 +958,27 @@ function daemonSink(id: string): Sink {
     feedback: string | null,
     answers: Record<string, string | string[]> | null,
     grant: boolean = false,
+    completed: boolean | null = null,
   ) => {
-    invoke("daemon_resolve", { id, decision, feedback, answers, grant });
+    invoke("daemon_resolve", { id, decision, feedback, answers, grant, completed });
     daemonBusy = false;
     submitted = false;
     // Re-render in place (no page reload) to show the next item / the list.
     setTimeout(() => void renderDaemon(), 80);
   };
   return {
-    annotate: (d, f) => resolve(d, f ?? null, null),
+    annotate: (d, f, completed) =>
+      resolve(d, f ?? null, null, false, completed ?? null),
     ask: (a, grant) => resolve("answered", null, a, !!grant),
     dismiss: () => resolve("dismissed", null, null),
+    // resolve 하지 않는다 — 큐에 "진행 중"으로 남기고 창만 닫는다.
+    startAction: () => {
+      invoke("daemon_start_action", { id });
+      daemonBusy = false;
+      submitted = false;
+      invoke("hide_window");
+      setTimeout(() => void renderDaemon(), 80);
+    },
   };
 }
 
@@ -947,7 +987,11 @@ function openDetail(item: QueueItem) {
   resetView();
   sink = daemonSink(item.id);
   if (item.kind === "ask") setupAsk(item.payload as AskPayload);
-  else setupAnnotate(item.payload as AnnotatePayload);
+  else
+    setupAnnotate({
+      ...(item.payload as AnnotatePayload),
+      inProgress: item.inProgress ?? false,
+    });
 }
 
 function renderList(items: QueueItem[]) {
@@ -969,7 +1013,13 @@ function renderList(items: QueueItem[]) {
     const card = el("div", "queue-card");
     card.tabIndex = 0;
     card.appendChild(el("span", "queue-num", String(index + 1)));
-    card.appendChild(el("span", "queue-kind", item.kind === "ask" ? "질문" : "승인"));
+    card.appendChild(
+      el(
+        "span",
+        item.inProgress ? "queue-kind queue-kind-progress" : "queue-kind",
+        item.inProgress ? "진행 중" : item.kind === "ask" ? "질문" : "승인",
+      ),
+    );
     const copy = el("span", "queue-copy");
     copy.appendChild(el("span", "queue-title", item.title));
     const source = [item.source?.project, item.source?.caller]

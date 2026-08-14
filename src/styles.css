@@ -586,3 +586,9 @@ body {
 }
 .ub-btn:hover { background: #f0f5ff; }
 .ub-x { border: none; background: transparent; color: var(--muted, #888); padding: 3px 6px; }
+
+/* --checklist: 승인은 됐지만 아직 끝나지 않은 요청 */
+.queue-kind-progress {
+  background: #b45309;
+  color: #fff;
+}
