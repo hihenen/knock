@@ -491,12 +491,23 @@ body {
   border-color: var(--accent, #3b82f6);
   background: var(--card-hover, #f5f8ff); outline: none;
 }
+.queue-num {
+  flex: none; min-width: 20px; height: 20px; padding: 0 5px;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 12px; font-weight: 700; color: var(--muted, #6b7280);
+  background: rgba(127, 127, 127, 0.14); border-radius: 6px;
+}
+.queue-copy {
+  min-width: 0; display: flex; flex: 1 1 auto;
+  flex-direction: column; gap: 1px;
+}
 .queue-kind {
   flex: none; font-size: 12px; font-weight: 600;
   padding: 2px 8px; border-radius: 999px;
   background: var(--chip, #eef1f6); color: var(--chip-fg, #4b5563);
 }
 .queue-title { font-size: 14px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.queue-meta { font-size: 12px; color: var(--muted, #6b7280); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .queue-empty { color: var(--muted, #9aa0a6); font-size: 14px; padding: 8px 2px; }
 
 /* ── header Touch ID toggle ────────────────────────────────────── */
@@ -519,6 +530,7 @@ body {
 }
 .td-toggle input:checked + .td-switch { background: var(--accent, #3b82f6); }
 .td-toggle input:checked + .td-switch::after { transform: translateX(16px); }
+.td-toggle input:disabled + .td-switch { opacity: 0.62; }
 .td-toggle input:focus-visible + .td-switch { outline: 2px solid var(--accent, #3b82f6); outline-offset: 2px; }
 .td-text { font-size: 12px; font-weight: 600; color: var(--muted, #6b7280); white-space: nowrap; }
 
@@ -553,17 +565,6 @@ body {
 .tts-opt-row select { min-width: 160px; }
 .tts-opt-row input[type="number"] { width: 72px; }
 .tts-opt-row.tts-opt-col input { width: auto; }
-
-/* 게이트 헤더의 음성/반복 빠른 컨트롤 */
-.hdr-controls { display: inline-flex; align-items: center; gap: 6px; }
-.hdr-controls select,
-.hdr-controls input {
-  font: inherit; font-size: 12px; padding: 3px 6px;
-  border: 1px solid var(--border); border-radius: 7px;
-  background: var(--bg, #fff); color: var(--fg, inherit);
-}
-.hdr-controls input[type="number"] { width: 46px; }
-.hdr-ctrl-x { font-size: 12px; opacity: 0.7; }
 
 /* rendered-markdown links open in the real browser (makeLinksExternal) */
 .markdown a, .ask-context a { color: var(--accent, #3b82f6); cursor: pointer; }

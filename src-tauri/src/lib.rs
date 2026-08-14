@@ -9,7 +9,7 @@
 //                                                             plan, returns allow/deny JSON.
 
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 use serde_json::Value;
@@ -228,8 +228,9 @@ fn tts_supertonic(text: &str, lang: &str, times: u32, female: bool) -> bool {
         .arg("--voice-style")
         .arg({
             // Explicit `tts_voice` (e.g. "F3") wins; else default by gender.
-            let v = config_tts_voice()
-                .unwrap_or_else(|| if female { "F1".into() } else { "M1".into() });
+            let v =
+                config_tts_voice()
+                    .unwrap_or_else(|| if female { "F1".into() } else { "M1".into() });
             dir.join(format!("assets/voice_styles/{v}.json"))
         })
         .arg("--text")
@@ -245,12 +246,10 @@ fn tts_supertonic(text: &str, lang: &str, times: u32, female: bool) -> bool {
         return false;
     }
     // Pick the single WAV the sidecar just wrote.
-    let wav = std::fs::read_dir(&out_dir)
-        .ok()
-        .and_then(|rd| {
-            rd.filter_map(|e| e.ok().map(|e| e.path()))
-                .find(|p| p.extension().is_some_and(|x| x == "wav"))
-        });
+    let wav = std::fs::read_dir(&out_dir).ok().and_then(|rd| {
+        rd.filter_map(|e| e.ok().map(|e| e.path()))
+            .find(|p| p.extension().is_some_and(|x| x == "wav"))
+    });
     let played = match wav {
         // Synthesized once, replayed `times` times (each play blocks to the end).
         Some(p) => {
@@ -303,8 +302,10 @@ fn config_tts_voice() -> Option<String> {
         .get("tts_voice")
         .and_then(|v| v.as_str())?
         .to_string();
-    let ok = matches!(v.as_str(),
-        "F1" | "F2" | "F3" | "F4" | "F5" | "M1" | "M2" | "M3" | "M4" | "M5");
+    let ok = matches!(
+        v.as_str(),
+        "F1" | "F2" | "F3" | "F4" | "F5" | "M1" | "M2" | "M3" | "M4" | "M5"
+    );
     ok.then_some(v)
 }
 
@@ -407,7 +408,11 @@ fn tts_slot() -> &'static (Mutex<Option<TtsJob>>, std::sync::Condvar) {
 /// Synthesize + play one job to completion (blocking; runs on the worker).
 fn tts_play_job(job: &TtsJob) {
     if config_tts_engine() == "supertonic" {
-        let lang = if job.text.chars().any(|c| ('\u{ac00}'..='\u{d7a3}').contains(&c)) {
+        let lang = if job
+            .text
+            .chars()
+            .any(|c| ('\u{ac00}'..='\u{d7a3}').contains(&c))
+        {
             "ko"
         } else {
             "en"
@@ -463,11 +468,14 @@ fn speak_ex(text: &str, times: u32, female: bool) {
 /// Linux `spd-say`/`espeak`). Speaks `times` times, blocking per repeat so they
 /// don't overlap. Runs on the detached speak thread, so blocking is fine.
 fn speak_os_native(spoken: &str, times: u32, female: bool) {
-    let _ = female; // used only on macOS below; silence unused on other targets
     // Pick a bright female voice when requested: Korean → Yuna, else Samantha.
+    let _ = female; // used only on macOS below; silence unused on other targets
     #[cfg(target_os = "macos")]
     let voice: Option<&str> = if female {
-        if spoken.chars().any(|c| ('\u{ac00}'..='\u{d7a3}').contains(&c)) {
+        if spoken
+            .chars()
+            .any(|c| ('\u{ac00}'..='\u{d7a3}').contains(&c))
+        {
             Some("Yuna")
         } else {
             Some("Samantha")
@@ -824,7 +832,11 @@ fn tts_status() {
     println!("Supertonic 사이드카: {}", tts_sidecar_bin().display());
     println!(
         "Supertonic 준비됨: {}",
-        if supertonic_ready() { "예" } else { "아니오" }
+        if supertonic_ready() {
+            "예"
+        } else {
+            "아니오"
+        }
     );
 }
 
@@ -876,7 +888,10 @@ fn tts_install() {
 
     // 2) The sidecar binary: no prebuilt release yet, so guide the local build.
     if tts_sidecar_bin().is_file() {
-        println!("\n사이드카 바이너리: 이미 배치됨 ({})", tts_sidecar_bin().display());
+        println!(
+            "\n사이드카 바이너리: 이미 배치됨 ({})",
+            tts_sidecar_bin().display()
+        );
     } else {
         println!("\n남은 1가지 — 사이드카 바이너리 (supertonic stock `example_onnx`):");
         println!("  git clone https://github.com/supertone-inc/supertonic");
@@ -899,7 +914,10 @@ fn tts_install() {
 /// place so re-enabling is instant; delete `~/.config/knock/tts` to reclaim disk.
 fn tts_uninstall() {
     let _ = set_config_tts_engine("os");
-    println!("OS 기본 음성으로 되돌렸습니다. (에셋은 {} 에 보존)", tts_dir().display());
+    println!(
+        "OS 기본 음성으로 되돌렸습니다. (에셋은 {} 에 보존)",
+        tts_dir().display()
+    );
 }
 
 #[tauri::command]
@@ -1037,6 +1055,8 @@ struct QueueEntry {
     id: String,
     kind: String,
     payload: Value,
+    source: Value,
+    created_at: u64,
     responder: ipc::Responder,
 }
 
@@ -1062,11 +1082,18 @@ fn daemon_queue(state: tauri::State<DaemonState>) -> Value {
                 "id": e.id,
                 "kind": e.kind,
                 "title": title,
+                "source": e.source,
+                "createdAt": e.created_at,
                 "payload": e.payload,
             })
         })
         .collect();
     serde_json::json!({ "mode": "queue", "items": items, "touchId": config_touch_id() })
+}
+
+#[tauri::command]
+fn hide_window(window: tauri::WebviewWindow) {
+    let _ = window.hide();
 }
 
 /// Reflect the pending count on the icon badge (macOS Dock / Linux) and the
@@ -1139,6 +1166,7 @@ fn run_daemon() {
         .invoke_handler(tauri::generate_handler![
             daemon_queue,
             daemon_resolve,
+            hide_window,
             save_pasted_image,
             touch_id_approve,
             save_touch_id,
@@ -1149,10 +1177,11 @@ fn run_daemon() {
             app_version
         ])
         .on_window_event(|window, event| {
-            // Closing the window must not kill the daemon — just hide it.
+            // The frontend owns the close semantics: dismiss the open detail,
+            // or just hide when the queue list is visible. Keep the daemon alive.
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                let _ = window.hide();
+                let _ = window.emit("native-close-requested", ());
             }
         })
         .setup(move |app| {
@@ -1193,6 +1222,14 @@ fn run_daemon() {
                         .and_then(|v| v.as_str())
                         .unwrap_or("annotate")
                         .to_string();
+                    let source = payload
+                        .get("source")
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!({}));
+                    let created_at = payload
+                        .get("createdAt")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or_else(epoch_seconds);
 
                     // Pre-authorization protocol — answered inline, never queued,
                     // so the window is not disturbed:
@@ -1200,8 +1237,7 @@ fn run_daemon() {
                     //     grant, single-use, or "none".
                     //   "grant"   (from single-shot submit_answers): record one.
                     if kind == "consume" {
-                        let granted =
-                            take_live_grant(&mut g.lock().unwrap(), Instant::now());
+                        let granted = take_live_grant(&mut g.lock().unwrap(), Instant::now());
                         incoming.responder.reply(&serde_json::json!({
                             "decision": if granted { "approved" } else { "none" }
                         }));
@@ -1227,15 +1263,16 @@ fn run_daemon() {
                         .and_then(|v| v.as_str())
                         .unwrap_or("새 요청")
                         .to_string();
-                    let spoken_body = html_to_text(
-                        inner.get("html").and_then(|v| v.as_str()).unwrap_or(""),
-                    );
+                    let spoken_body =
+                        html_to_text(inner.get("html").and_then(|v| v.as_str()).unwrap_or(""));
                     let len = {
                         let mut qq = q.lock().unwrap();
                         qq.push(QueueEntry {
                             id,
                             kind,
                             payload: inner,
+                            source,
+                            created_at,
                             responder: incoming.responder,
                         });
                         qq.len()
@@ -1278,10 +1315,9 @@ fn run_daemon() {
             .enabled(false)
             .build(app)?;
             let sep = PredefinedMenuItem::separator(app)?;
-            let touch_toggle =
-                CheckMenuItemBuilder::with_id("touch_id", "Touch ID for critical gates")
-                    .checked(config_touch_id())
-                    .build(app)?;
+            let touch_toggle = CheckMenuItemBuilder::with_id("touch_id", "Use Touch ID by default")
+                .checked(config_touch_id())
+                .build(app)?;
             let open_url_toggle =
                 CheckMenuItemBuilder::with_id("open_url", "Open action URL on approve")
                     .checked(config_open_url())
@@ -1409,10 +1445,9 @@ fn launch(state: AppState) {
                     .enabled(false)
                     .build(app)?;
             let sep = PredefinedMenuItem::separator(app)?;
-            let touch_toggle =
-                CheckMenuItemBuilder::with_id("touch_id", "Touch ID for critical gates")
-                    .checked(config_touch_id())
-                    .build(app)?;
+            let touch_toggle = CheckMenuItemBuilder::with_id("touch_id", "Use Touch ID by default")
+                .checked(config_touch_id())
+                .build(app)?;
             let open_url_toggle =
                 CheckMenuItemBuilder::with_id("open_url", "Open action URL on approve")
                     .checked(config_open_url())
@@ -1473,10 +1508,64 @@ fn launch(state: AppState) {
         .expect("error while running knock");
 }
 
+fn epoch_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn project_name_from_cwd(cwd: &str) -> Option<String> {
+    let path = Path::new(cwd);
+    path.ancestors()
+        .find(|p| p.join(".git").exists())
+        .or(Some(path))
+        .and_then(|p| p.file_name())
+        .map(|s| s.to_string_lossy().to_string())
+}
+
+fn request_source(hook_payload: Option<&Value>, hook: bool) -> Value {
+    let cwd = std::env::var("KNOCK_CWD")
+        .ok()
+        .or_else(|| {
+            hook_payload
+                .and_then(|p| p.get("cwd"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .map(|p| p.to_string_lossy().to_string())
+        })
+        .unwrap_or_default();
+    let project = std::env::var("KNOCK_PROJECT")
+        .ok()
+        .or_else(|| project_name_from_cwd(&cwd));
+    let caller = std::env::var("KNOCK_CALLER").ok().unwrap_or_else(|| {
+        if hook
+            || std::env::var_os("CLAUDECODE").is_some()
+            || std::env::var_os("CLAUDE_PROJECT_DIR").is_some()
+        {
+            "Claude Code".to_string()
+        } else if std::env::var_os("CODEX_HOME").is_some()
+            || std::env::var_os("CODEX_THREAD_ID").is_some()
+        {
+            "Codex".to_string()
+        } else {
+            "CLI".to_string()
+        }
+    });
+    serde_json::json!({
+        "project": project,
+        "caller": caller,
+    })
+}
+
 /// Try to hand this request to the daemon (single-window queue). If the daemon
 /// answers, convert the decision to this invocation's stdout contract and exit.
 /// Returns normally only if the daemon is unreachable (caller falls back to launch).
-fn try_daemon(kind: &str, inner: Value, json: bool, hook: bool) {
+fn try_daemon(kind: &str, inner: Value, json: bool, hook: bool, source: Option<Value>) {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -1487,6 +1576,8 @@ fn try_daemon(kind: &str, inner: Value, json: bool, hook: bool) {
         "kind": kind,
         "json": json,
         "hook": hook,
+        "source": source.unwrap_or_else(|| request_source(None, hook)),
+        "createdAt": epoch_seconds(),
         "payload": inner,
     });
     if let Some(resp) = ipc::client_request(&req) {
@@ -1738,11 +1829,17 @@ fn run_hook() {
         "configTouchId": config_touch_id(),
         "configOpenUrl": config_open_url(),
         "configTts": config_tts(),
-            "configTtsScope": config_tts_scope(),
-            "configTtsVoice": config_tts_voice().unwrap_or_default(),
-            "configTtsRepeat": config_tts_repeat(),
+        "configTtsScope": config_tts_scope(),
+        "configTtsVoice": config_tts_voice().unwrap_or_default(),
+        "configTtsRepeat": config_tts_repeat(),
     });
-    try_daemon("annotate", inner, false, true);
+    try_daemon(
+        "annotate",
+        inner,
+        false,
+        true,
+        Some(request_source(Some(&payload), true)),
+    );
 
     launch(AppState {
         mode: Mode::Annotate {
@@ -1812,13 +1909,13 @@ pub fn run() {
                 "touchId": touch_id,
                 "configTouchId": config_touch_id(),
                 "configOpenUrl": config_open_url(),
-            "configTts": config_tts(),
-            "configTtsScope": config_tts_scope(),
-            "configTtsVoice": config_tts_voice().unwrap_or_default(),
-            "configTtsRepeat": config_tts_repeat(),
+                "configTts": config_tts(),
+                "configTtsScope": config_tts_scope(),
+                "configTtsVoice": config_tts_voice().unwrap_or_default(),
+                "configTtsRepeat": config_tts_repeat(),
                 "actionUrl": action_url,
             });
-            try_daemon("annotate", inner, json, false);
+            try_daemon("annotate", inner, json, false, None);
             launch(AppState {
                 mode: Mode::Annotate {
                     html,
@@ -1857,12 +1954,12 @@ pub fn run() {
                 "contextHtml": ask_context_html(&questions),
                 "configTouchId": config_touch_id(),
                 "configOpenUrl": config_open_url(),
-            "configTts": config_tts(),
-            "configTtsScope": config_tts_scope(),
-            "configTtsVoice": config_tts_voice().unwrap_or_default(),
-            "configTtsRepeat": config_tts_repeat(),
+                "configTts": config_tts(),
+                "configTtsScope": config_tts_scope(),
+                "configTtsVoice": config_tts_voice().unwrap_or_default(),
+                "configTtsRepeat": config_tts_repeat(),
             });
-            try_daemon("ask", inner, true, false);
+            try_daemon("ask", inner, true, false, None);
             launch(AppState {
                 mode: Mode::Ask { questions, title },
                 json: true,
@@ -2003,5 +2100,14 @@ mod tests {
     fn render_md_makes_table() {
         let h = render_md("| a | b |\n|---|---|\n| 1 | 2 |");
         assert!(h.contains("<table>"));
+    }
+
+    #[test]
+    fn project_source_uses_git_root() {
+        let nested = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        assert_eq!(
+            project_name_from_cwd(&nested.to_string_lossy()).as_deref(),
+            Some("knock")
+        );
     }
 }

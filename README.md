@@ -231,7 +231,7 @@ knock ask questions.json
 ```
 
 - **`context` (선택)** — 결정에 배경이 필요하면 최상위 `context` 에 markdown 을 담는다. 질문 위에 렌더되어 근거를 창에서 바로 본다.
-- **항상 체크박스(multi-select)** — 1개~여러 개 선택 + "기타" 자유입력. `multiSelect` 필드는 무시.
+- `multiSelect: true` 면 체크박스 복수 선택, 생략/`false` 면 단일 선택. 한 질문만 있으면 요약 단계를 생략하고 바로 제출합니다. 응답은 두 경우 모두 문자열 배열입니다.
 
 한 질문씩(wizard) 보여주고 마지막에 선택 요약 → 제출. 항상 JSON 출력:
 
@@ -247,12 +247,12 @@ knock ask questions.json
 | `↑` `↓` | 옵션 포커스 이동 |
 | `1`~`9` | 해당 옵션 토글 |
 | `Space` | 옵션 토글 (선택/해제) |
-| `Enter` | 다음 질문 |
+| `Enter` | 다음 질문 (질문이 하나면 제출) |
 | `→` `←` | 다음 / 이전 질문 |
 | `Cmd+Enter` | 제출 |
 | `Esc` | 닫기 |
 
-annotate 모드: `Cmd+Enter`=승인(gate), `Esc`=닫기.
+annotate 모드: `Cmd+Enter`=승인(gate), `Esc`=닫기. 대기 목록에서는 `1`~`9`로 해당 요청을 바로 엽니다.
 
 ## 설정 (knock settings)
 
@@ -261,7 +261,7 @@ knock settings
 ```
 
 설정 창에서 토글:
-- **🔒 critical 게이트에 Touch ID 요구** → `~/.config/knock/config.json` 의 `{"touch_id": true}` 로 저장. 에이전트가 이 값을 읽어 prd/IAM/destructive 같은 중요 승인에 Touch ID 를 적용 (환경변수 불필요, 한 번만 켜면 영구).
+- **🔒 승인·질문에 Touch ID를 기본 사용** → `~/.config/knock/config.json` 의 `{"touch_id": true}` 로 저장되어 모든 승인과 질문 제출에 적용됩니다. 개별 `annotate --touch-id` 요청은 이 설정이 꺼져 있어도 항상 인증합니다.
 - **🌐 Open action URL on approve** (default ON) → menubar 트레이의 체크박스로 토글. OFF 면 승인 시 `--action-url` 자동 점프를 끄고 대신 URL 을 클립보드에 복사 (`{"open_url": false}`). 다수 게이트 연속 승인 시 탭 폭주 회피.
 
 설정 창 하단에 **버그 신고**(GitHub Issues) · **릴리스 노트** 링크와 현재 버전이 표시됩니다.
@@ -276,7 +276,7 @@ knock daemon status      # 설치 여부 확인
 knock daemon uninstall   # 해제
 ```
 
-미설치 시에도 첫 호출 때 데몬이 자동으로 떠서 동작합니다(상주만 안 할 뿐). 새 요청이 오면 Dock 아이콘이 튀고(bounce) 뱃지 숫자(대기 건수)가 표시됩니다.
+미설치 시에도 첫 호출 때 데몬이 자동으로 떠서 동작합니다(상주만 안 할 뿐). 새 요청이 오면 Dock 아이콘이 튀고(bounce) 뱃지 숫자(대기 건수)가 표시됩니다. 대기 목록에는 요청 번호와 프로젝트·호출자·대기 시간이 함께 표시되며, `1`~`9` 숫자키로 바로 선택할 수 있습니다. 자동 감지 대신 출처를 지정하려면 `KNOCK_PROJECT`, `KNOCK_CALLER` 환경 변수를 사용합니다.
 
 ## 업데이트
 

@@ -4,6 +4,18 @@ All notable changes to knock are documented here. Versions follow [SemVer](https
 
 ## [Unreleased]
 
+### Changed
+- **승인 흐름 UX 정리** — 대기 목록에 번호·프로젝트·호출자·대기 시간을 표시하고
+  `1`~`9` 숫자키로 바로 연다. 단일 질문은 요약 단계를 건너뛰며, 헤더는 음성
+  on/off와 Touch ID만 남겨 단순화했다. 화면 내용에 맞춰 창 크기도 더 작게 조절한다.
+- **Touch ID 동작 일관화** — 전역 설정은 승인과 질문 모두에 적용하고, 명시적인
+  `--touch-id` 요청은 전역 설정이 꺼져 있어도 인증을 요구한다.
+
+### Fixed
+- **데몬 상세창 닫기 교착** — macOS 빨간 닫기 버튼으로 상세 요청을 닫으면 단순히
+  창만 숨기지 않고 해당 요청을 `dismissed`로 해제한다. 대기 목록 닫기는 기존처럼
+  상주 데몬 창만 숨긴다.
+
 ## [0.5.2] - 2026-07-13
 
 ### Fixed
