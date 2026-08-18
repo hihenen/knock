@@ -1132,9 +1132,15 @@ async function init() {
             setTimeout(() => {
               // config 에서 켠 경우에만 Touch ID 를 건너뛴다. 토글을 끄는 방식이라
               // 승인 경로 자체는 그대로다 — 별도 우회로를 만들지 않는 게 중요하다.
+              //
+              // 단 토글이 disabled 면 손대지 않는다. disabled == 명시적 --touch-id
+              // 요청(prd 변경, destructive 등)이고, 그건 사람도 화면에서 끌 수 없다.
+              // `disabled` 는 사람의 클릭만 막을 뿐 스크립트의 .checked 는 막지
+              // 못하므로, 여기서 걸러내지 않으면 물리 키로 critical 게이트의 생체
+              // 인증이 통째로 면제된다.
               if (skipTouchId) {
                 const td = $<HTMLInputElement>("td-toggle");
-                if (td) td.checked = false;
+                if (td && !td.disabled) td.checked = false;
               }
               $("opt-approve").click();
             }, 80);
