@@ -4,6 +4,8 @@ All notable changes to knock are documented here. Versions follow [SemVer](https
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-08-18
+
 ### Added
 - **세션 `stale` 상태** — `working` 인데 5분 넘게 출력이 없으면 빨강 + `⚠`. 나머지 상태가
   "할 일이 있다" 라면 이건 "고장났다" 라서 우선순위가 제일 위다. 돈다고 표시된 세션이
