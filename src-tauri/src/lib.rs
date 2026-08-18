@@ -1279,6 +1279,82 @@ fn run_daemon() {
                         }));
                         return;
                     }
+                    // Stream Deck (또는 다른 외부 컨트롤러) 제어 프로토콜 — 큐에 넣지
+                    // 않고 즉답한다. 물리 키가 큐를 읽고, 특정 요청을 화면에 띄우고,
+                    // 승인 의사를 전달하는 세 가지만 연다.
+                    //
+                    // 승인은 여기서 완결되지 않는다. `approve` 는 "그 항목을 열고
+                    // 승인을 시도하라" 는 신호일 뿐이고, Touch ID 정책이 켜져 있으면
+                    // 프론트가 생체 인증을 요구한다. 소켓에 붙은 프로세스가 인증을
+                    // 건너뛸 수 없다 — 물리 키를 잘못 눌러도 마찬가지다.
+                    if kind == "list" {
+                        let items: Vec<Value> = {
+                            let qq = q.lock().unwrap();
+                            qq.iter()
+                                .map(|e| {
+                                    serde_json::json!({
+                                        "id": e.id,
+                                        "kind": e.kind,
+                                        "title": e.payload.get("title")
+                                            .and_then(|t| t.as_str()).unwrap_or("Knock"),
+                                        "source": e.source,
+                                        "createdAt": e.created_at,
+                                        "inProgress": e.in_progress,
+                                        "gate": e.payload.get("gate")
+                                            .and_then(|v| v.as_bool()).unwrap_or(false),
+                                    })
+                                })
+                                .collect()
+                        };
+                        incoming.responder.reply(&serde_json::json!({
+                            "items": items,
+                            "tts": config_tts(),
+                        }));
+                        return;
+                    }
+                    if kind == "focus" || kind == "approve" {
+                        let target = payload
+                            .get("target")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let known = {
+                            let qq = q.lock().unwrap();
+                            if target.is_empty() {
+                                !qq.is_empty()
+                            } else {
+                                qq.iter().any(|e| e.id == target)
+                            }
+                        };
+                        if known {
+                            let hh = h.clone();
+                            let want_approve = kind == "approve";
+                            let t = target.clone();
+                            let _ = h.run_on_main_thread(move || {
+                                if let Some(win) = hh.get_webview_window("main") {
+                                    let _ = win.unminimize();
+                                    let _ = win.show();
+                                    let _ = win.set_focus();
+                                }
+                                let _ = hh.emit(
+                                    "external-control",
+                                    serde_json::json!({ "target": t, "approve": want_approve }),
+                                );
+                            });
+                        }
+                        incoming.responder.reply(&serde_json::json!({
+                            "decision": if known { "accepted" } else { "unknown" }
+                        }));
+                        return;
+                    }
+                    if kind == "tts-toggle" {
+                        let next = !config_tts();
+                        let _ = set_config_tts(next);
+                        incoming
+                            .responder
+                            .reply(&serde_json::json!({ "tts": next }));
+                        return;
+                    }
                     if kind == "grant" {
                         g.lock()
                             .unwrap()

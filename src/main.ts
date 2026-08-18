@@ -1102,6 +1102,34 @@ async function init() {
         invoke("hide_window").catch(() => {});
       });
       await renderDaemon();
+      // 외부 컨트롤러(Stream Deck 등) — 소켓으로 들어온 focus/approve 를 처리한다.
+      //
+      // approve 는 여기서 승인 버튼을 "누르는" 것으로 끝난다. 별도 승인 경로를
+      // 만들지 않는 게 핵심이다 — 기존 클로저를 그대로 타야 Touch ID 정책도
+      // 같이 따라온다. 물리 키를 잘못 눌러도 화면 승인과 똑같은 게이트를 지난다.
+      await listen<{ target: string; approve: boolean }>(
+        "external-control",
+        async (evt) => {
+          const { target, approve } = evt.payload ?? { target: "", approve: false };
+          let cur: QueuePayload;
+          try {
+            cur = await invoke<QueuePayload>("daemon_queue");
+          } catch {
+            return;
+          }
+          if (!cur || cur.mode !== "queue") return;
+          const item = target
+            ? cur.items.find((i) => i.id === target)
+            : cur.items[0];
+          if (!item) return;
+          daemonBusy = false; // 다른 항목이 열려 있어도 물리 키 의도를 우선한다
+          openDetail(item);
+          if (approve) {
+            // 렌더가 끝난 뒤에 눌러야 리스너가 붙어 있다.
+            setTimeout(() => $("opt-approve").click(), 80);
+          }
+        },
+      );
       // Event-driven refresh + a slow poll as a backstop for missed events.
       listen("queue-changed", () => void renderDaemon());
       setInterval(() => void renderDaemon(), 2000);
