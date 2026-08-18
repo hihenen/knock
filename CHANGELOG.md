@@ -5,6 +5,15 @@ All notable changes to knock are documented here. Versions follow [SemVer](https
 ## [Unreleased]
 
 ### Added
+- **`knock ctl`** — 외부 컨트롤러용 서브커맨드. `list` / `focus [id]` / `approve [id]` /
+  `dismiss [id]` / `tts`. id 자리에 `@2` 를 쓰면 큐의 N번째를 가리킨다(물리 키는 id 를
+  모르므로 자리로 지정). 데몬이 없으면 창을 띄우지 않고 종료한다.
+- **Stream Deck 플러그인** (`com.knock.controller.sdPlugin`) — 대기 슬롯 / 승인 / 취소 /
+  음성 알림 4종 액션. 슬롯 키에는 제목이 아니라 **요청 출처**(프로젝트 · 호출자 · 대기시간)를
+  띄운다. 여러 Claude Code / Codex 세션이 동시에 대기할 때 구분해야 할 것이 그쪽이기
+  때문이다. 슬롯 번호는 슬롯 키들끼리의 순서로 자동 부여되어, 어디에 놓든 왼쪽부터 @1 이다.
+- **`external_skip_touch_id`** (config, 기본 false) — 물리 키 승인만 Touch ID 를 면제한다.
+  `touch_id` 를 통째로 끄면 화면 승인까지 무방비가 되므로 두 경로를 나눌 수 있게 했다.
 - **`annotate --checklist`** — 승인 후에도 요청을 큐에 "진행 중"으로 남긴다. 승인하면
   `--action-url` 이 열리고 창은 닫혀 브라우저를 가리지 않으며, 트레이에서 다시 열어 절차를
   확인하고 끝나면 "완료"를 누른다. 그때 `{"decision":"approved","completed":true}` 로

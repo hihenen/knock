@@ -1173,6 +1173,9 @@ fn daemon_start_action(app: tauri::AppHandle, id: String, state: tauri::State<Da
     update_badge(&app, len);
 }
 
+// Tauri command 의 인자는 그대로 IPC 파라미터라, 구조체로 묶으면 프론트 호출부의
+// 형태까지 바뀐다. 여기서는 인자 개수보다 계약이 그대로인 쪽이 낫다.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 fn daemon_resolve(
     app: tauri::AppHandle,
@@ -1380,8 +1383,12 @@ fn run_daemon() {
                         // 자리로 가리킨다. 그 외에는 id 그대로.
                         let target = {
                             let qq = q.lock().unwrap();
-                            if let Some(n) = raw.strip_prefix('@').and_then(|n| n.parse::<usize>().ok()) {
-                                qq.get(n.saturating_sub(1)).map(|e| e.id.clone()).unwrap_or_default()
+                            if let Some(n) =
+                                raw.strip_prefix('@').and_then(|n| n.parse::<usize>().ok())
+                            {
+                                qq.get(n.saturating_sub(1))
+                                    .map(|e| e.id.clone())
+                                    .unwrap_or_default()
                             } else if raw.is_empty() {
                                 qq.first().map(|e| e.id.clone()).unwrap_or_default()
                             } else {
@@ -2192,9 +2199,7 @@ pub fn run() {
                 "dismiss" => "dismiss",
                 "tts" => "tts-toggle",
                 other => {
-                    eprintln!(
-                        "알 수 없는 동작: {other} (list | focus | approve | dismiss | tts)"
-                    );
+                    eprintln!("알 수 없는 동작: {other} (list | focus | approve | dismiss | tts)");
                     std::process::exit(2);
                 }
             };
