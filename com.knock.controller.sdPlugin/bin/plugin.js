@@ -3082,10 +3082,20 @@ function slotLabel(it) {
   return [fitTitle(head, 9, 2), tail ? fitTitle(tail, 9, 1) : "", age].filter(Boolean).join(`
 `);
 }
+function pendingFor(session, queueItems) {
+  const out = [];
+  queueItems.forEach((it, i) => {
+    const proj = it.source?.project;
+    if (proj && session.path?.endsWith(`/${proj}`))
+      out.push(i + 1);
+  });
+  return out;
+}
 function sessionLabel(s) {
   const mark = s.unread ? "●" : s.status === "working" ? "▶" : "·";
   const idle = s.lastOutputAt ? sinceLabel(s.lastOutputAt) : "-";
-  return [fitTitle(s.name, 10, 2), `${mark} ${idle}`, `live ${s.live}`].join(`
+  const tail = s.pending > 0 ? `승인 ${s.pending}` : `live ${s.live}`;
+  return [fitTitle(s.name, 10, 2), `${mark} ${idle}`, tail].join(`
 `);
 }
 function sinceLabel(ts) {
@@ -3144,8 +3154,10 @@ async function refresh() {
         setState(context, 0);
         continue;
       }
-      setState(context, s.unread ? 3 : s.status === "working" ? 2 : 1);
-      setTitle(context, sessionLabel(s));
+      const pend = pendingFor(s, items);
+      const view = { ...s, pending: pend.length };
+      setState(context, pend.length ? 3 : view.unread ? 3 : view.status === "working" ? 2 : 1);
+      setTitle(context, sessionLabel(view));
     } else if (meta.action === "tts") {
       setTitle(context, alive ? "" : "-");
     }
@@ -3207,8 +3219,8 @@ ws.on("message", async (raw) => {
       if (!s)
         return showAlert(context);
       const q = await list();
-      const idx = q.items.findIndex((it) => it.source?.project && s.path?.endsWith(`/${it.source.project}`));
-      res = idx >= 0 ? await approve(`@${idx + 1}`) : await switchTo(s.id);
+      const pend = pendingFor(s, q.items);
+      res = pend.length ? await approve(`@${pend[0]}`) : await switchTo(s.id);
       if (!res)
         showAlert(context);
       sessionCache.at = 0;

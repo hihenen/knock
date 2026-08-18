@@ -81,10 +81,30 @@ function slotLabel(it) {
  * "얼마나 돌고 있는지" 는 워크트리 생성 시각이 아니라 **마지막 출력 이후 경과**로
  * 잰다. working 인데 출력이 30분째 없으면 멈춘 것이고, 그게 봐야 할 신호다.
  */
+/**
+ * 이 세션이 올린 승인 대기의 큐 인덱스들(1-based).
+ *
+ * 렌더와 클릭이 **같은 규칙**을 써야 한다. 키에 "2건" 이라고 떠 있는데 눌렀을 때
+ * 다른 걸 집으면 그게 제일 나쁘다.
+ *
+ * knock 은 cwd 의 git root 이름을 project 로 쓰고, orca 워크트리는 각자가 별도
+ * 워크트리라 그 디렉토리명이 곧 project 가 된다. 그래서 경로 끝으로 맞춘다.
+ */
+function pendingFor(session, queueItems) {
+  const out = [];
+  queueItems.forEach((it, i) => {
+    const proj = it.source?.project;
+    if (proj && session.path?.endsWith(`/${proj}`)) out.push(i + 1);
+  });
+  return out;
+}
+
 function sessionLabel(s) {
   const mark = s.unread ? "●" : s.status === "working" ? "▶" : "·";
   const idle = s.lastOutputAt ? sinceLabel(s.lastOutputAt) : "-";
-  return [fitTitle(s.name, 10, 2), `${mark} ${idle}`, `live ${s.live}`].join("\n");
+  // 대기 건수가 있으면 live 수보다 그걸 보여준다. 눌러야 할 이유가 그쪽이다.
+  const tail = s.pending > 0 ? `승인 ${s.pending}` : `live ${s.live}`;
+  return [fitTitle(s.name, 10, 2), `${mark} ${idle}`, tail].join("\n");
 }
 
 function sinceLabel(ts) {
@@ -154,9 +174,14 @@ async function refresh() {
         setState(context, 0);
         continue;
       }
-      // 안 본 출력 > 도는 중 > 그 외. 상태는 색으로 먼저 읽힌다.
-      setState(context, s.unread ? 3 : s.status === "working" ? 2 : 1);
-      setTitle(context, sessionLabel(s));
+      const pend = pendingFor(s, items);
+      const view = { ...s, pending: pend.length };
+      // 승인 대기 > 안 본 출력 > 도는 중 > 그 외. 처리할 것이 제일 위다.
+      setState(
+        context,
+        pend.length ? 3 : view.unread ? 3 : view.status === "working" ? 2 : 1,
+      );
+      setTitle(context, sessionLabel(view));
     } else if (meta.action === "tts") {
       setTitle(context, alive ? "" : "-");
     }
@@ -225,10 +250,10 @@ ws.on("message", async (raw) => {
       // 이 세션이 올린 승인 대기가 있으면 그것부터. 없으면 그 터미널로 간다.
       // 물리 키 하나가 "볼 것이 있으면 처리, 없으면 데려다준다" 로 동작한다.
       const q = await knock.list();
-      const idx = q.items.findIndex(
-        (it) => it.source?.project && s.path?.endsWith(`/${it.source.project}`),
-      );
-      res = idx >= 0 ? await knock.approve(`@${idx + 1}`) : await orca.switchTo(s.id);
+      const pend = pendingFor(s, q.items);
+      res = pend.length
+        ? await knock.approve(`@${pend[0]}`)
+        : await orca.switchTo(s.id);
       if (!res) showAlert(context);
       sessionCache.at = 0; // 다음 렌더에서 즉시 반영
       return refresh();
