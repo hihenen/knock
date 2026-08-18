@@ -15,8 +15,8 @@
       {
         "label": "main",
         "title": "Knock",
-        "width": 1120,
-        "height": 980,
+        "width": 900,
+        "height": 720,
         "minWidth": 640,
         "minHeight": 540,
         "center": true,

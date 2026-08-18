@@ -1,0 +1,111 @@
+{
+  "Name": "knock",
+  "UUID": "com.knock.controller",
+  "Version": "0.1.0",
+  "Author": "knock",
+  "Description": "대기 중인 승인 요청을 물리 키에 띄우고 처리합니다. 승인은 knock 창을 거쳐 Touch ID 정책을 그대로 따릅니다.",
+  "Icon": "imgs/plugin",
+  "Category": "knock",
+  "CategoryIcon": "imgs/plugin",
+  "SDKVersion": 2,
+  "Software": {
+    "MinimumVersion": "6.5"
+  },
+  "OS": [
+    {
+      "Platform": "mac",
+      "MinimumVersion": "12"
+    }
+  ],
+  "Nodejs": {
+    "Version": "20",
+    "Debug": "enabled"
+  },
+  "CodePath": "bin/plugin.js",
+  "Actions": [
+    {
+      "Name": "대기 슬롯",
+      "UUID": "com.knock.controller.slot",
+      "Icon": "imgs/action",
+      "Tooltip": "큐의 N번째 요청. 누르면 그 요청을 화면에 띄웁니다.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "States": [
+        {
+          "Image": "imgs/key-empty",
+          "TitleAlignment": "middle",
+          "FontSize": "10"
+        },
+        {
+          "Image": "imgs/key-pending",
+          "TitleAlignment": "middle",
+          "FontSize": "10"
+        },
+        {
+          "Image": "imgs/key-progress",
+          "TitleAlignment": "middle",
+          "FontSize": "10"
+        }
+      ]
+    },
+    {
+      "Name": "승인",
+      "UUID": "com.knock.controller.approve",
+      "Icon": "imgs/action",
+      "Tooltip": "맨 앞 요청을 승인합니다. Touch ID 정책이 그대로 적용됩니다.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "States": [
+        {
+          "Image": "imgs/key-empty",
+          "TitleAlignment": "bottom",
+          "FontSize": "12"
+        },
+        {
+          "Image": "imgs/key-approve",
+          "TitleAlignment": "bottom",
+          "FontSize": "12"
+        }
+      ]
+    },
+    {
+      "Name": "취소",
+      "UUID": "com.knock.controller.dismiss",
+      "Icon": "imgs/action",
+      "Tooltip": "맨 앞 요청을 취소합니다.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "States": [
+        {
+          "Image": "imgs/key-empty",
+          "TitleAlignment": "bottom",
+          "FontSize": "12"
+        },
+        {
+          "Image": "imgs/key-dismiss",
+          "TitleAlignment": "bottom",
+          "FontSize": "12"
+        }
+      ]
+    },
+    {
+      "Name": "음성 알림",
+      "UUID": "com.knock.controller.tts",
+      "Icon": "imgs/action",
+      "Tooltip": "음성 알림을 켜고 끕니다.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "States": [
+        {
+          "Image": "imgs/key-tts",
+          "TitleAlignment": "bottom",
+          "FontSize": "12"
+        }
+      ]
+    }
+  ]
+}

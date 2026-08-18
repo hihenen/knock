@@ -235,7 +235,7 @@ The input JSON mirrors Claude Code's **AskUserQuestion schema** (+ optional `con
 ```
 
 - **`context` (optional)** — if a decision needs background, put markdown in the top-level `context`. It renders above the questions so the rationale is visible in the window.
-- **Always checkboxes (multi-select)** — pick one or several + an "Other" free-text option. The `multiSelect` field is ignored.
+- `multiSelect: true` uses checkbox multi-select; omitted/`false` uses single-select. A one-question ask skips the summary step and submits directly. Both modes still return string arrays.
 
 Shows one question at a time (wizard), then a selection summary → submit. Always JSON output:
 
@@ -251,12 +251,12 @@ Shows one question at a time (wizard), then a selection summary → submit. Alwa
 | `↑` `↓` | move option focus |
 | `1`~`9` | toggle that option |
 | `Space` | toggle option (select/deselect) |
-| `Enter` | next question |
+| `Enter` | next question (submit when there is only one) |
 | `→` `←` | next / previous question |
 | `Cmd+Enter` | submit |
 | `Esc` | close |
 
-annotate mode: `Cmd+Enter`=approve (gate), `Esc`=close.
+annotate mode: `Cmd+Enter`=approve (gate), `Esc`=close. In the pending list, `1`–`9` opens that request directly.
 
 ## Settings (knock settings)
 
@@ -265,7 +265,7 @@ knock settings
 ```
 
 Toggle in the settings window:
-- **🔒 Require Touch ID for critical gates** → saved to `~/.config/knock/config.json` as `{"touch_id": true}`. The agent reads this to apply Touch ID to important approvals like prd / IAM / destructive (no env var; set once, persists).
+- **🔒 Use Touch ID by default for approvals and questions** → saved to `~/.config/knock/config.json` as `{"touch_id": true}` and applied to every approval and question submission. An explicit `annotate --touch-id` always requires authentication even when this default is off.
 
 The settings window footer shows **Report a bug** (GitHub Issues) · **Release notes** links and the current version.
 
@@ -279,7 +279,7 @@ knock daemon status      # check whether installed
 knock daemon uninstall   # remove
 ```
 
-Even if not installed, the daemon spins up automatically on first call (it just won't stay resident). On a new request the Dock icon bounces and a badge (pending count) appears.
+Even if not installed, the daemon spins up automatically on first call (it just won't stay resident). On a new request the Dock icon bounces and a badge (pending count) appears. The pending list shows each request's number, project, caller, and wait time; press `1`–`9` to open one directly. Set `KNOCK_PROJECT` or `KNOCK_CALLER` to override automatic source detection.
 
 ## Updates
 

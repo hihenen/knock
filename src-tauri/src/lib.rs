@@ -9,7 +9,7 @@
 //                                                             plan, returns allow/deny JSON.
 
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 use serde_json::Value;
@@ -81,12 +81,38 @@ enum Command {
         /// GitHub PR, ArgoCD app). Makes knock an "action inbox": approve -> jump to the action.
         #[arg(long)]
         action_url: Option<String>,
+        /// Keep the request in the queue after approval so the owner can re-open
+        /// the steps while working in the browser, then mark it done. Resolves on
+        /// "완료" instead of on approve.
+        #[arg(long)]
+        checklist: bool,
     },
     /// Ask a multiple-choice question (AskUserQuestion schema). Always emits JSON.
     Ask {
         file: PathBuf,
         #[arg(long)]
         title: Option<String>,
+    },
+    /// Control a running daemon from outside — for physical controllers
+    /// (Stream Deck, hotkeys) that want to see the queue and act on it.
+    ///
+    ///   knock ctl list              대기 목록을 JSON 으로
+    ///   knock ctl focus [id]        해당 요청을 화면에 띄운다 (id 생략 = 맨 앞)
+    ///   knock ctl approve [id]      띄운 뒤 승인까지 시도한다
+    ///   knock ctl dismiss [id]      해당 요청을 취소한다 (창을 거치지 않는다)
+    ///   knock ctl tts               음성 알림 on/off 토글
+    ///
+    /// id 자리에 "@2" 처럼 쓰면 큐의 N번째를 가리킨다. 물리 키는 id 를 알 수
+    /// 없으므로 자리로 지정한다.
+    ///
+    /// approve 는 승인을 대신 눌러주는 게 아니다. 창을 띄우고 기존 승인 경로를
+    /// 타므로 Touch ID 정책이 켜져 있으면 생체 인증을 그대로 요구한다.
+    Ctl {
+        /// list | focus | approve | dismiss | tts
+        action: String,
+        /// 대상. 요청 id, 또는 "@N" (큐의 N번째, 1-based). 생략 시 맨 앞.
+        /// list/tts 는 무시한다.
+        target: Option<String>,
     },
     /// Open the settings window (toggle Touch ID requirement, etc.).
     Settings,
@@ -138,6 +164,19 @@ fn read_config() -> Value {
 fn config_touch_id() -> bool {
     read_config()
         .get("touch_id")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// 물리 컨트롤러(Stream Deck 등)로 들어온 승인에서 Touch ID 를 건너뛸지.
+/// 기본 false — 켜는 것은 owner 의 명시적 결정이어야 한다.
+///
+/// 켜면 소켓에 붙은 로컬 프로세스가 생체 인증 없이 승인을 통과시킬 수 있다.
+/// 그 대신 물리 키를 누를 때마다 지문을 대는 번거로움이 사라진다. 위협 모델이
+/// "내 맥북의 내 프로세스" 라면 합리적인 교환이고, 그 판단은 owner 몫이다.
+fn config_external_skip_touch_id() -> bool {
+    read_config()
+        .get("external_skip_touch_id")
         .and_then(|v| v.as_bool())
         .unwrap_or(false)
 }
@@ -228,8 +267,9 @@ fn tts_supertonic(text: &str, lang: &str, times: u32, female: bool) -> bool {
         .arg("--voice-style")
         .arg({
             // Explicit `tts_voice` (e.g. "F3") wins; else default by gender.
-            let v = config_tts_voice()
-                .unwrap_or_else(|| if female { "F1".into() } else { "M1".into() });
+            let v =
+                config_tts_voice()
+                    .unwrap_or_else(|| if female { "F1".into() } else { "M1".into() });
             dir.join(format!("assets/voice_styles/{v}.json"))
         })
         .arg("--text")
@@ -245,12 +285,10 @@ fn tts_supertonic(text: &str, lang: &str, times: u32, female: bool) -> bool {
         return false;
     }
     // Pick the single WAV the sidecar just wrote.
-    let wav = std::fs::read_dir(&out_dir)
-        .ok()
-        .and_then(|rd| {
-            rd.filter_map(|e| e.ok().map(|e| e.path()))
-                .find(|p| p.extension().is_some_and(|x| x == "wav"))
-        });
+    let wav = std::fs::read_dir(&out_dir).ok().and_then(|rd| {
+        rd.filter_map(|e| e.ok().map(|e| e.path()))
+            .find(|p| p.extension().is_some_and(|x| x == "wav"))
+    });
     let played = match wav {
         // Synthesized once, replayed `times` times (each play blocks to the end).
         Some(p) => {
@@ -303,8 +341,10 @@ fn config_tts_voice() -> Option<String> {
         .get("tts_voice")
         .and_then(|v| v.as_str())?
         .to_string();
-    let ok = matches!(v.as_str(),
-        "F1" | "F2" | "F3" | "F4" | "F5" | "M1" | "M2" | "M3" | "M4" | "M5");
+    let ok = matches!(
+        v.as_str(),
+        "F1" | "F2" | "F3" | "F4" | "F5" | "M1" | "M2" | "M3" | "M4" | "M5"
+    );
     ok.then_some(v)
 }
 
@@ -407,7 +447,11 @@ fn tts_slot() -> &'static (Mutex<Option<TtsJob>>, std::sync::Condvar) {
 /// Synthesize + play one job to completion (blocking; runs on the worker).
 fn tts_play_job(job: &TtsJob) {
     if config_tts_engine() == "supertonic" {
-        let lang = if job.text.chars().any(|c| ('\u{ac00}'..='\u{d7a3}').contains(&c)) {
+        let lang = if job
+            .text
+            .chars()
+            .any(|c| ('\u{ac00}'..='\u{d7a3}').contains(&c))
+        {
             "ko"
         } else {
             "en"
@@ -463,11 +507,14 @@ fn speak_ex(text: &str, times: u32, female: bool) {
 /// Linux `spd-say`/`espeak`). Speaks `times` times, blocking per repeat so they
 /// don't overlap. Runs on the detached speak thread, so blocking is fine.
 fn speak_os_native(spoken: &str, times: u32, female: bool) {
-    let _ = female; // used only on macOS below; silence unused on other targets
     // Pick a bright female voice when requested: Korean → Yuna, else Samantha.
+    let _ = female; // used only on macOS below; silence unused on other targets
     #[cfg(target_os = "macos")]
     let voice: Option<&str> = if female {
-        if spoken.chars().any(|c| ('\u{ac00}'..='\u{d7a3}').contains(&c)) {
+        if spoken
+            .chars()
+            .any(|c| ('\u{ac00}'..='\u{d7a3}').contains(&c))
+        {
             Some("Yuna")
         } else {
             Some("Samantha")
@@ -518,6 +565,7 @@ enum Mode {
         title: String,
         gate: bool,
         action_url: Option<String>,
+        checklist: bool,
     },
     Ask {
         questions: Value,
@@ -675,6 +723,7 @@ fn get_payload(state: tauri::State<AppState>) -> Value {
             title,
             gate,
             action_url,
+            checklist,
         } => serde_json::json!({
             "mode": "annotate",
             "html": html,
@@ -688,6 +737,7 @@ fn get_payload(state: tauri::State<AppState>) -> Value {
             "configTtsVoice": config_tts_voice().unwrap_or_default(),
             "configTtsRepeat": config_tts_repeat(),
             "actionUrl": action_url,
+            "checklist": checklist,
         }),
         Mode::Ask { questions, title } => serde_json::json!({
             "mode": "ask",
@@ -824,7 +874,11 @@ fn tts_status() {
     println!("Supertonic 사이드카: {}", tts_sidecar_bin().display());
     println!(
         "Supertonic 준비됨: {}",
-        if supertonic_ready() { "예" } else { "아니오" }
+        if supertonic_ready() {
+            "예"
+        } else {
+            "아니오"
+        }
     );
 }
 
@@ -876,7 +930,10 @@ fn tts_install() {
 
     // 2) The sidecar binary: no prebuilt release yet, so guide the local build.
     if tts_sidecar_bin().is_file() {
-        println!("\n사이드카 바이너리: 이미 배치됨 ({})", tts_sidecar_bin().display());
+        println!(
+            "\n사이드카 바이너리: 이미 배치됨 ({})",
+            tts_sidecar_bin().display()
+        );
     } else {
         println!("\n남은 1가지 — 사이드카 바이너리 (supertonic stock `example_onnx`):");
         println!("  git clone https://github.com/supertone-inc/supertonic");
@@ -899,7 +956,10 @@ fn tts_install() {
 /// place so re-enabling is instant; delete `~/.config/knock/tts` to reclaim disk.
 fn tts_uninstall() {
     let _ = set_config_tts_engine("os");
-    println!("OS 기본 음성으로 되돌렸습니다. (에셋은 {} 에 보존)", tts_dir().display());
+    println!(
+        "OS 기본 음성으로 되돌렸습니다. (에셋은 {} 에 보존)",
+        tts_dir().display()
+    );
 }
 
 #[tauri::command]
@@ -1034,9 +1094,14 @@ fn dismiss(state: tauri::State<AppState>) {
 // ---------------------------------------------------------------------------
 
 struct QueueEntry {
+    /// 승인은 받았지만 아직 끝나지 않은 상태(--checklist). 큐에 남아 있어서
+    /// 브라우저에서 작업하다 다시 열어 절차를 볼 수 있고, "완료"를 눌러야 resolve 된다.
+    in_progress: bool,
     id: String,
     kind: String,
     payload: Value,
+    source: Value,
+    created_at: u64,
     responder: ipc::Responder,
 }
 
@@ -1062,11 +1127,19 @@ fn daemon_queue(state: tauri::State<DaemonState>) -> Value {
                 "id": e.id,
                 "kind": e.kind,
                 "title": title,
+                "source": e.source,
+                "createdAt": e.created_at,
                 "payload": e.payload,
+                "inProgress": e.in_progress,
             })
         })
         .collect();
     serde_json::json!({ "mode": "queue", "items": items, "touchId": config_touch_id() })
+}
+
+#[tauri::command]
+fn hide_window(window: tauri::WebviewWindow) {
+    let _ = window.hide();
 }
 
 /// Reflect the pending count on the icon badge (macOS Dock / Linux) and the
@@ -1081,6 +1154,28 @@ fn update_badge(app: &tauri::AppHandle, n: usize) {
     }
 }
 
+/// `--checklist` 게이트에서 승인이 눌렸을 때. 요청을 resolve 하지 않고 큐에
+/// "진행 중"으로 남긴다. 창은 닫아서(브라우저를 가리지 않게) owner 가 작업하다
+/// 트레이에서 다시 열어 절차를 보고 "완료"를 누를 수 있게 한다.
+///
+/// 승인 즉시 resolve 하면 절차가 화면에서 사라지고, owner 가 끝냈다는 신호도
+/// 받을 수 없다. 그 두 가지를 같이 푸는 자리다.
+#[tauri::command]
+fn daemon_start_action(app: tauri::AppHandle, id: String, state: tauri::State<DaemonState>) {
+    {
+        let mut q = state.queue.lock().unwrap();
+        if let Some(e) = q.iter_mut().find(|e| e.id == id) {
+            e.in_progress = true;
+        }
+    }
+    let len = state.queue.lock().unwrap().len();
+    let _ = app.emit("queue-changed", ());
+    update_badge(&app, len);
+}
+
+// Tauri command 의 인자는 그대로 IPC 파라미터라, 구조체로 묶으면 프론트 호출부의
+// 형태까지 바뀐다. 여기서는 인자 개수보다 계약이 그대로인 쪽이 낫다.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 fn daemon_resolve(
     app: tauri::AppHandle,
@@ -1089,6 +1184,7 @@ fn daemon_resolve(
     feedback: Option<String>,
     answers: Option<Value>,
     grant: Option<bool>,
+    completed: Option<bool>,
     state: tauri::State<DaemonState>,
 ) {
     // The owner ticked "send as execution approval" on an ask: record a
@@ -1112,6 +1208,9 @@ fn daemon_resolve(
         }
         if let Some(a) = answers {
             resp["answers"] = a;
+        }
+        if let Some(c) = completed {
+            resp["completed"] = Value::Bool(c);
         }
         entry.responder.reply(&resp);
     }
@@ -1139,6 +1238,8 @@ fn run_daemon() {
         .invoke_handler(tauri::generate_handler![
             daemon_queue,
             daemon_resolve,
+            daemon_start_action,
+            hide_window,
             save_pasted_image,
             touch_id_approve,
             save_touch_id,
@@ -1149,10 +1250,11 @@ fn run_daemon() {
             app_version
         ])
         .on_window_event(|window, event| {
-            // Closing the window must not kill the daemon — just hide it.
+            // The frontend owns the close semantics: dismiss the open detail,
+            // or just hide when the queue list is visible. Keep the daemon alive.
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                let _ = window.hide();
+                let _ = window.emit("native-close-requested", ());
             }
         })
         .setup(move |app| {
@@ -1193,6 +1295,14 @@ fn run_daemon() {
                         .and_then(|v| v.as_str())
                         .unwrap_or("annotate")
                         .to_string();
+                    let source = payload
+                        .get("source")
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!({}));
+                    let created_at = payload
+                        .get("createdAt")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or_else(epoch_seconds);
 
                     // Pre-authorization protocol — answered inline, never queued,
                     // so the window is not disturbed:
@@ -1200,11 +1310,155 @@ fn run_daemon() {
                     //     grant, single-use, or "none".
                     //   "grant"   (from single-shot submit_answers): record one.
                     if kind == "consume" {
-                        let granted =
-                            take_live_grant(&mut g.lock().unwrap(), Instant::now());
+                        let granted = take_live_grant(&mut g.lock().unwrap(), Instant::now());
                         incoming.responder.reply(&serde_json::json!({
                             "decision": if granted { "approved" } else { "none" }
                         }));
+                        return;
+                    }
+                    // 모르는 kind 는 거절한다. 기본값이 "annotate" 라서, 신버전 CLI 가
+                    // 구버전 데몬에 새 제어 요청을 보내면 그게 **내용 없는 승인 게이트**로
+                    // 둔갑해 큐에 쌓였다 (실측: `ctl list` 가 "undefined" 창을 띄웠다).
+                    // 모르는 요청은 모른다고 답해야 호출자가 버전 불일치를 알 수 있다.
+                    const KNOWN_KINDS: &[&str] = &[
+                        "annotate",
+                        "ask",
+                        "consume",
+                        "grant",
+                        "list",
+                        "focus",
+                        "approve",
+                        "dismiss",
+                        "tts-toggle",
+                    ];
+                    if !KNOWN_KINDS.contains(&kind.as_str()) {
+                        incoming.responder.reply(&serde_json::json!({
+                            "error": "unknown kind",
+                            "kind": kind,
+                            "supported": KNOWN_KINDS,
+                        }));
+                        return;
+                    }
+
+                    // Stream Deck (또는 다른 외부 컨트롤러) 제어 프로토콜 — 큐에 넣지
+                    // 않고 즉답한다. 물리 키가 큐를 읽고, 특정 요청을 화면에 띄우고,
+                    // 승인 의사를 전달하는 세 가지만 연다.
+                    //
+                    // 승인은 여기서 완결되지 않는다. `approve` 는 "그 항목을 열고
+                    // 승인을 시도하라" 는 신호일 뿐이고, Touch ID 정책이 켜져 있으면
+                    // 프론트가 생체 인증을 요구한다. 소켓에 붙은 프로세스가 인증을
+                    // 건너뛸 수 없다 — 물리 키를 잘못 눌러도 마찬가지다.
+                    if kind == "list" {
+                        let items: Vec<Value> = {
+                            let qq = q.lock().unwrap();
+                            qq.iter()
+                                .map(|e| {
+                                    serde_json::json!({
+                                        "id": e.id,
+                                        "kind": e.kind,
+                                        "title": e.payload.get("title")
+                                            .and_then(|t| t.as_str()).unwrap_or("Knock"),
+                                        "source": e.source,
+                                        "createdAt": e.created_at,
+                                        "inProgress": e.in_progress,
+                                        "gate": e.payload.get("gate")
+                                            .and_then(|v| v.as_bool()).unwrap_or(false),
+                                    })
+                                })
+                                .collect()
+                        };
+                        incoming.responder.reply(&serde_json::json!({
+                            "items": items,
+                            "tts": config_tts(),
+                        }));
+                        return;
+                    }
+                    if kind == "focus" || kind == "approve" || kind == "dismiss" {
+                        let raw = payload
+                            .get("target")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        // "@N" = 큐의 N번째(1-based). 물리 키는 id 를 알 수 없으니
+                        // 자리로 가리킨다. 그 외에는 id 그대로.
+                        let target = {
+                            let qq = q.lock().unwrap();
+                            if let Some(n) =
+                                raw.strip_prefix('@').and_then(|n| n.parse::<usize>().ok())
+                            {
+                                qq.get(n.saturating_sub(1))
+                                    .map(|e| e.id.clone())
+                                    .unwrap_or_default()
+                            } else if raw.is_empty() {
+                                qq.first().map(|e| e.id.clone()).unwrap_or_default()
+                            } else {
+                                raw.clone()
+                            }
+                        };
+                        let known = {
+                            let qq = q.lock().unwrap();
+                            !target.is_empty() && qq.iter().any(|e| e.id == target)
+                        };
+                        // dismiss 는 창을 거치지 않고 바로 해제한다. 취소는 되돌릴
+                        // 것이 없어 확인 단계가 필요 없고, 승인과 달리 위험하지도 않다.
+                        if kind == "dismiss" {
+                            if known {
+                                let entry = {
+                                    let mut qq = q.lock().unwrap();
+                                    qq.iter().position(|e| e.id == target).map(|i| qq.remove(i))
+                                };
+                                if let Some(e) = entry {
+                                    e.responder
+                                        .reply(&serde_json::json!({ "decision": "dismissed" }));
+                                }
+                                let len = q.lock().unwrap().len();
+                                let hh = h.clone();
+                                let _ = h.run_on_main_thread(move || {
+                                    let _ = hh.emit("queue-changed", ());
+                                    update_badge(&hh, len);
+                                    if len == 0 {
+                                        if let Some(w) = hh.get_webview_window("main") {
+                                            let _ = w.hide();
+                                        }
+                                    }
+                                });
+                            }
+                            incoming.responder.reply(&serde_json::json!({
+                                "decision": if known { "dismissed" } else { "unknown" }
+                            }));
+                            return;
+                        }
+                        if known {
+                            let hh = h.clone();
+                            let want_approve = kind == "approve";
+                            let t = target.clone();
+                            let _ = h.run_on_main_thread(move || {
+                                if let Some(win) = hh.get_webview_window("main") {
+                                    let _ = win.unminimize();
+                                    let _ = win.show();
+                                    let _ = win.set_focus();
+                                }
+                                let _ = hh.emit(
+                                    "external-control",
+                                    serde_json::json!({
+                                        "target": t,
+                                        "approve": want_approve,
+                                        "skipTouchId": config_external_skip_touch_id(),
+                                    }),
+                                );
+                            });
+                        }
+                        incoming.responder.reply(&serde_json::json!({
+                            "decision": if known { "accepted" } else { "unknown" }
+                        }));
+                        return;
+                    }
+                    if kind == "tts-toggle" {
+                        let next = !config_tts();
+                        let _ = set_config_tts(next);
+                        incoming
+                            .responder
+                            .reply(&serde_json::json!({ "tts": next }));
                         return;
                     }
                     if kind == "grant" {
@@ -1227,15 +1481,17 @@ fn run_daemon() {
                         .and_then(|v| v.as_str())
                         .unwrap_or("새 요청")
                         .to_string();
-                    let spoken_body = html_to_text(
-                        inner.get("html").and_then(|v| v.as_str()).unwrap_or(""),
-                    );
+                    let spoken_body =
+                        html_to_text(inner.get("html").and_then(|v| v.as_str()).unwrap_or(""));
                     let len = {
                         let mut qq = q.lock().unwrap();
                         qq.push(QueueEntry {
+                            in_progress: false,
                             id,
                             kind,
                             payload: inner,
+                            source,
+                            created_at,
                             responder: incoming.responder,
                         });
                         qq.len()
@@ -1278,10 +1534,9 @@ fn run_daemon() {
             .enabled(false)
             .build(app)?;
             let sep = PredefinedMenuItem::separator(app)?;
-            let touch_toggle =
-                CheckMenuItemBuilder::with_id("touch_id", "Touch ID for critical gates")
-                    .checked(config_touch_id())
-                    .build(app)?;
+            let touch_toggle = CheckMenuItemBuilder::with_id("touch_id", "Use Touch ID by default")
+                .checked(config_touch_id())
+                .build(app)?;
             let open_url_toggle =
                 CheckMenuItemBuilder::with_id("open_url", "Open action URL on approve")
                     .checked(config_open_url())
@@ -1409,10 +1664,9 @@ fn launch(state: AppState) {
                     .enabled(false)
                     .build(app)?;
             let sep = PredefinedMenuItem::separator(app)?;
-            let touch_toggle =
-                CheckMenuItemBuilder::with_id("touch_id", "Touch ID for critical gates")
-                    .checked(config_touch_id())
-                    .build(app)?;
+            let touch_toggle = CheckMenuItemBuilder::with_id("touch_id", "Use Touch ID by default")
+                .checked(config_touch_id())
+                .build(app)?;
             let open_url_toggle =
                 CheckMenuItemBuilder::with_id("open_url", "Open action URL on approve")
                     .checked(config_open_url())
@@ -1473,10 +1727,64 @@ fn launch(state: AppState) {
         .expect("error while running knock");
 }
 
+fn epoch_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn project_name_from_cwd(cwd: &str) -> Option<String> {
+    let path = Path::new(cwd);
+    path.ancestors()
+        .find(|p| p.join(".git").exists())
+        .or(Some(path))
+        .and_then(|p| p.file_name())
+        .map(|s| s.to_string_lossy().to_string())
+}
+
+fn request_source(hook_payload: Option<&Value>, hook: bool) -> Value {
+    let cwd = std::env::var("KNOCK_CWD")
+        .ok()
+        .or_else(|| {
+            hook_payload
+                .and_then(|p| p.get("cwd"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .map(|p| p.to_string_lossy().to_string())
+        })
+        .unwrap_or_default();
+    let project = std::env::var("KNOCK_PROJECT")
+        .ok()
+        .or_else(|| project_name_from_cwd(&cwd));
+    let caller = std::env::var("KNOCK_CALLER").ok().unwrap_or_else(|| {
+        if hook
+            || std::env::var_os("CLAUDECODE").is_some()
+            || std::env::var_os("CLAUDE_PROJECT_DIR").is_some()
+        {
+            "Claude Code".to_string()
+        } else if std::env::var_os("CODEX_HOME").is_some()
+            || std::env::var_os("CODEX_THREAD_ID").is_some()
+        {
+            "Codex".to_string()
+        } else {
+            "CLI".to_string()
+        }
+    });
+    serde_json::json!({
+        "project": project,
+        "caller": caller,
+    })
+}
+
 /// Try to hand this request to the daemon (single-window queue). If the daemon
 /// answers, convert the decision to this invocation's stdout contract and exit.
 /// Returns normally only if the daemon is unreachable (caller falls back to launch).
-fn try_daemon(kind: &str, inner: Value, json: bool, hook: bool) {
+fn try_daemon(kind: &str, inner: Value, json: bool, hook: bool, source: Option<Value>) {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -1487,6 +1795,8 @@ fn try_daemon(kind: &str, inner: Value, json: bool, hook: bool) {
         "kind": kind,
         "json": json,
         "hook": hook,
+        "source": source.unwrap_or_else(|| request_source(None, hook)),
+        "createdAt": epoch_seconds(),
         "payload": inner,
     });
     if let Some(resp) = ipc::client_request(&req) {
@@ -1738,11 +2048,17 @@ fn run_hook() {
         "configTouchId": config_touch_id(),
         "configOpenUrl": config_open_url(),
         "configTts": config_tts(),
-            "configTtsScope": config_tts_scope(),
-            "configTtsVoice": config_tts_voice().unwrap_or_default(),
-            "configTtsRepeat": config_tts_repeat(),
+        "configTtsScope": config_tts_scope(),
+        "configTtsVoice": config_tts_voice().unwrap_or_default(),
+        "configTtsRepeat": config_tts_repeat(),
     });
-    try_daemon("annotate", inner, false, true);
+    try_daemon(
+        "annotate",
+        inner,
+        false,
+        true,
+        Some(request_source(Some(&payload), true)),
+    );
 
     launch(AppState {
         mode: Mode::Annotate {
@@ -1750,6 +2066,7 @@ fn run_hook() {
             title: "Plan 검토".to_string(),
             gate: true,
             action_url: None,
+            checklist: false,
         },
         json: false,
         hook: true,
@@ -1780,6 +2097,7 @@ pub fn run() {
             title,
             touch_id,
             action_url,
+            checklist,
         } => {
             // Pre-authorization: a `--gate` annotation (the critical gate) can be
             // satisfied by a live grant the owner set via an ask-confirm — spend
@@ -1812,19 +2130,21 @@ pub fn run() {
                 "touchId": touch_id,
                 "configTouchId": config_touch_id(),
                 "configOpenUrl": config_open_url(),
-            "configTts": config_tts(),
-            "configTtsScope": config_tts_scope(),
-            "configTtsVoice": config_tts_voice().unwrap_or_default(),
-            "configTtsRepeat": config_tts_repeat(),
+                "configTts": config_tts(),
+                "configTtsScope": config_tts_scope(),
+                "configTtsVoice": config_tts_voice().unwrap_or_default(),
+                "configTtsRepeat": config_tts_repeat(),
                 "actionUrl": action_url,
+                "checklist": checklist,
             });
-            try_daemon("annotate", inner, json, false);
+            try_daemon("annotate", inner, json, false, None);
             launch(AppState {
                 mode: Mode::Annotate {
                     html,
                     title,
                     gate,
                     action_url,
+                    checklist,
                 },
                 json,
                 hook: false,
@@ -1857,12 +2177,12 @@ pub fn run() {
                 "contextHtml": ask_context_html(&questions),
                 "configTouchId": config_touch_id(),
                 "configOpenUrl": config_open_url(),
-            "configTts": config_tts(),
-            "configTtsScope": config_tts_scope(),
-            "configTtsVoice": config_tts_voice().unwrap_or_default(),
-            "configTtsRepeat": config_tts_repeat(),
+                "configTts": config_tts(),
+                "configTtsScope": config_tts_scope(),
+                "configTtsVoice": config_tts_voice().unwrap_or_default(),
+                "configTtsRepeat": config_tts_repeat(),
             });
-            try_daemon("ask", inner, true, false);
+            try_daemon("ask", inner, true, false, None);
             launch(AppState {
                 mode: Mode::Ask { questions, title },
                 json: true,
@@ -1871,6 +2191,44 @@ pub fn run() {
             });
         }
         // Settings is always a single-shot window (never queued through the daemon).
+        Command::Ctl { action, target } => {
+            let kind = match action.as_str() {
+                "list" => "list",
+                "focus" => "focus",
+                "approve" => "approve",
+                "dismiss" => "dismiss",
+                "tts" => "tts-toggle",
+                other => {
+                    eprintln!("알 수 없는 동작: {other} (list | focus | approve | dismiss | tts)");
+                    std::process::exit(2);
+                }
+            };
+            let mut req = serde_json::json!({ "kind": kind });
+            if let Some(t) = target {
+                req["target"] = Value::String(t);
+            }
+            // 데몬이 없으면 띄우지 않는다. 물리 키가 눌렸다고 빈 창을 여는 건
+            // 놀라운 동작이고, 대기 건이 없다는 뜻이기도 하다.
+            match ipc::client_request_existing(&req) {
+                Some(resp) => {
+                    // 구버전 데몬은 이 요청을 모른다. 조용히 성공처럼 끝내면
+                    // 물리 키가 먹통인 이유를 알 수 없으므로 명시적으로 알린다.
+                    if resp.get("error").is_some() {
+                        eprintln!(
+                            "데몬이 이 요청을 모릅니다 — 실행 중인 knock 이 구버전입니다.\n\
+                             데몬을 재시작하세요: knock daemon uninstall && knock daemon install"
+                        );
+                        println!("{resp}");
+                        std::process::exit(3);
+                    }
+                    println!("{resp}");
+                }
+                None => {
+                    println!("{}", serde_json::json!({ "error": "daemon not running" }));
+                    std::process::exit(1);
+                }
+            }
+        }
         Command::Settings => launch(AppState {
             mode: Mode::Settings,
             json: false,
@@ -2003,5 +2361,14 @@ mod tests {
     fn render_md_makes_table() {
         let h = render_md("| a | b |\n|---|---|\n| 1 | 2 |");
         assert!(h.contains("<table>"));
+    }
+
+    #[test]
+    fn project_source_uses_git_root() {
+        let nested = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        assert_eq!(
+            project_name_from_cwd(&nested.to_string_lossy()).as_deref(),
+            Some("knock")
+        );
     }
 }

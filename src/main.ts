@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 
 interface AnnotatePayload {
   mode: "annotate";
@@ -14,6 +15,10 @@ interface AnnotatePayload {
   configTtsVoice?: string;
   configTtsRepeat?: number;
   actionUrl?: string | null;
+  /// 승인 후에도 큐에 남겨 절차를 다시 볼 수 있게 하고, "완료"로 resolve 한다.
+  checklist?: boolean;
+  /// 이 요청이 이미 승인돼 진행 중인가 (큐에서 다시 열었을 때 채워진다).
+  inProgress?: boolean;
 }
 interface AskOption {
   label: string;
@@ -53,7 +58,14 @@ interface QueueItem {
   id: string;
   kind: "annotate" | "ask";
   title: string;
+  source?: {
+    project?: string;
+    caller?: string;
+  };
+  createdAt?: number;
   payload: AnnotatePayload | AskPayload;
+  /// 승인은 됐지만 아직 완료되지 않은 --checklist 요청.
+  inProgress?: boolean;
 }
 interface QueuePayload {
   mode: "queue";
@@ -65,7 +77,10 @@ interface QueuePayload {
 // In daemon mode this is swapped for one that resolves a specific queued request
 // and reloads the page to show the next item / the list.
 type Sink = {
-  annotate: (decision: string, feedback?: string) => void;
+  annotate: (decision: string, feedback?: string, completed?: boolean) => void;
+  // --checklist 승인: resolve 하지 않고 큐에 "진행 중"으로 남긴다.
+  // 단일창 모드에는 큐가 없어 undefined — 그 경우 기존처럼 즉시 resolve 한다.
+  startAction?: () => void;
   // `grant` = the owner ticked "send as execution approval"; carries a TTL so the
   // next knock permission gate auto-approves once.
   ask: (answers: Record<string, string | string[]>, grant?: boolean) => void;
@@ -190,6 +205,38 @@ function setKey(h: ((e: KeyboardEvent) => void) | null) {
   if (h) window.addEventListener("keydown", h);
 }
 
+type WindowLayout = "compact" | "ask-single" | "large" | "queue" | "settings";
+let activeWindowLayout = "";
+
+async function applyWindowLayout(layout: WindowLayout, itemCount = 0) {
+  const layoutKey = layout === "queue" ? `${layout}:${Math.min(itemCount, 8)}` : layout;
+  if (activeWindowLayout === layoutKey) return;
+  activeWindowLayout = layoutKey;
+
+  const [width, height] = (() => {
+    switch (layout) {
+      case "ask-single":
+        return [900, 660];
+      case "queue":
+        return [860, Math.max(540, Math.min(760, 250 + itemCount * 58))];
+      case "settings":
+        return [780, 760];
+      case "large":
+        return [1120, 900];
+      default:
+        return [900, 720];
+    }
+  })();
+
+  try {
+    const win = getCurrentWindow();
+    await win.setSize(new LogicalSize(width, height));
+    await win.center();
+  } catch {
+    // Layout is an enhancement; never block a gate if the window API fails.
+  }
+}
+
 // The daemon reuses one window across many queued requests. The setup
 // functions bind click/change/paste listeners onto STATIC elements (opt-approve,
 // ask-submit, td-toggle, ...). Those listeners are NOT auto-removed on re-render,
@@ -202,8 +249,6 @@ function dropStaleListeners() {
   for (const id of [
     "td-toggle-wrap", // td-toggle (header)
     "tts-toggle-wrap", // tts-header-toggle (header)
-    "scope-toggle-wrap", // scope-header-toggle (header)
-    "tts-hdr-controls", // voice-header, repeat-header (header)
     "annotate-footer", // opt-approve, opt-cancel, feedback, send + focusin
     "ask-footer", // ask-dismiss, ask-prev, ask-next, ask-submit
     "ask-root", // focusin (children are innerHTML-reset below)
@@ -231,8 +276,6 @@ function resetView() {
   }
   document.getElementById("td-toggle-wrap")?.classList.add("hidden");
   document.getElementById("tts-toggle-wrap")?.classList.add("hidden");
-  document.getElementById("scope-toggle-wrap")?.classList.add("hidden");
-  document.getElementById("tts-hdr-controls")?.classList.add("hidden");
   const ar = document.getElementById("ask-root");
   if (ar) ar.innerHTML = "";
   submitted = false;
@@ -245,14 +288,15 @@ function resetView() {
 function sendDecision(
   decision: "approved" | "annotated" | "dismissed",
   feedback?: string,
+  completed?: boolean,
 ) {
-  once(() => sink.annotate(decision, feedback));
+  once(() => sink.annotate(decision, feedback, completed));
 }
 
 // Header 🔊 toggle — shown on every gate (annotate/ask) so the owner can mute
 // or unmute the spoken alert right from the window. Persists to config `tts`
 // (same key as the tray + settings toggles), so it survives across gates.
-function wireTtsHeader(configTts?: boolean, configScope?: string, configVoice?: string, configRepeat?: number) {
+function wireTtsHeader(configTts?: boolean) {
   const wrap = $("tts-toggle-wrap");
   const toggle = $<HTMLInputElement>("tts-header-toggle");
   wrap.classList.remove("hidden");
@@ -260,45 +304,17 @@ function wireTtsHeader(configTts?: boolean, configScope?: string, configVoice?: 
   toggle.addEventListener("change", () => {
     invoke("save_tts", { enabled: toggle.checked });
   });
-
-  // 📄 내용 — quick scope toggle: on = full-content brief, off = title only.
-  const scopeWrap = $("scope-toggle-wrap");
-  const scopeToggle = $<HTMLInputElement>("scope-header-toggle");
-  scopeWrap.classList.remove("hidden");
-  scopeToggle.checked = (configScope ?? "title") === "full";
-  scopeToggle.addEventListener("change", () => {
-    invoke("save_tts_opt", {
-      key: "tts_scope",
-      value: scopeToggle.checked ? "full" : "title",
-    });
-  });
-
-  // 음성 드롭다운 + 반복 횟수 빠른 컨트롤.
-  const ctrls = $("tts-hdr-controls");
-  const voiceSel = $<HTMLSelectElement>("voice-header");
-  const repeatIn = $<HTMLInputElement>("repeat-header");
-  ctrls.classList.remove("hidden");
-  voiceSel.value = configVoice ?? "";
-  repeatIn.value = String(configRepeat ?? 3);
-  voiceSel.addEventListener("change", () =>
-    invoke("save_tts_opt", { key: "tts_voice", value: voiceSel.value }),
-  );
-  repeatIn.addEventListener("change", () =>
-    invoke("save_tts_opt", {
-      key: "tts_repeat",
-      value: Math.min(10, Math.max(1, parseInt(repeatIn.value) || 3)),
-    }),
-  );
 }
 
 function setupAnnotate(p: AnnotatePayload) {
+  void applyWindowLayout(p.html.length > 6000 ? "large" : "compact");
   $("badge").textContent = "승인 요청";
   $("title").textContent = p.title;
   $("content").innerHTML = p.html;
   $("content").classList.remove("hidden");
   makeLinksExternal($("content"));
   $("annotate-footer").classList.remove("hidden");
-  wireTtsHeader(p.configTts, p.configTtsScope, p.configTtsVoice, p.configTtsRepeat);
+  wireTtsHeader(p.configTts);
 
   const optApprove = $("opt-approve");
   const optCancel = $("opt-cancel");
@@ -311,21 +327,38 @@ function setupAnnotate(p: AnnotatePayload) {
   // approval. Flipping it persists to config (next critical gates) immediately.
   const tdWrap = $("td-toggle-wrap");
   const tdToggle = $<HTMLInputElement>("td-toggle");
+  const explicitTouchId = p.touchId === true;
   const approveLabel = optApprove.querySelector(".ask-opt-label");
   const hasAction = !!p.actionUrl;
+  // --checklist 는 승인 시점이 아니라 "완료" 시점에 resolve 한다. 큐에 진행 중으로
+  // 남아 있다가 다시 열리면 버튼이 완료로 바뀐다. startAction 이 없는 단일창
+  // 모드에는 큐가 없으므로 기존처럼 승인 즉시 resolve 한다.
+  const checklistMode = !!p.checklist && !!sink.startAction;
+  const resuming = checklistMode && !!p.inProgress;
   const reflectLabel = () => {
     if (!approveLabel) return;
+    if (resuming) {
+      approveLabel.textContent = "✓ 완료";
+      return;
+    }
     const base = tdToggle.checked ? "🔒 Touch ID 승인" : "✓ 승인";
-    approveLabel.textContent = hasAction ? `${base} → 링크 열기` : base;
+    const suffix = checklistMode ? " → 링크 열기 (완료는 나중에)" : " → 링크 열기";
+    approveLabel.textContent = hasAction ? `${base}${suffix}` : base;
   };
   if (p.gate) {
     tdWrap.classList.remove("hidden");
-    tdToggle.checked = p.configTouchId ?? p.touchId ?? false;
+    tdToggle.checked = explicitTouchId || (p.configTouchId ?? false);
+    tdToggle.disabled = explicitTouchId;
+    tdWrap.title = explicitTouchId
+      ? "이 요청은 Touch ID 인증이 필수입니다"
+      : "이 요청과 이후 요청에 Touch ID 요구";
     reflectLabel();
-    tdToggle.addEventListener("change", () => {
-      invoke("save_touch_id", { enabled: tdToggle.checked });
-      reflectLabel();
-    });
+    if (!explicitTouchId) {
+      tdToggle.addEventListener("change", () => {
+        invoke("save_touch_id", { enabled: tdToggle.checked });
+        reflectLabel();
+      });
+    }
   }
 
   // Approve, optionally gated behind Touch ID / Windows Hello (per the toggle).
@@ -341,6 +374,11 @@ function setupAnnotate(p: AnnotatePayload) {
         return; // auth cancelled/failed → keep window open
       }
     }
+    // 다시 열어 "완료"를 누른 경우: 링크를 또 열지 않고 바로 resolve.
+    if (resuming) {
+      sendDecision("approved", undefined, true);
+      return;
+    }
     if (p.actionUrl) {
       if (p.configOpenUrl ?? true) {
         await invoke("open_url", { url: p.actionUrl }).catch(() => {});
@@ -355,6 +393,11 @@ function setupAnnotate(p: AnnotatePayload) {
           // clipboard unavailable (no user gesture, denied) — ignore
         }
       }
+    }
+    if (checklistMode) {
+      // resolve 하지 않는다. 큐에 남겨 두고 창만 닫아 브라우저를 가리지 않는다.
+      sink.startAction!();
+      return;
     }
     sendDecision("approved");
   };
@@ -471,12 +514,14 @@ function setupAsk(p: AskPayload) {
   const root = $("ask-root");
   root.classList.remove("hidden");
   $("ask-footer").classList.remove("hidden");
-  wireTtsHeader(p.configTts, p.configTtsScope, p.configTtsVoice, p.configTtsRepeat);
+  wireTtsHeader(p.configTts);
 
   // Header Touch ID toggle — same config as annotate; gates the final submit.
   const tdWrap = $("td-toggle-wrap");
   const tdToggle = $<HTMLInputElement>("td-toggle");
   tdWrap.classList.remove("hidden");
+  tdWrap.title = "이 요청과 이후 요청에 Touch ID 요구";
+  tdToggle.disabled = false;
   tdToggle.checked = p.configTouchId ?? false;
   tdToggle.addEventListener("change", () => {
     invoke("save_touch_id", { enabled: tdToggle.checked });
@@ -497,6 +542,15 @@ function setupAsk(p: AskPayload) {
 
   const qs = p.questions?.questions ?? [];
   const N = qs.length;
+  const fastSubmit = N === 1;
+  const contextLength = p.contextHtml?.length ?? 0;
+  void applyWindowLayout(
+    fastSubmit && contextLength < 3000
+      ? "ask-single"
+      : N > 2 || contextLength > 5000
+        ? "large"
+        : "compact",
+  );
   const qstate: QState[] = qs.map(() => ({
     selected: new Set<number>(),
     other: false,
@@ -524,13 +578,17 @@ function setupAsk(p: AskPayload) {
   // --- build one section per question ---
   const sections: HTMLElement[] = [];
   qs.forEach((q, qi) => {
-    // Always multi-select (checkboxes): real use is "pick 1-2 options and/or
-    // add a note in 기타", which a single radio can't express. More flexible.
-    const multi = true;
+    const multi = q.multiSelect === true;
     const sec = el("section", "ask-q hidden");
     if (q.question) sec.appendChild(el("h2", "ask-q-title", q.question));
     sec.appendChild(
-      el("p", "ask-hint", "복수 선택 가능 — 숫자/Space 로 토글, → 또는 Enter 로 다음"),
+      el(
+        "p",
+        "ask-hint",
+        multi
+          ? `복수 선택 가능 — 숫자/Space 로 토글, ${fastSubmit ? "Enter 로 제출" : "→ 또는 Enter 로 다음"}`
+          : `하나 선택 — 숫자/Space 로 선택, ${fastSubmit ? "Enter 로 제출" : "→ 또는 Enter 로 다음"}`,
+      ),
     );
 
     const optsWrap = el("div", "ask-options");
@@ -619,9 +677,13 @@ function setupAsk(p: AskPayload) {
       "이 선택을 실행 승인으로 함께 전송 — 다음 knock 게이트 1회 자동 승인 (5분)",
     ),
   );
-  summary.appendChild(grantWrap);
-  sections.push(summary);
-  root.appendChild(summary);
+  if (fastSubmit) {
+    sections[0]?.appendChild(grantWrap);
+  } else {
+    summary.appendChild(grantWrap);
+    sections.push(summary);
+    root.appendChild(summary);
+  }
 
   const renderSummary = () => {
     summaryList.innerHTML = "";
@@ -643,19 +705,23 @@ function setupAsk(p: AskPayload) {
   let focusIdx = 0;
 
   const refreshNav = () => {
-    const onSummary = step === N;
-    if (!onSummary) nextBtn.disabled = !answeredFor(step);
+    const onSummary = !fastSubmit && step === N;
+    if (!onSummary) {
+      nextBtn.disabled = !answeredFor(step);
+      if (fastSubmit) submitBtn.disabled = !allAnswered();
+    }
   };
 
   const showStep = (i: number) => {
-    step = Math.max(0, Math.min(N, i));
+    const maxStep = fastSubmit ? 0 : N;
+    step = Math.max(0, Math.min(maxStep, i));
     sections.forEach((s, si) => s.classList.toggle("hidden", si !== step));
-    const onSummary = step === N;
+    const onSummary = !fastSubmit && step === N;
 
-    badgeEl.textContent = onSummary ? "확인" : `질문 ${step + 1} / ${N}`;
+    badgeEl.textContent = onSummary ? "확인" : N === 1 ? "질문" : `질문 ${step + 1} / ${N}`;
     prevBtn.classList.toggle("hidden", step === 0);
-    nextBtn.classList.toggle("hidden", onSummary);
-    submitBtn.classList.toggle("hidden", !onSummary);
+    nextBtn.classList.toggle("hidden", onSummary || fastSubmit);
+    submitBtn.classList.toggle("hidden", !(onSummary || fastSubmit));
 
     if (onSummary) {
       renderSummary();
@@ -663,6 +729,7 @@ function setupAsk(p: AskPayload) {
       submitBtn.focus();
     } else {
       nextBtn.disabled = !answeredFor(step);
+      if (fastSubmit) submitBtn.disabled = !allAnswered();
       // focus the selected option, or the first one
       const opts = sectionOpts(step);
       const sel = opts.findIndex((o) =>
@@ -675,21 +742,24 @@ function setupAsk(p: AskPayload) {
 
   const goNext = () => {
     if (step < N && !answeredFor(step)) return;
+    if (fastSubmit) {
+      void doSubmit();
+      return;
+    }
     showStep(step + 1);
   };
   const goPrev = () => showStep(step - 1);
 
   const doSubmit = async () => {
     if (!allAnswered()) {
-      showStep(N);
+      if (!fastSubmit) showStep(N);
       return;
     }
     if (tdToggle.checked) {
       const ok = await invoke<boolean>("touch_id_approve");
       if (!ok) return; // auth cancelled/failed → keep window open
     }
-    // Always multi-select → answers are always string arrays (selected labels
-    // plus any 기타 free text).
+    // The stdout contract remains arrays for both single and multi-select.
     const answers: Record<string, string[]> = {};
     qs.forEach((q, qi) => {
       answers[keyFor(q, qi)] = labelsFor(qi);
@@ -729,7 +799,7 @@ function setupAsk(p: AskPayload) {
     }
 
     // Summary step
-    if (step === N) {
+    if (!fastSubmit && step === N) {
       if (e.key === "ArrowLeft") {
         e.preventDefault();
         goPrev();
@@ -789,6 +859,7 @@ function setupAsk(p: AskPayload) {
 
 // =====================================================================
 function setupSettings(p: SettingsPayload) {
+  void applyWindowLayout("settings");
   $("badge").textContent = "설정";
   $("title").textContent = "Knock 설정";
   $("settings-root").classList.remove("hidden");
@@ -887,17 +958,27 @@ function daemonSink(id: string): Sink {
     feedback: string | null,
     answers: Record<string, string | string[]> | null,
     grant: boolean = false,
+    completed: boolean | null = null,
   ) => {
-    invoke("daemon_resolve", { id, decision, feedback, answers, grant });
+    invoke("daemon_resolve", { id, decision, feedback, answers, grant, completed });
     daemonBusy = false;
     submitted = false;
     // Re-render in place (no page reload) to show the next item / the list.
     setTimeout(() => void renderDaemon(), 80);
   };
   return {
-    annotate: (d, f) => resolve(d, f ?? null, null),
+    annotate: (d, f, completed) =>
+      resolve(d, f ?? null, null, false, completed ?? null),
     ask: (a, grant) => resolve("answered", null, a, !!grant),
     dismiss: () => resolve("dismissed", null, null),
+    // resolve 하지 않는다 — 큐에 "진행 중"으로 남기고 창만 닫는다.
+    startAction: () => {
+      invoke("daemon_start_action", { id });
+      daemonBusy = false;
+      submitted = false;
+      invoke("hide_window");
+      setTimeout(() => void renderDaemon(), 80);
+    },
   };
 }
 
@@ -906,11 +987,16 @@ function openDetail(item: QueueItem) {
   resetView();
   sink = daemonSink(item.id);
   if (item.kind === "ask") setupAsk(item.payload as AskPayload);
-  else setupAnnotate(item.payload as AnnotatePayload);
+  else
+    setupAnnotate({
+      ...(item.payload as AnnotatePayload),
+      inProgress: item.inProgress ?? false,
+    });
 }
 
 function renderList(items: QueueItem[]) {
   resetView();
+  void applyWindowLayout("queue", items.length);
   $("badge").textContent =
     items.length === 0 ? "대기 없음" : `대기 ${items.length}건`;
   $("title").textContent = "승인 대기 목록";
@@ -923,11 +1009,35 @@ function renderList(items: QueueItem[]) {
     return;
   }
   const list = el("div", "queue-list");
-  items.forEach((item) => {
+  items.forEach((item, index) => {
     const card = el("div", "queue-card");
     card.tabIndex = 0;
-    card.appendChild(el("span", "queue-kind", item.kind === "ask" ? "질문" : "승인"));
-    card.appendChild(el("span", "queue-title", item.title));
+    card.appendChild(el("span", "queue-num", String(index + 1)));
+    card.appendChild(
+      el(
+        "span",
+        item.inProgress ? "queue-kind queue-kind-progress" : "queue-kind",
+        item.inProgress ? "진행 중" : item.kind === "ask" ? "질문" : "승인",
+      ),
+    );
+    const copy = el("span", "queue-copy");
+    copy.appendChild(el("span", "queue-title", item.title));
+    const source = [item.source?.project, item.source?.caller]
+      .filter((v, i, a): v is string => !!v && a.indexOf(v) === i)
+      .join(" · ");
+    const ageSeconds = item.createdAt
+      ? Math.max(0, Math.floor(Date.now() / 1000) - item.createdAt)
+      : 0;
+    const age = !item.createdAt
+      ? ""
+      : ageSeconds < 60
+        ? "방금"
+        : ageSeconds < 3600
+          ? `${Math.floor(ageSeconds / 60)}분 전`
+          : `${Math.floor(ageSeconds / 3600)}시간 전`;
+    const meta = [source, age].filter(Boolean).join(" · ");
+    if (meta) copy.appendChild(el("span", "queue-meta", meta));
+    card.appendChild(copy);
     const open = () => openDetail(item);
     card.addEventListener("click", open);
     card.addEventListener("keydown", (e) => {
@@ -939,6 +1049,17 @@ function renderList(items: QueueItem[]) {
     list.appendChild(card);
   });
   content.appendChild(list);
+
+  // Match the detail views' number-key navigation: 1-9 opens that queued
+  // request immediately. Items after 9 remain available by click/Tab+Enter.
+  setKey((e) => {
+    if (!/^[1-9]$/.test(e.key)) return;
+    const index = parseInt(e.key, 10) - 1;
+    const item = items[index];
+    if (!item) return;
+    e.preventDefault();
+    openDetail(item);
+  });
 }
 
 // Pull the current queue and render in place. Skipped while a detail is open
@@ -974,7 +1095,58 @@ async function init() {
   try {
     const q = await invoke<QueuePayload>("daemon_queue");
     if (q && q.mode === "queue") {
+      await listen("native-close-requested", () => {
+        // In detail view the native close button means dismiss this request;
+        // in list/empty view it only hides the resident daemon window.
+        if (daemonBusy) sink.dismiss();
+        invoke("hide_window").catch(() => {});
+      });
       await renderDaemon();
+      // 외부 컨트롤러(Stream Deck 등) — 소켓으로 들어온 focus/approve 를 처리한다.
+      //
+      // approve 는 여기서 승인 버튼을 "누르는" 것으로 끝난다. 별도 승인 경로를
+      // 만들지 않는 게 핵심이다 — 기존 클로저를 그대로 타야 Touch ID 정책도
+      // 같이 따라온다. 물리 키를 잘못 눌러도 화면 승인과 똑같은 게이트를 지난다.
+      await listen<{ target: string; approve: boolean; skipTouchId?: boolean }>(
+        "external-control",
+        async (evt) => {
+          const { target, approve, skipTouchId } = evt.payload ?? {
+            target: "",
+            approve: false,
+          };
+          let cur: QueuePayload;
+          try {
+            cur = await invoke<QueuePayload>("daemon_queue");
+          } catch {
+            return;
+          }
+          if (!cur || cur.mode !== "queue") return;
+          const item = target
+            ? cur.items.find((i) => i.id === target)
+            : cur.items[0];
+          if (!item) return;
+          daemonBusy = false; // 다른 항목이 열려 있어도 물리 키 의도를 우선한다
+          openDetail(item);
+          if (approve) {
+            // 렌더가 끝난 뒤에 눌러야 리스너가 붙어 있다.
+            setTimeout(() => {
+              // config 에서 켠 경우에만 Touch ID 를 건너뛴다. 토글을 끄는 방식이라
+              // 승인 경로 자체는 그대로다 — 별도 우회로를 만들지 않는 게 중요하다.
+              //
+              // 단 토글이 disabled 면 손대지 않는다. disabled == 명시적 --touch-id
+              // 요청(prd 변경, destructive 등)이고, 그건 사람도 화면에서 끌 수 없다.
+              // `disabled` 는 사람의 클릭만 막을 뿐 스크립트의 .checked 는 막지
+              // 못하므로, 여기서 걸러내지 않으면 물리 키로 critical 게이트의 생체
+              // 인증이 통째로 면제된다.
+              if (skipTouchId) {
+                const td = $<HTMLInputElement>("td-toggle");
+                if (td && !td.disabled) td.checked = false;
+              }
+              $("opt-approve").click();
+            }, 80);
+          }
+        },
+      );
       // Event-driven refresh + a slow poll as a backstop for missed events.
       listen("queue-changed", () => void renderDaemon());
       setInterval(() => void renderDaemon(), 2000);

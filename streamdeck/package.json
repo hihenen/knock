@@ -1,0 +1,13 @@
+{
+  "name": "knock-streamdeck",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Stream Deck plugin for knock — 대기 중인 승인 요청을 물리 키에 띄우고 처리한다",
+  "type": "module",
+  "scripts": {
+    "build": "bun build src/plugin.js --target=node --outfile=../com.knock.controller.sdPlugin/bin/plugin.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

@@ -15,31 +15,9 @@
       <label id="tts-toggle-wrap" class="td-toggle hidden" title="게이트 알림 음성 낭독(TTS) 켜기/끄기">
         <input type="checkbox" id="tts-header-toggle" />
         <span class="td-switch"></span>
-        <span class="td-text">🔊 소리</span>
+        <span class="td-text">🔊</span>
       </label>
-      <label id="scope-toggle-wrap" class="td-toggle hidden" title="켜면 본문 내용까지 브리핑, 끄면 제목만 낭독">
-        <input type="checkbox" id="scope-header-toggle" />
-        <span class="td-switch"></span>
-        <span class="td-text">📄 내용</span>
-      </label>
-      <span id="tts-hdr-controls" class="hdr-controls hidden">
-        <select id="voice-header" title="음성 선택">
-          <option value="">기본</option>
-          <option value="F1">F1</option>
-          <option value="F2">F2</option>
-          <option value="F3">F3</option>
-          <option value="F4">F4</option>
-          <option value="F5">F5</option>
-          <option value="M1">M1</option>
-          <option value="M2">M2</option>
-          <option value="M3">M3</option>
-          <option value="M4">M4</option>
-          <option value="M5">M5</option>
-        </select>
-        <input type="number" id="repeat-header" min="1" max="10" step="1" title="반복 횟수" />
-        <span class="hdr-ctrl-x">🔁</span>
-      </span>
-      <label id="td-toggle-wrap" class="td-toggle hidden" title="critical 게이트 승인에 Touch ID 요구">
+      <label id="td-toggle-wrap" class="td-toggle hidden" title="이 요청과 이후 요청에 Touch ID 요구">
         <input type="checkbox" id="td-toggle" />
         <span class="td-switch"></span>
         <span class="td-text">🔒 Touch ID</span>
@@ -65,10 +43,10 @@
       <label class="toggle-row">
         <input type="checkbox" id="touch-id-toggle" />
         <div class="toggle-text">
-          <div class="toggle-label">🔒 critical 게이트에 Touch ID 요구</div>
+          <div class="toggle-label">🔒 승인·질문에 Touch ID를 기본 사용</div>
           <div class="toggle-desc">
-            prd 변경 · IAM 확장 · destructive 같은 중요 승인에 지문 / Windows
-            Hello 인증을 요구합니다. (에이전트가 이 설정을 읽어 적용)
+            모든 승인과 질문 제출에 지문 / Windows Hello 인증을 요구합니다.
+            명령의 <code>--touch-id</code> 옵션은 이 설정이 꺼져 있어도 항상 적용됩니다.
           </div>
         </div>
       </label>

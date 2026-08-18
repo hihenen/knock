@@ -4,6 +4,34 @@ All notable changes to knock are documented here. Versions follow [SemVer](https
 
 ## [Unreleased]
 
+### Added
+- **`knock ctl`** — 외부 컨트롤러용 서브커맨드. `list` / `focus [id]` / `approve [id]` /
+  `dismiss [id]` / `tts`. id 자리에 `@2` 를 쓰면 큐의 N번째를 가리킨다(물리 키는 id 를
+  모르므로 자리로 지정). 데몬이 없으면 창을 띄우지 않고 종료한다.
+- **Stream Deck 플러그인** (`com.knock.controller.sdPlugin`) — 대기 슬롯 / 승인 / 취소 /
+  음성 알림 4종 액션. 슬롯 키에는 제목이 아니라 **요청 출처**(프로젝트 · 호출자 · 대기시간)를
+  띄운다. 여러 Claude Code / Codex 세션이 동시에 대기할 때 구분해야 할 것이 그쪽이기
+  때문이다. 슬롯 번호는 슬롯 키들끼리의 순서로 자동 부여되어, 어디에 놓든 왼쪽부터 @1 이다.
+- **`external_skip_touch_id`** (config, 기본 false) — 물리 키 승인만 Touch ID 를 면제한다.
+  `touch_id` 를 통째로 끄면 화면 승인까지 무방비가 되므로 두 경로를 나눌 수 있게 했다.
+- **`annotate --checklist`** — 승인 후에도 요청을 큐에 "진행 중"으로 남긴다. 승인하면
+  `--action-url` 이 열리고 창은 닫혀 브라우저를 가리지 않으며, 트레이에서 다시 열어 절차를
+  확인하고 끝나면 "완료"를 누른다. 그때 `{"decision":"approved","completed":true}` 로
+  resolve 된다. 기존에는 승인 즉시 창이 닫혀 절차를 다시 볼 수 없었고, 작업을 끝냈다는
+  신호를 호출자가 받을 방법도 없었다. 큐가 없는 단일창 모드에서는 기존대로 즉시 resolve.
+
+### Changed
+- **승인 흐름 UX 정리** — 대기 목록에 번호·프로젝트·호출자·대기 시간을 표시하고
+  `1`~`9` 숫자키로 바로 연다. 단일 질문은 요약 단계를 건너뛰며, 헤더는 음성
+  on/off와 Touch ID만 남겨 단순화했다. 화면 내용에 맞춰 창 크기도 더 작게 조절한다.
+- **Touch ID 동작 일관화** — 전역 설정은 승인과 질문 모두에 적용하고, 명시적인
+  `--touch-id` 요청은 전역 설정이 꺼져 있어도 인증을 요구한다.
+
+### Fixed
+- **데몬 상세창 닫기 교착** — macOS 빨간 닫기 버튼으로 상세 요청을 닫으면 단순히
+  창만 숨기지 않고 해당 요청을 `dismissed`로 해제한다. 대기 목록 닫기는 기존처럼
+  상주 데몬 창만 숨긴다.
+
 ## [0.5.2] - 2026-07-13
 
 ### Fixed
