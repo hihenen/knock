@@ -99,8 +99,18 @@ function pendingFor(session, queueItems) {
   return out;
 }
 
+// working 이라는데 이만큼 조용하면 멈춘 것으로 본다. 5분은 도구 한 번 돌리고
+// 응답 받는 시간보다 넉넉하다 — 정상 작업을 stale 로 오인하지 않을 정도.
+const STALE_MS = 5 * 60 * 1000;
+
+/** 돈다고 표시돼 있는데 실제로는 출력이 끊긴 상태인가. */
+function isStale(s) {
+  if (s.status !== "working" || !s.lastOutputAt) return false;
+  return Date.now() - s.lastOutputAt > STALE_MS;
+}
+
 function sessionLabel(s) {
-  const mark = s.unread ? "●" : s.status === "working" ? "▶" : "·";
+  const mark = s.stale ? "⚠" : s.unread ? "●" : s.status === "working" ? "▶" : "·";
   const idle = s.lastOutputAt ? sinceLabel(s.lastOutputAt) : "-";
   // 대기 건수가 있으면 live 수보다 그걸 보여준다. 눌러야 할 이유가 그쪽이다.
   const tail = s.pending > 0 ? `승인 ${s.pending}` : `live ${s.live}`;
@@ -145,7 +155,7 @@ function fitTitle(text, perLine = 8, lines = 3) {
  * 소켓이라 비용도 사실상 없다.
  */
 async function refresh() {
-  const { items, alive } = await knock.list();
+  const { items, alive, tts: ttsOn } = await knock.list();
   const needSessions = [...keys.values()].some((m) => m.action === "session");
   const sess = needSessions ? await getSessions() : { items: [], alive: false };
   for (const [context, meta] of keys) {
@@ -175,14 +185,20 @@ async function refresh() {
         continue;
       }
       const pend = pendingFor(s, items);
-      const view = { ...s, pending: pend.length };
-      // 승인 대기 > 안 본 출력 > 도는 중 > 그 외. 처리할 것이 제일 위다.
+      const view = { ...s, pending: pend.length, stale: isStale(s) };
+      // 멈춤 > 승인 대기 > 안 본 출력 > 도는 중 > 그 외.
+      //
+      // stale 이 제일 위인 이유: 나머지는 "할 일이 있다" 지만 이건 "고장났다" 다.
+      // working 으로 보이는데 출력이 끊긴 세션은 화면상 조용한 세션과 구별되지
+      // 않아서, 색으로 갈라 주지 않으면 영영 안 보인다.
       setState(
         context,
-        pend.length ? 3 : view.unread ? 3 : view.status === "working" ? 2 : 1,
+        view.stale ? 4 : pend.length || view.unread ? 3 : view.status === "working" ? 2 : 1,
       );
       setTitle(context, sessionLabel(view));
     } else if (meta.action === "tts") {
+      // 음성이 켜져 있으면 밝게. 키의 정체(소리)는 두 상태 모두에 남는다.
+      setState(context, alive && ttsOn ? 1 : 0);
       setTitle(context, alive ? "" : "-");
     }
   }

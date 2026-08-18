@@ -3091,8 +3091,14 @@ function pendingFor(session, queueItems) {
   });
   return out;
 }
+var STALE_MS = 5 * 60 * 1000;
+function isStale(s) {
+  if (s.status !== "working" || !s.lastOutputAt)
+    return false;
+  return Date.now() - s.lastOutputAt > STALE_MS;
+}
 function sessionLabel(s) {
-  const mark = s.unread ? "●" : s.status === "working" ? "▶" : "·";
+  const mark = s.stale ? "⚠" : s.unread ? "●" : s.status === "working" ? "▶" : "·";
   const idle = s.lastOutputAt ? sinceLabel(s.lastOutputAt) : "-";
   const tail = s.pending > 0 ? `승인 ${s.pending}` : `live ${s.live}`;
   return [fitTitle(s.name, 10, 2), `${mark} ${idle}`, tail].join(`
@@ -3131,7 +3137,7 @@ function fitTitle(text, perLine = 8, lines = 3) {
 `);
 }
 async function refresh() {
-  const { items, alive } = await list();
+  const { items, alive, tts: ttsOn } = await list();
   const needSessions = [...keys.values()].some((m) => m.action === "session");
   const sess = needSessions ? await getSessions() : { items: [], alive: false };
   for (const [context, meta] of keys) {
@@ -3155,10 +3161,11 @@ async function refresh() {
         continue;
       }
       const pend = pendingFor(s, items);
-      const view = { ...s, pending: pend.length };
-      setState(context, pend.length ? 3 : view.unread ? 3 : view.status === "working" ? 2 : 1);
+      const view = { ...s, pending: pend.length, stale: isStale(s) };
+      setState(context, view.stale ? 4 : pend.length || view.unread ? 3 : view.status === "working" ? 2 : 1);
       setTitle(context, sessionLabel(view));
     } else if (meta.action === "tts") {
+      setState(context, alive && ttsOn ? 1 : 0);
       setTitle(context, alive ? "" : "-");
     }
   }
