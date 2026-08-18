@@ -4,6 +4,15 @@ All notable changes to knock are documented here. Versions follow [SemVer](https
 
 ## [Unreleased]
 
+### Added
+- **세션 키에 승인 대기 건수** — 그 세션이 올린 요청이 있으면 `live N` 대신 `승인 N` 을
+  띄우고 색으로 강조한다. 눌러야 할 이유가 그쪽이다. 상태 우선순위는
+  승인 대기 > 안 본 출력 > `working` > 그 외.
+
+  렌더와 클릭이 같은 규칙(`pendingFor`)을 쓴다. 키에 "승인 2" 라고 떠 있는데 눌렀을 때
+  다른 걸 집으면 안 되기 때문이다 — 물리 버튼은 확인 없이 누르는 물건이다.
+
+
 ## [0.6.1] - 2026-08-18
 
 ### Added
