@@ -2962,6 +2962,76 @@ var approve = (at) => request({ kind: "approve", target: at });
 var dismiss = (at) => request({ kind: "dismiss", target: at });
 var toggleTts = () => request({ kind: "tts-toggle" });
 
+// src/orca.js
+import { execFile } from "node:child_process";
+var CANDIDATES = [
+  "/usr/local/bin/orca",
+  "/opt/homebrew/bin/orca",
+  "/Applications/Orca.app/Contents/Resources/bin/orca"
+];
+var orcaPath = null;
+var orcaMissing = false;
+async function resolveOrca() {
+  if (orcaPath || orcaMissing)
+    return orcaPath;
+  const fs = await import("node:fs/promises");
+  for (const p of CANDIDATES) {
+    try {
+      await fs.access(p, (await import("node:fs")).constants.X_OK);
+      orcaPath = p;
+      return p;
+    } catch {}
+  }
+  orcaMissing = true;
+  return null;
+}
+function run(args, timeoutMs = 4000) {
+  return new Promise(async (resolve) => {
+    const bin = await resolveOrca();
+    if (!bin)
+      return resolve(null);
+    execFile(bin, args, { timeout: timeoutMs, maxBuffer: 8388608 }, (err, stdout) => {
+      if (err)
+        return resolve(null);
+      try {
+        resolve(JSON.parse(stdout));
+      } catch {
+        resolve(null);
+      }
+    });
+  });
+}
+async function sessions() {
+  const d = await run(["worktree", "ps", "--json"]);
+  const all = d?.result?.worktrees;
+  if (!Array.isArray(all))
+    return { items: [], alive: false };
+  const live = all.filter((w) => !w.isArchived && (w.liveTerminalCount || 0) > 0);
+  const rank = (w) => w.unread ? 0 : w.status === "working" ? 1 : 2;
+  live.sort((a, b) => rank(a) - rank(b) || (b.lastOutputAt || 0) - (a.lastOutputAt || 0));
+  return {
+    alive: true,
+    items: live.map((w) => ({
+      id: w.worktreeId,
+      name: w.displayName || w.repo || "?",
+      repo: w.repo,
+      path: w.path,
+      status: w.status,
+      unread: !!w.unread,
+      live: w.liveTerminalCount || 0,
+      lastOutputAt: w.lastOutputAt
+    }))
+  };
+}
+async function switchTo(worktreeId) {
+  const d = await run(["terminal", "list"]);
+  const terms = d?.result?.terminals ?? [];
+  const t = terms.find((x) => x.worktreeId === worktreeId && !x.orphaned);
+  if (!t?.handle)
+    return null;
+  return run(["terminal", "switch", "--terminal", t.handle], 6000);
+}
+
 // src/plugin.js
 var argv = process.argv;
 var arg = (name) => {
@@ -2981,6 +3051,15 @@ var send = (o) => {
     ws.send(JSON.stringify(o));
 };
 var keys = new Map;
+var sessionCache = { items: [], alive: false, at: 0 };
+var SESSION_TTL_MS = 6000;
+async function getSessions() {
+  if (Date.now() - sessionCache.at < SESSION_TTL_MS)
+    return sessionCache;
+  const r = await sessions();
+  sessionCache = { ...r, at: Date.now() };
+  return sessionCache;
+}
 var setTitle = (context, title) => send({ event: "setTitle", context, payload: { title, target: 0 } });
 var setState = (context, state) => send({ event: "setState", context, payload: { state } });
 var showAlert = (context) => send({ event: "showAlert", context });
@@ -2992,6 +3071,22 @@ function slotLabel(it) {
   const age = ageLabel(it.createdAt);
   return [fitTitle(head, 9, 2), tail ? fitTitle(tail, 9, 1) : "", age].filter(Boolean).join(`
 `);
+}
+function sessionLabel(s) {
+  const mark = s.unread ? "●" : s.status === "working" ? "▶" : "·";
+  const idle = s.lastOutputAt ? sinceLabel(s.lastOutputAt) : "-";
+  return [fitTitle(s.name, 10, 2), `${mark} ${idle}`, `live ${s.live}`].join(`
+`);
+}
+function sinceLabel(ts) {
+  const sec = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  if (sec < 60)
+    return "방금";
+  if (sec < 3600)
+    return `${Math.floor(sec / 60)}분`;
+  if (sec < 86400)
+    return `${Math.floor(sec / 3600)}시간`;
+  return `${Math.floor(sec / 86400)}일`;
 }
 function ageLabel(createdAt) {
   if (!createdAt)
@@ -3017,6 +3112,8 @@ function fitTitle(text, perLine = 8, lines = 3) {
 }
 async function refresh() {
   const { items, alive } = await list();
+  const needSessions = [...keys.values()].some((m) => m.action === "session");
+  const sess = needSessions ? await getSessions() : { items: [], alive: false };
   for (const [context, meta] of keys) {
     if (meta.action === "slot") {
       const it = items[meta.slot - 1];
@@ -3030,6 +3127,15 @@ async function refresh() {
     } else if (meta.action === "approve" || meta.action === "dismiss") {
       setTitle(context, !alive ? "-" : items.length ? String(items.length) : "");
       setState(context, alive && items.length ? 1 : 0);
+    } else if (meta.action === "session") {
+      const s = sess.items[meta.slot - 1];
+      if (!s) {
+        setTitle(context, "");
+        setState(context, 0);
+        continue;
+      }
+      setState(context, s.unread ? 3 : s.status === "working" ? 2 : 1);
+      setTitle(context, sessionLabel(s));
     } else if (meta.action === "tts") {
       setTitle(context, alive ? "" : "-");
     }
@@ -3086,6 +3192,18 @@ ws.on("message", async (raw) => {
       return;
     const at = `@${meta.slot}`;
     let res = null;
+    if (meta.action === "session") {
+      const s = (await getSessions()).items[meta.slot - 1];
+      if (!s)
+        return showAlert(context);
+      const q = await list();
+      const idx = q.items.findIndex((it) => it.source?.project && s.path?.endsWith(`/${it.source.project}`));
+      res = idx >= 0 ? await approve(`@${idx + 1}`) : await switchTo(s.id);
+      if (!res)
+        showAlert(context);
+      sessionCache.at = 0;
+      return refresh();
+    }
     if (meta.action === "slot")
       res = await focus(at);
     else if (meta.action === "approve")
@@ -3106,10 +3224,12 @@ function coordKey(payload) {
   return c ? c.row * 100 + c.column : 9999;
 }
 function renumber() {
-  const slots = [...keys.entries()].filter(([, m]) => m.action === "slot").sort((a, b) => a[1].coord - b[1].coord);
-  let n = 0;
-  for (const [, m] of slots) {
-    n += 1;
-    m.slot = m.fixed || n;
+  for (const kind of ["slot", "session"]) {
+    const group = [...keys.entries()].filter(([, m]) => m.action === kind).sort((a, b) => a[1].coord - b[1].coord);
+    let n = 0;
+    for (const [, m] of group) {
+      n += 1;
+      m.slot = m.fixed || n;
+    }
   }
 }

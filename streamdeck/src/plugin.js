@@ -15,6 +15,7 @@
 
 import WebSocket from "ws";
 import * as knock from "./knock.js";
+import * as orca from "./orca.js";
 
 const argv = process.argv;
 const arg = (name) => {
@@ -39,6 +40,17 @@ const send = (o) => {
 // context(키 하나의 인스턴스 id) -> { action, slot }
 const keys = new Map();
 
+// orca 조회는 knock 소켓보다 무겁다(190KB / 0.3s 실측). 키 렌더는 1초마다 돌지만
+// 세션 목록은 그보다 드물게 갱신하고 그 사이에는 캐시를 쓴다.
+let sessionCache = { items: [], alive: false, at: 0 };
+const SESSION_TTL_MS = 6000;
+async function getSessions() {
+  if (Date.now() - sessionCache.at < SESSION_TTL_MS) return sessionCache;
+  const r = await orca.sessions();
+  sessionCache = { ...r, at: Date.now() };
+  return sessionCache;
+}
+
 const setTitle = (context, title) =>
   send({ event: "setTitle", context, payload: { title, target: 0 } });
 const setState = (context, state) =>
@@ -61,6 +73,26 @@ function slotLabel(it) {
   return [fitTitle(head, 9, 2), tail ? fitTitle(tail, 9, 1) : "", age]
     .filter(Boolean)
     .join("\n");
+}
+
+/**
+ * 세션 키에 쓸 내용 — 이름 / 상태 / 마지막 활동.
+ *
+ * "얼마나 돌고 있는지" 는 워크트리 생성 시각이 아니라 **마지막 출력 이후 경과**로
+ * 잰다. working 인데 출력이 30분째 없으면 멈춘 것이고, 그게 봐야 할 신호다.
+ */
+function sessionLabel(s) {
+  const mark = s.unread ? "●" : s.status === "working" ? "▶" : "·";
+  const idle = s.lastOutputAt ? sinceLabel(s.lastOutputAt) : "-";
+  return [fitTitle(s.name, 10, 2), `${mark} ${idle}`, `live ${s.live}`].join("\n");
+}
+
+function sinceLabel(ts) {
+  const sec = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  if (sec < 60) return "방금";
+  if (sec < 3600) return `${Math.floor(sec / 60)}분`;
+  if (sec < 86400) return `${Math.floor(sec / 3600)}시간`;
+  return `${Math.floor(sec / 86400)}일`;
 }
 
 /** 얼마나 기다렸는지. 오래 묵은 요청이 눈에 띄어야 한다. */
@@ -94,6 +126,8 @@ function fitTitle(text, perLine = 8, lines = 3) {
  */
 async function refresh() {
   const { items, alive } = await knock.list();
+  const needSessions = [...keys.values()].some((m) => m.action === "session");
+  const sess = needSessions ? await getSessions() : { items: [], alive: false };
   for (const [context, meta] of keys) {
     if (meta.action === "slot") {
       const it = items[meta.slot - 1];
@@ -113,6 +147,16 @@ async function refresh() {
       // 못 한 것(고장)이 같은 빈 키로 보이면 안 된다.
       setTitle(context, !alive ? "-" : items.length ? String(items.length) : "");
       setState(context, alive && items.length ? 1 : 0);
+    } else if (meta.action === "session") {
+      const s = sess.items[meta.slot - 1];
+      if (!s) {
+        setTitle(context, "");
+        setState(context, 0);
+        continue;
+      }
+      // 안 본 출력 > 도는 중 > 그 외. 상태는 색으로 먼저 읽힌다.
+      setState(context, s.unread ? 3 : s.status === "working" ? 2 : 1);
+      setTitle(context, sessionLabel(s));
     } else if (meta.action === "tts") {
       setTitle(context, alive ? "" : "-");
     }
@@ -175,6 +219,20 @@ ws.on("message", async (raw) => {
     if (!meta) return;
     const at = `@${meta.slot}`;
     let res = null;
+    if (meta.action === "session") {
+      const s = (await getSessions()).items[meta.slot - 1];
+      if (!s) return showAlert(context);
+      // 이 세션이 올린 승인 대기가 있으면 그것부터. 없으면 그 터미널로 간다.
+      // 물리 키 하나가 "볼 것이 있으면 처리, 없으면 데려다준다" 로 동작한다.
+      const q = await knock.list();
+      const idx = q.items.findIndex(
+        (it) => it.source?.project && s.path?.endsWith(`/${it.source.project}`),
+      );
+      res = idx >= 0 ? await knock.approve(`@${idx + 1}`) : await orca.switchTo(s.id);
+      if (!res) showAlert(context);
+      sessionCache.at = 0; // 다음 렌더에서 즉시 반영
+      return refresh();
+    }
     if (meta.action === "slot") res = await knock.focus(at);
     else if (meta.action === "approve") res = await knock.approve("@1");
     else if (meta.action === "dismiss") res = await knock.dismiss("@1");
@@ -202,12 +260,16 @@ function coordKey(payload) {
  * 어긋나지 않는 게 이 함수의 목적이다.
  */
 function renumber() {
-  const slots = [...keys.entries()]
-    .filter(([, m]) => m.action === "slot")
-    .sort((a, b) => a[1].coord - b[1].coord);
-  let n = 0;
-  for (const [, m] of slots) {
-    n += 1;
-    m.slot = m.fixed || n;
+  // 액션 종류별로 따로 매긴다. 슬롯과 세션이 한 줄에 섞여 있어도 각자 1 부터
+  // 시작해야 한다 — 같이 세면 세션 키가 전부 같은 항목을 가리킨다(실측).
+  for (const kind of ["slot", "session"]) {
+    const group = [...keys.entries()]
+      .filter(([, m]) => m.action === kind)
+      .sort((a, b) => a[1].coord - b[1].coord);
+    let n = 0;
+    for (const [, m] of group) {
+      n += 1;
+      m.slot = m.fixed || n;
+    }
   }
 }

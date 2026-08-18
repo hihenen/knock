@@ -106,6 +106,37 @@
           "FontSize": "12"
         }
       ]
+    },
+    {
+      "Name": "에이전트 세션",
+      "UUID": "com.knock.controller.session",
+      "Icon": "imgs/action",
+      "Tooltip": "도는 세션의 N번째. 승인 대기가 있으면 승인하고, 없으면 그 터미널로 갑니다.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "States": [
+        {
+          "Image": "imgs/key-empty",
+          "TitleAlignment": "middle",
+          "FontSize": "9"
+        },
+        {
+          "Image": "imgs/sess-idle",
+          "TitleAlignment": "middle",
+          "FontSize": "9"
+        },
+        {
+          "Image": "imgs/sess-working",
+          "TitleAlignment": "middle",
+          "FontSize": "9"
+        },
+        {
+          "Image": "imgs/sess-unread",
+          "TitleAlignment": "middle",
+          "FontSize": "9"
+        }
+      ]
     }
   ]
 }
