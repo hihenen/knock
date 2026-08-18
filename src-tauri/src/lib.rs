@@ -93,6 +93,22 @@ enum Command {
         #[arg(long)]
         title: Option<String>,
     },
+    /// Control a running daemon from outside — for physical controllers
+    /// (Stream Deck, hotkeys) that want to see the queue and act on it.
+    ///
+    ///   knock ctl list              대기 목록을 JSON 으로
+    ///   knock ctl focus [id]        해당 요청을 화면에 띄운다 (id 생략 = 맨 앞)
+    ///   knock ctl approve [id]      띄운 뒤 승인까지 시도한다
+    ///   knock ctl tts               음성 알림 on/off 토글
+    ///
+    /// approve 는 승인을 대신 눌러주는 게 아니다. 창을 띄우고 기존 승인 경로를
+    /// 타므로 Touch ID 정책이 켜져 있으면 생체 인증을 그대로 요구한다.
+    Ctl {
+        /// list | focus | approve | tts
+        action: String,
+        /// 대상 요청 id (list/tts 는 무시, focus/approve 는 생략 시 맨 앞)
+        target: Option<String>,
+    },
     /// Open the settings window (toggle Touch ID requirement, etc.).
     Settings,
     /// Manage the background queue daemon (macOS LaunchAgent).
@@ -1279,6 +1295,29 @@ fn run_daemon() {
                         }));
                         return;
                     }
+                    // 모르는 kind 는 거절한다. 기본값이 "annotate" 라서, 신버전 CLI 가
+                    // 구버전 데몬에 새 제어 요청을 보내면 그게 **내용 없는 승인 게이트**로
+                    // 둔갑해 큐에 쌓였다 (실측: `ctl list` 가 "undefined" 창을 띄웠다).
+                    // 모르는 요청은 모른다고 답해야 호출자가 버전 불일치를 알 수 있다.
+                    const KNOWN_KINDS: &[&str] = &[
+                        "annotate",
+                        "ask",
+                        "consume",
+                        "grant",
+                        "list",
+                        "focus",
+                        "approve",
+                        "tts-toggle",
+                    ];
+                    if !KNOWN_KINDS.contains(&kind.as_str()) {
+                        incoming.responder.reply(&serde_json::json!({
+                            "error": "unknown kind",
+                            "kind": kind,
+                            "supported": KNOWN_KINDS,
+                        }));
+                        return;
+                    }
+
                     // Stream Deck (또는 다른 외부 컨트롤러) 제어 프로토콜 — 큐에 넣지
                     // 않고 즉답한다. 물리 키가 큐를 읽고, 특정 요청을 화면에 띄우고,
                     // 승인 의사를 전달하는 세 가지만 연다.
@@ -2085,6 +2124,43 @@ pub fn run() {
             });
         }
         // Settings is always a single-shot window (never queued through the daemon).
+        Command::Ctl { action, target } => {
+            let kind = match action.as_str() {
+                "list" => "list",
+                "focus" => "focus",
+                "approve" => "approve",
+                "tts" => "tts-toggle",
+                other => {
+                    eprintln!("알 수 없는 동작: {other} (list | focus | approve | tts)");
+                    std::process::exit(2);
+                }
+            };
+            let mut req = serde_json::json!({ "kind": kind });
+            if let Some(t) = target {
+                req["target"] = Value::String(t);
+            }
+            // 데몬이 없으면 띄우지 않는다. 물리 키가 눌렸다고 빈 창을 여는 건
+            // 놀라운 동작이고, 대기 건이 없다는 뜻이기도 하다.
+            match ipc::client_request_existing(&req) {
+                Some(resp) => {
+                    // 구버전 데몬은 이 요청을 모른다. 조용히 성공처럼 끝내면
+                    // 물리 키가 먹통인 이유를 알 수 없으므로 명시적으로 알린다.
+                    if resp.get("error").is_some() {
+                        eprintln!(
+                            "데몬이 이 요청을 모릅니다 — 실행 중인 knock 이 구버전입니다.\n\
+                             데몬을 재시작하세요: knock daemon uninstall && knock daemon install"
+                        );
+                        println!("{resp}");
+                        std::process::exit(3);
+                    }
+                    println!("{resp}");
+                }
+                None => {
+                    println!("{}", serde_json::json!({ "error": "daemon not running" }));
+                    std::process::exit(1);
+                }
+            }
+        }
         Command::Settings => launch(AppState {
             mode: Mode::Settings,
             json: false,
