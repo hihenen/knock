@@ -45,6 +45,10 @@ function run(args, timeoutMs = 4000) {
       try {
         resolve(JSON.parse(stdout));
       } catch {
+        // --json 을 빠뜨리면 사람이 읽는 형식이 와서 여기로 떨어진다. 조용히
+        // null 을 돌려주면 "키를 눌러도 아무 일이 없다" 로만 보이므로 로그를 남긴다.
+        // (Stream Deck 이 플러그인 stderr 를 로그 파일로 모아 준다)
+        console.error(`orca ${args.join(" ")}: JSON 파싱 실패 — --json 누락?`);
         resolve(null);
       }
     });
@@ -93,9 +97,21 @@ export async function sessions() {
  * `terminal switch` 로 간다. handle 은 실행 시마다 새로 발급되므로 캐시하지 않는다.
  */
 export async function switchTo(worktreeId) {
-  const d = await run(["terminal", "list"]);
+  const d = await run(["terminal", "list", "--json"]);
   const terms = d?.result?.terminals ?? [];
   const t = terms.find((x) => x.worktreeId === worktreeId && !x.orphaned);
   if (!t?.handle) return null;
-  return run(["terminal", "switch", "--terminal", t.handle], 6000);
+  const r = await run(["terminal", "switch", "--terminal", t.handle, "--json"], 6000);
+  // switch 는 탭만 바꾼다. 창이 뒤에 있으면 아무 일도 안 일어난 것처럼 보이므로
+  // 앱을 앞으로 가져온다 — 물리 키를 눌렀으면 화면이 그리로 와야 한다.
+  await activateApp();
+  return r;
+}
+
+/** Orca 앱을 포그라운드로. macOS 전용이고 실패해도 조용히 넘어간다. */
+function activateApp() {
+  return new Promise((resolve) => {
+    if (process.platform !== "darwin") return resolve(null);
+    execFile("/usr/bin/open", ["-a", "Orca"], { timeout: 4000 }, () => resolve(null));
+  });
 }

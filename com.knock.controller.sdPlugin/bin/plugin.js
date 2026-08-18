@@ -2996,6 +2996,7 @@ function run(args, timeoutMs = 4000) {
       try {
         resolve(JSON.parse(stdout));
       } catch {
+        console.error(`orca ${args.join(" ")}: JSON 파싱 실패 — --json 누락?`);
         resolve(null);
       }
     });
@@ -3024,12 +3025,21 @@ async function sessions() {
   };
 }
 async function switchTo(worktreeId) {
-  const d = await run(["terminal", "list"]);
+  const d = await run(["terminal", "list", "--json"]);
   const terms = d?.result?.terminals ?? [];
   const t = terms.find((x) => x.worktreeId === worktreeId && !x.orphaned);
   if (!t?.handle)
     return null;
-  return run(["terminal", "switch", "--terminal", t.handle], 6000);
+  const r = await run(["terminal", "switch", "--terminal", t.handle, "--json"], 6000);
+  await activateApp();
+  return r;
+}
+function activateApp() {
+  return new Promise((resolve) => {
+    if (process.platform !== "darwin")
+      return resolve(null);
+    execFile("/usr/bin/open", ["-a", "Orca"], { timeout: 4000 }, () => resolve(null));
+  });
 }
 
 // src/plugin.js
