@@ -4,6 +4,19 @@ All notable changes to knock are documented here. Versions follow [SemVer](https
 
 ## [Unreleased]
 
+### Added
+- **Stream Deck `에이전트 세션` 액션** — orca 워크트리 기준으로 도는 세션을 키에 띄운다.
+  이름 · 마지막 활동 이후 경과 · live 터미널 수. 상태는 색으로 구분한다(안 본 출력 주황 /
+  `working` 초록 / 대기 남색). 누르면 **그 세션이 올린 승인 대기가 있으면 승인**하고, 없으면
+  그 터미널 탭으로 전환한다.
+
+  "얼마나 돌고 있는지" 는 워크트리 생성 시각이 아니라 `lastOutputAt` 기준이다. 전자는 작업이
+  오래됐다는 뜻일 뿐이고(실측: 39일), **`working` 인데 마지막 출력이 30분 전** 이라는 신호가
+  실제로 봐야 할 것이다.
+
+  orca 가 없으면 이 액션만 비어 보이고 나머지는 그대로 동작한다.
+
+
 ## [0.6.0] - 2026-08-18
 
 ### Added
