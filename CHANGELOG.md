@@ -4,6 +4,8 @@ All notable changes to knock are documented here. Versions follow [SemVer](https
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-18
+
 ### Added
 - **`knock ctl`** — 외부 컨트롤러용 서브커맨드. `list` / `focus [id]` / `approve [id]` /
   `dismiss [id]` / `tts`. id 자리에 `@2` 를 쓰면 큐의 N번째를 가리킨다(물리 키는 id 를
