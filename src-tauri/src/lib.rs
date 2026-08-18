@@ -99,14 +99,19 @@ enum Command {
     ///   knock ctl list              대기 목록을 JSON 으로
     ///   knock ctl focus [id]        해당 요청을 화면에 띄운다 (id 생략 = 맨 앞)
     ///   knock ctl approve [id]      띄운 뒤 승인까지 시도한다
+    ///   knock ctl dismiss [id]      해당 요청을 취소한다 (창을 거치지 않는다)
     ///   knock ctl tts               음성 알림 on/off 토글
+    ///
+    /// id 자리에 "@2" 처럼 쓰면 큐의 N번째를 가리킨다. 물리 키는 id 를 알 수
+    /// 없으므로 자리로 지정한다.
     ///
     /// approve 는 승인을 대신 눌러주는 게 아니다. 창을 띄우고 기존 승인 경로를
     /// 타므로 Touch ID 정책이 켜져 있으면 생체 인증을 그대로 요구한다.
     Ctl {
-        /// list | focus | approve | tts
+        /// list | focus | approve | dismiss | tts
         action: String,
-        /// 대상 요청 id (list/tts 는 무시, focus/approve 는 생략 시 맨 앞)
+        /// 대상. 요청 id, 또는 "@N" (큐의 N번째, 1-based). 생략 시 맨 앞.
+        /// list/tts 는 무시한다.
         target: Option<String>,
     },
     /// Open the settings window (toggle Touch ID requirement, etc.).
@@ -1307,6 +1312,7 @@ fn run_daemon() {
                         "list",
                         "focus",
                         "approve",
+                        "dismiss",
                         "tts-toggle",
                     ];
                     if !KNOWN_KINDS.contains(&kind.as_str()) {
@@ -1351,20 +1357,57 @@ fn run_daemon() {
                         }));
                         return;
                     }
-                    if kind == "focus" || kind == "approve" {
-                        let target = payload
+                    if kind == "focus" || kind == "approve" || kind == "dismiss" {
+                        let raw = payload
                             .get("target")
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();
-                        let known = {
+                        // "@N" = 큐의 N번째(1-based). 물리 키는 id 를 알 수 없으니
+                        // 자리로 가리킨다. 그 외에는 id 그대로.
+                        let target = {
                             let qq = q.lock().unwrap();
-                            if target.is_empty() {
-                                !qq.is_empty()
+                            if let Some(n) = raw.strip_prefix('@').and_then(|n| n.parse::<usize>().ok()) {
+                                qq.get(n.saturating_sub(1)).map(|e| e.id.clone()).unwrap_or_default()
+                            } else if raw.is_empty() {
+                                qq.first().map(|e| e.id.clone()).unwrap_or_default()
                             } else {
-                                qq.iter().any(|e| e.id == target)
+                                raw.clone()
                             }
                         };
+                        let known = {
+                            let qq = q.lock().unwrap();
+                            !target.is_empty() && qq.iter().any(|e| e.id == target)
+                        };
+                        // dismiss 는 창을 거치지 않고 바로 해제한다. 취소는 되돌릴
+                        // 것이 없어 확인 단계가 필요 없고, 승인과 달리 위험하지도 않다.
+                        if kind == "dismiss" {
+                            if known {
+                                let entry = {
+                                    let mut qq = q.lock().unwrap();
+                                    qq.iter().position(|e| e.id == target).map(|i| qq.remove(i))
+                                };
+                                if let Some(e) = entry {
+                                    e.responder
+                                        .reply(&serde_json::json!({ "decision": "dismissed" }));
+                                }
+                                let len = q.lock().unwrap().len();
+                                let hh = h.clone();
+                                let _ = h.run_on_main_thread(move || {
+                                    let _ = hh.emit("queue-changed", ());
+                                    update_badge(&hh, len);
+                                    if len == 0 {
+                                        if let Some(w) = hh.get_webview_window("main") {
+                                            let _ = w.hide();
+                                        }
+                                    }
+                                });
+                            }
+                            incoming.responder.reply(&serde_json::json!({
+                                "decision": if known { "dismissed" } else { "unknown" }
+                            }));
+                            return;
+                        }
                         if known {
                             let hh = h.clone();
                             let want_approve = kind == "approve";
@@ -2129,9 +2172,12 @@ pub fn run() {
                 "list" => "list",
                 "focus" => "focus",
                 "approve" => "approve",
+                "dismiss" => "dismiss",
                 "tts" => "tts-toggle",
                 other => {
-                    eprintln!("알 수 없는 동작: {other} (list | focus | approve | tts)");
+                    eprintln!(
+                        "알 수 없는 동작: {other} (list | focus | approve | dismiss | tts)"
+                    );
                     std::process::exit(2);
                 }
             };
