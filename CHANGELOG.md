@@ -4,6 +4,8 @@ All notable changes to knock are documented here. Versions follow [SemVer](https
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-08-18
+
 ### Added
 - **Stream Deck `에이전트 세션` 액션** — orca 워크트리 기준으로 도는 세션을 키에 띄운다.
   이름 · 마지막 활동 이후 경과 · live 터미널 수. 상태는 색으로 구분한다(안 본 출력 주황 /
