@@ -168,6 +168,19 @@ fn config_touch_id() -> bool {
         .unwrap_or(false)
 }
 
+/// 물리 컨트롤러(Stream Deck 등)로 들어온 승인에서 Touch ID 를 건너뛸지.
+/// 기본 false — 켜는 것은 owner 의 명시적 결정이어야 한다.
+///
+/// 켜면 소켓에 붙은 로컬 프로세스가 생체 인증 없이 승인을 통과시킬 수 있다.
+/// 그 대신 물리 키를 누를 때마다 지문을 대는 번거로움이 사라진다. 위협 모델이
+/// "내 맥북의 내 프로세스" 라면 합리적인 교환이고, 그 판단은 owner 몫이다.
+fn config_external_skip_touch_id() -> bool {
+    read_config()
+        .get("external_skip_touch_id")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
 /// Whether the approve closure should auto-open `--action-url` in the browser.
 /// Default = true (preserves pre-toggle behavior). Set false to skip auto-jump;
 /// the frontend will copy the URL to the clipboard instead so the owner can
@@ -1420,7 +1433,11 @@ fn run_daemon() {
                                 }
                                 let _ = hh.emit(
                                     "external-control",
-                                    serde_json::json!({ "target": t, "approve": want_approve }),
+                                    serde_json::json!({
+                                        "target": t,
+                                        "approve": want_approve,
+                                        "skipTouchId": config_external_skip_touch_id(),
+                                    }),
                                 );
                             });
                         }

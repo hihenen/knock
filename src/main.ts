@@ -1107,10 +1107,13 @@ async function init() {
       // approve 는 여기서 승인 버튼을 "누르는" 것으로 끝난다. 별도 승인 경로를
       // 만들지 않는 게 핵심이다 — 기존 클로저를 그대로 타야 Touch ID 정책도
       // 같이 따라온다. 물리 키를 잘못 눌러도 화면 승인과 똑같은 게이트를 지난다.
-      await listen<{ target: string; approve: boolean }>(
+      await listen<{ target: string; approve: boolean; skipTouchId?: boolean }>(
         "external-control",
         async (evt) => {
-          const { target, approve } = evt.payload ?? { target: "", approve: false };
+          const { target, approve, skipTouchId } = evt.payload ?? {
+            target: "",
+            approve: false,
+          };
           let cur: QueuePayload;
           try {
             cur = await invoke<QueuePayload>("daemon_queue");
@@ -1126,7 +1129,15 @@ async function init() {
           openDetail(item);
           if (approve) {
             // 렌더가 끝난 뒤에 눌러야 리스너가 붙어 있다.
-            setTimeout(() => $("opt-approve").click(), 80);
+            setTimeout(() => {
+              // config 에서 켠 경우에만 Touch ID 를 건너뛴다. 토글을 끄는 방식이라
+              // 승인 경로 자체는 그대로다 — 별도 우회로를 만들지 않는 게 중요하다.
+              if (skipTouchId) {
+                const td = $<HTMLInputElement>("td-toggle");
+                if (td) td.checked = false;
+              }
+              $("opt-approve").click();
+            }, 80);
           }
         },
       );
