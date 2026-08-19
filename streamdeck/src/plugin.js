@@ -196,7 +196,7 @@ async function refresh() {
         view.stale ? 4 : pend.length || view.unread ? 3 : view.status === "working" ? 2 : 1,
       );
       setTitle(context, sessionLabel(view));
-    } else if (meta.action === "scrollUp" || meta.action === "scrollDown") {
+    } else if (meta.action === "scrollup" || meta.action === "scrolldown") {
       // 굴릴 창이 있을 때만 밝게. 방향은 아이콘에 있으니 제목은 비워 둔다.
       setState(context, alive ? 1 : 0);
       setTitle(context, "");
@@ -236,7 +236,9 @@ ws.on("message", async (raw) => {
   if (event === "willAppear") {
     const settings = payload?.settings ?? {};
     keys.set(context, {
-      action: action?.split(".").pop() ?? "slot",
+      // Stream Deck 은 UUID 를 소문자로 정규화해서 돌려준다. manifest 에 대문자를
+      // 섞어 쓰면 여기서 조용히 안 맞아 키가 먹통이 된다 (scrollUp -> scrollup).
+      action: (action?.split(".").pop() ?? "slot").toLowerCase(),
       // 좌표를 그대로 번호로 쓰면 승인/취소 키가 앞칸을 차지할 때 슬롯이 @4 부터
       // 시작해 버린다. 슬롯끼리의 순서로 매겨야 놓은 자리와 무관하게 왼쪽부터
       // @1, @2 가 된다. 설정으로 직접 지정하면 그 값이 우선.
@@ -282,8 +284,8 @@ ws.on("message", async (raw) => {
     else if (meta.action === "approve") res = await knock.approve("@1");
     else if (meta.action === "dismiss") res = await knock.dismiss("@1");
     else if (meta.action === "tts") res = await knock.toggleTts();
-    else if (meta.action === "scrollUp") res = await knock.scroll("up");
-    else if (meta.action === "scrollDown") res = await knock.scroll("down");
+    else if (meta.action === "scrollup") res = await knock.scroll("up");
+    else if (meta.action === "scrolldown") res = await knock.scroll("down");
     // 대상이 없거나 데몬이 없으면 키에 경고를 띄운다. 아무 반응이 없으면
     // 눌리긴 한 건지 알 수 없다.
     if (!res || res.decision === "unknown") showAlert(context);

@@ -150,7 +150,7 @@
     },
     {
       "Name": "위로 스크롤",
-      "UUID": "com.knock.controller.scrollUp",
+      "UUID": "com.knock.controller.scrollup",
       "Icon": "imgs/action",
       "Tooltip": "열려 있는 승인 창 본문을 한 화면 위로 올립니다.",
       "Controllers": [
@@ -171,7 +171,7 @@
     },
     {
       "Name": "아래로 스크롤",
-      "UUID": "com.knock.controller.scrollDown",
+      "UUID": "com.knock.controller.scrolldown",
       "Icon": "imgs/action",
       "Tooltip": "열려 있는 승인 창 본문을 한 화면 아래로 내립니다.",
       "Controllers": [
