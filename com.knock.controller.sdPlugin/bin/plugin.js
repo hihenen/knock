@@ -2961,6 +2961,7 @@ var focus = (at) => request({ kind: "focus", target: at });
 var approve = (at) => request({ kind: "approve", target: at });
 var dismiss = (at) => request({ kind: "dismiss", target: at });
 var toggleTts = () => request({ kind: "tts-toggle" });
+var scroll = (dir) => request({ kind: "scroll", dir });
 
 // src/orca.js
 import { execFile } from "node:child_process";
@@ -3164,6 +3165,9 @@ async function refresh() {
       const view = { ...s, pending: pend.length, stale: isStale(s) };
       setState(context, view.stale ? 4 : pend.length || view.unread ? 3 : view.status === "working" ? 2 : 1);
       setTitle(context, sessionLabel(view));
+    } else if (meta.action === "scrollUp" || meta.action === "scrollDown") {
+      setState(context, alive ? 1 : 0);
+      setTitle(context, "");
     } else if (meta.action === "tts") {
       setState(context, alive && ttsOn ? 1 : 0);
       setTitle(context, alive ? "" : "-");
@@ -3241,6 +3245,10 @@ ws.on("message", async (raw) => {
       res = await dismiss("@1");
     else if (meta.action === "tts")
       res = await toggleTts();
+    else if (meta.action === "scrollUp")
+      res = await scroll("up");
+    else if (meta.action === "scrollDown")
+      res = await scroll("down");
     if (!res || res.decision === "unknown")
       showAlert(context);
     refresh();

@@ -1401,6 +1401,7 @@ fn run_daemon() {
                         "approve",
                         "dismiss",
                         "tts-toggle",
+                        "scroll",
                     ];
                     if !KNOWN_KINDS.contains(&kind.as_str()) {
                         incoming.responder.reply(&serde_json::json!({
@@ -1521,6 +1522,26 @@ fn run_daemon() {
                         }
                         incoming.responder.reply(&serde_json::json!({
                             "decision": if known { "accepted" } else { "unknown" }
+                        }));
+                        return;
+                    }
+                    // Physical scroll keys. The gate window often holds more than
+                    // one screenful, and reaching for the trackpad defeats the
+                    // point of deciding from the deck.
+                    if kind == "scroll" {
+                        let dir = payload
+                            .get("dir")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("down")
+                            .to_string();
+                        let delivered = if let Some(w) = h.get_webview_window("main") {
+                            let _ = w.emit("scroll-request", serde_json::json!({ "dir": dir }));
+                            true
+                        } else {
+                            false
+                        };
+                        incoming.responder.reply(&serde_json::json!({
+                            "decision": if delivered { "accepted" } else { "no-window" }
                         }));
                         return;
                     }

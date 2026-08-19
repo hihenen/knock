@@ -132,6 +132,28 @@ function decorateEmbeds(container: HTMLElement) {
 }
 
 // Open http(s) links from rendered markdown in the real browser, not the webview.
+/// The scroll container depends on which view is up: annotate renders into
+/// `#content`, ask into `#ask-root`. Pick whichever is visible *and* actually
+/// overflows, so a key press on a short body does nothing rather than scrolling
+/// some unrelated element.
+function scrollableBody(): HTMLElement | null {
+  for (const id of ["content", "ask-root", "settings-root"]) {
+    const e = document.getElementById(id);
+    if (!e || e.classList.contains("hidden")) continue;
+    if (e.scrollHeight > e.clientHeight + 4) return e;
+  }
+  return null;
+}
+
+/// One press moves just under a screenful, keeping a couple of lines of overlap
+/// so a sentence is never split across two presses.
+function scrollBody(dir: "up" | "down") {
+  const box = scrollableBody();
+  if (!box) return;
+  const step = Math.max(120, box.clientHeight * 0.85);
+  box.scrollBy({ top: dir === "up" ? -step : step, behavior: "smooth" });
+}
+
 function makeLinksExternal(container: HTMLElement) {
   container.querySelectorAll<HTMLAnchorElement>("a[href]").forEach((a) => {
     a.addEventListener("click", (e) => {
@@ -234,23 +256,89 @@ function setKey(h: ((e: KeyboardEvent) => void) | null) {
 type WindowLayout = "compact" | "ask-single" | "large" | "queue" | "settings";
 let activeWindowLayout = "";
 
+// Fixed pixel sizes assumed a screen size. On a large display a content-rich gate
+// opened into a letterbox; on a small one it could overflow. Size against the
+// *available* screen area instead (screen.avail* excludes menu bar and dock, and
+// is already in logical px -- the same unit LogicalSize wants).
+function screenBox() {
+  const w = window.screen?.availWidth || 1440;
+  const h = window.screen?.availHeight || 900;
+  return { w, h };
+}
+
+const SIZE_KEY = "knock_win_size";
+
+/// Sizes the owner set by hand, per layout. Their choice outranks our defaults --
+/// they are looking at the content and we are guessing from its length.
+function readRememberedSizes(): Record<string, [number, number]> {
+  try {
+    return JSON.parse(localStorage.getItem(SIZE_KEY) || "{}");
+  } catch {
+    return {};
+  }
+}
+
+function rememberSize(layoutKey: string, width: number, height: number) {
+  const all = readRememberedSizes();
+  all[layoutKey] = [Math.round(width), Math.round(height)];
+  try {
+    localStorage.setItem(SIZE_KEY, JSON.stringify(all));
+  } catch {
+    // Non-fatal: we just lose the memory for next time.
+  }
+}
+
+/// Persist manual resizes for whichever layout is on screen. Debounced so a drag
+/// writes once, and only after the window has settled.
+let resizeTimer: number | undefined;
+function watchManualResize() {
+  const win = getCurrentWindow();
+  void win.onResized(() => {
+    window.clearTimeout(resizeTimer);
+    resizeTimer = window.setTimeout(async () => {
+      if (!activeWindowLayout) return;
+      try {
+        const size = await win.innerSize();
+        const factor = await win.scaleFactor();
+        const logical = size.toLogical(factor);
+        rememberSize(activeWindowLayout, logical.width, logical.height);
+      } catch {
+        // ignore
+      }
+    }, 400);
+  });
+}
+
 async function applyWindowLayout(layout: WindowLayout, itemCount = 0) {
   const layoutKey = layout === "queue" ? `${layout}:${Math.min(itemCount, 8)}` : layout;
   if (activeWindowLayout === layoutKey) return;
   activeWindowLayout = layoutKey;
 
+  const { w: availW, h: availH } = screenBox();
+  const cap = (width: number, height: number): [number, number] => [
+    Math.round(Math.min(width, availW * 0.96)),
+    Math.round(Math.min(height, availH * 0.96)),
+  ];
+
   const [width, height] = (() => {
+    const remembered = readRememberedSizes()[layoutKey];
+    if (remembered) return cap(remembered[0], remembered[1]);
     switch (layout) {
       case "ask-single":
-        return [900, 660];
+        return cap(Math.min(980, availW * 0.7), availH * 0.72);
       case "queue":
-        return [860, Math.max(540, Math.min(760, 250 + itemCount * 58))];
+        return cap(
+          Math.min(900, availW * 0.65),
+          Math.max(540, Math.min(availH * 0.8, 250 + itemCount * 58)),
+        );
       case "settings":
-        return [780, 760];
+        return cap(800, Math.min(820, availH * 0.8));
+      // Content-rich gates: nearly the full height of the screen. Reading a long
+      // body in a short window means scrolling past the decision itself.
       case "large":
-        return [1120, 900];
+        return cap(Math.min(1320, availW * 0.86), availH * 0.94);
       default:
-        return [900, 720];
+        return cap(Math.min(1000, availW * 0.72), availH * 0.82);
     }
   })();
 
@@ -1119,6 +1207,8 @@ async function renderDaemon() {
 async function init() {
   // Non-blocking, fail-silent update-available check (shows a dismissible banner).
   void checkUpdateBanner();
+  // Remember whatever size the owner drags the window to, per layout.
+  watchManualResize();
   // Daemon first: if a queue command answers, we're the single-window daemon.
   try {
     const q = await invoke<QueuePayload>("daemon_queue");
@@ -1174,6 +1264,10 @@ async function init() {
             }, 80);
           }
         },
+      );
+      // Physical scroll keys (Stream Deck) drive the same body the trackpad does.
+      listen<{ dir: "up" | "down" }>("scroll-request", (e) =>
+        scrollBody(e.payload?.dir === "up" ? "up" : "down"),
       );
       // Event-driven refresh + a slow poll as a backstop for missed events.
       listen("queue-changed", () => void renderDaemon());
