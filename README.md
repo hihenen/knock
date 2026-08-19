@@ -2,23 +2,40 @@
 
 **한국어** · [English](README.en.md)
 
-AI 코딩 에이전트를 위한 데스크톱 승인 / 주석 / 질문 게이트.
-브라우저 탭이 아닌 **Tauri 네이티브 창** + OS 알림 + Dock 두드림 + 키보드 네비.
+### AI 에이전트가 물어볼 때, 놓치지 마세요.
 
-- 단일 바이너리 (~9.5MB), Bun/Tauri 빌드
-- 단순한 `stdout` 계약 → 기존 스킬·훅·CLI 에 그대로 연결
-- 채팅 blocking 질문(AskUserQuestion) 을 데스크톱 창으로 대체
+에이전트는 승인이 필요하면 터미널에 질문을 띄우고 기다립니다. 그런데 우리는 대개 다른 창을 보고 있죠. 몇 분 뒤에야 "아직 안 갔네" 하고 알게 됩니다.
 
-## Quick Start (macOS · Apple Silicon)
+knock 은 그 질문을 **화면 한가운데 창으로** 띄웁니다. 알림이 울리고, Dock 이 튀고, 키보드로 바로 답할 수 있습니다.
 
-**1. CLI 설치** — 둘 중 하나
+![knock 승인 창](docs/images/gate.png)
+
+---
+
+## 이런 걸 할 수 있어요
+
+| | |
+|---|---|
+| **승인 받기** | 계획서·변경 내용을 창에 띄우고 승인 / 변경요청 / 취소를 받습니다 |
+| **객관식으로 묻기** | 선택지를 보여주고 고르게 합니다. 키보드 숫자키로 즉시 |
+| **바로 그 화면으로 보내기** | 승인하면 브라우저가 열리며 실제 행동 지점(PR·배포 화면)으로 점프합니다 |
+| **지문으로 잠그기** | 되돌리기 어려운 작업엔 Touch ID / Windows Hello |
+| **손으로 누르기** | Stream Deck 물리 키로 승인·취소·스크롤 |
+| **한 창에 모아 보기** | 여러 에이전트가 동시에 물어도 창이 겹치지 않고 목록으로 쌓입니다 |
+
+---
+
+## 5분이면 시작해요
+
+macOS(Apple Silicon) 기준입니다. Windows 는 [아래](#-windows-x64)를 보세요.
+
+**1. 설치하기**
 
 ```bash
-brew install hihenen/tap/knock                                                       # 권장 (경고 없음)
-curl -fsSL https://raw.githubusercontent.com/hihenen/knock/master/install.sh | bash  # 또는 (Homebrew 없이)
+brew install hihenen/tap/knock
 ```
 
-**2. Claude Code 플러그인** (스킬 + hook)
+**2. Claude Code 에 연결하기**
 
 ```
 /plugin marketplace add hihenen/knock
@@ -26,290 +43,226 @@ curl -fsSL https://raw.githubusercontent.com/hihenen/knock/master/install.sh | b
 /reload-plugins
 ```
 
-**3. 데몬 상주** (필수)
+**3. 항상 떠 있게 하기**
 
 ```bash
-knock daemon install   # 로그인 시 데몬 상주 → menubar 트레이 항상 표시 + 첫 호출 지연 0
+knock daemon install
 ```
 
-여러 세션이 동시에 호출해도 한 창에 큐로 모이고, menubar 트레이가 항상 떠 있어 대기 건수(뱃지)를 바로 봅니다. Touch ID 는 승인 창 헤더의 🔒 토글로 그 자리에서 켜면 됩니다.
+메뉴 막대에 아이콘이 생기고, 첫 호출이 느려지지 않습니다. 안 해도 동작은 하지만, 해두는 쪽이 훨씬 편합니다.
 
-**4. 에이전트 자동화** — plan 승인은 hook 으로 자동이지만, **그 외 승인·질문·웹 행동까지** knock 으로 띄우게 하려면 프로젝트(또는 글로벌) `CLAUDE.md` 에 아래를 추가하세요:
+**4. 에이전트에게 알려주기**
+
+여기까지 하면 **계획(plan) 승인은 자동**으로 knock 창에 뜹니다. 그 외 상황까지 맡기려면 `CLAUDE.md` 에 아래를 붙여넣으세요.
+
+<details>
+<summary><b>CLAUDE.md 에 붙여넣을 내용</b> (펼치기)</summary>
 
 ```markdown
 ## knock — 데스크톱 승인/질문 게이트
 - 사용자에게 **승인**이 필요하면 채팅 대신 `knock annotate <md> --gate --json` 게이트를 띄운다.
 - **객관식 질문**은 AskUserQuestion 대신 `knock ask <json>`. JSON 최상위 `context` 에
   배경·비교표·결론을 markdown 으로 담아 결정 근거를 창에서 바로 보게 한다.
-- 사용자가 **웹에서 클릭·승인**해야 하면(Scalr Apply / GitHub PR / ArgoCD / 대시보드 등)
+- 사용자가 **웹에서 클릭·승인**해야 하면(배포 승인 / GitHub PR / 대시보드 등)
   `--action-url <URL>` 을 넣어 승인 한 번에 브라우저로 그 행동 지점으로 점프하게 한다.
-- prd·IAM·destructive 같은 critical 승인엔 `--touch-id` (knock settings 로 켠 경우).
+- 운영·권한·삭제 같은 critical 승인엔 `--touch-id`.
 - 사용자가 **브라우저에서 여러 단계를 밟아야** 하면 `--checklist` 를 같이 준다. 승인하면 링크가
   열리고 요청은 큐에 "진행 중"으로 남아, 작업하다 다시 열어 절차를 보고 끝나면 완료를 누른다.
-  응답은 `{"decision":"approved","completed":true}`.
-- knock 응답: annotate=`{"decision":"approved|annotated|dismissed"}`, ask=`{"answers":{"<h>":["..."]}}`(항상 배열).
+- 게이트 본문에 다이어그램이 필요하면 `<iframe src="https://...">` 로 넣는다(스크립트 동작).
+- knock 응답: annotate=`{"decision":"approved|annotated|dismissed"}`,
+  ask=`{"answers":{"<헤더>":["..."]}}`(항상 배열).
 ```
 
-**여기까지면 끝** — 설치 → 플러그인 → 데몬 상주 → 에이전트 지침이 한 흐름입니다. 이제 어느 세션이든 knock 으로 승인·질문하고, 여러 세션이 한 창에 큐로 모입니다.
+</details>
 
-> **업데이트**: 새 버전이 나오면 knock 창 상단 배너로 알립니다. `brew upgrade hihenen/tap/knock` (+ `/plugin marketplace update knock` → `/reload-plugins`)
+**끝났습니다.** 이제 어느 세션에서 물어보든 창이 뜹니다.
+
+> 새 버전이 나오면 창 위에 배너로 알려드려요. `brew upgrade hihenen/tap/knock`
 
 ---
 
-## 설치 (자세히)
+## 어떻게 쓰나요
 
-> 두 갈래입니다. **본인 OS 섹션만** 위에서 아래로 복붙하면 끝납니다. (macOS / Windows 가 안 섞이게 완전히 분리)
-
----
-
-### 🍎 macOS (Apple Silicon) — 처음부터 끝까지
-
-**1단계 · CLI 설치** (셋 중 하나 — Homebrew 권장)
-
-```bash
-# (권장) Homebrew — Gatekeeper quarantine 자동 처리, 경고 없음
-brew install hihenen/tap/knock
-```
-
-```bash
-# (대안) Homebrew 없이 — ~/.local/bin/knock 에 설치 + quarantine 자동 제거
-curl -fsSL https://raw.githubusercontent.com/hihenen/knock/master/install.sh | bash
-```
-
-```bash
-# (대안) 바이너리 직접 다운로드
-curl -L https://github.com/hihenen/knock/releases/latest/download/knock-macos-aarch64 -o knock
-chmod +x knock
-xattr -c knock                 # Gatekeeper quarantine 제거 (다운로드 빌드라 필요)
-mv knock ~/.local/bin/
-```
-
-```bash
-# 설치 확인
-knock --version
-```
-
-**2단계 · Claude Code 플러그인** (스킬 + 자동 plan 승인 hook) — Claude Code 안에서:
-
-```
-/plugin marketplace add hihenen/knock
-/plugin install knock@knock
-/reload-plugins
-```
-
-**3단계 · 데몬 상주** (필수 — 로그인 시 자동 실행 / menubar 트레이 / 첫 호출 지연 0)
-
-```bash
-knock daemon install
-knock daemon status            # 설치 확인
-```
-
-**4단계 · 에이전트 지침** — 프로젝트(또는 글로벌 `~/.claude/CLAUDE.md`) `CLAUDE.md` 에 [Quick Start 4단계](#quick-start-macos--apple-silicon)의 스니펫을 붙여넣으면 끝.
-
----
-
-### 🪟 Windows (x64) — 처음부터 끝까지
-
-**1단계 · CLI 설치** (PowerShell — 둘 중 하나)
-
-```powershell
-# (권장) install.ps1 — knock.exe 를 %LOCALAPPDATA%\knock 에 설치 + user PATH 추가
-irm https://raw.githubusercontent.com/hihenen/knock/master/install.ps1 | iex
-```
-
-```powershell
-# (대안) 바이너리 직접 — releases 에서 knock-windows-x64.exe 받아 PATH 폴더에 둡니다
-#   https://github.com/hihenen/knock/releases/latest  →  knock-windows-x64.exe
-```
-
-```powershell
-# 설치 확인 (새 PowerShell 창에서 — PATH 갱신 반영)
-knock --version
-```
-
-**2단계 · Claude Code 플러그인** (스킬 + 자동 plan 승인 hook) — Claude Code 안에서:
-
-```
-/plugin marketplace add hihenen/knock
-/plugin install knock@knock
-/reload-plugins
-```
-
-**3단계 · 데몬 상주** (필수 — 로그인 시 자동 실행 / 작업표시줄 상주 / 첫 호출 지연 0)
-
-```powershell
-knock daemon install
-knock daemon status            # 설치 확인 (레지스트리 Run 키)
-```
-
-**4단계 · 에이전트 지침** — 프로젝트(또는 글로벌) `CLAUDE.md` 에 [Quick Start 4단계](#quick-start-macos--apple-silicon)의 스니펫을 붙여넣으면 끝.
-
-> Windows 도 기능 동일 — 멀티세션 단일창(named pipe), 생체 인증(Windows Hello), 데몬 상주(레지스트리 Run 키). Dock 뱃지 대신 작업표시줄 알림.
-
----
-
-### 🔧 소스 빌드 (개발자용 · 모든 플랫폼)
-
-```bash
-cd src-tauri && cargo build --release   # 또는: bun run tauri build --no-bundle
-cp target/release/knock ~/.local/bin/knock
-```
-
-> ⚠️ knock 은 **CLI 도구**입니다. `.app` 더블클릭이 아니라 `knock annotate <md>` / `knock ask <json>` 처럼 인자와 함께 실행합니다. (인자 없이 실행하면 즉시 종료)
-
-## Claude Code 플러그인 (스킬)
-
-CLI 설치 후, Claude Code 에서 스킬 플러그인을 추가하면 에이전트가 `knock-annotate` / `knock-ask` 를 직접 호출합니다:
-
-```
-/plugin marketplace add hihenen/knock
-/plugin install knock@knock
-```
-
-| 스킬 | 용도 |
-|------|------|
-| `knock-annotate` | 승인 / 주석 게이트 |
-| `knock-ask` | 객관식 질문 (AskUserQuestion 대체) |
-
-### 자동 plan 승인 (hook)
-
-플러그인에는 `PermissionRequest` + `ExitPlanMode` hook 이 포함되어, **plan mode 를 빠져나갈 때 자동으로 knock 창**이 떠서 plan 을 검토·승인합니다 — **CLAUDE.md 지침 없이도 동작**. (승인 → plan 진행 / 변경요청·닫기 → plan 거부 + 피드백)
-
-### 에이전트 자동화 (CLAUDE.md)
-
-plan 승인 외의 **승인·질문·웹 행동(`--action-url`)·Touch ID** 까지 에이전트가 knock 으로 띄우게 하려면, 위 [Quick Start 4단계](#quick-start-macos--apple-silicon)의 `CLAUDE.md` 스니펫을 프로젝트(또는 글로벌) `CLAUDE.md` 에 추가하세요.
-
-### (선택) critical bash 자동 게이트 hook
-
-`terraform apply/destroy`, `gh pr merge`, 시크릿·KMS·S3 삭제, 강제 push 같은 **되돌리기 어려운 명령**을 실행 직전 자동으로 knock 승인 창에 띄우는 PreToolUse hook 예제: [`hooks/examples/knock-critical-gate.sh`](hooks/examples/knock-critical-gate.sh). 승인 창에 **명령이 무엇을 하는지 한글 요약**(어느 repo 의 어떤 PR 머지, 어떤 시크릿 삭제 등)이 함께 표시됩니다. `~/.claude/hooks/` 에 두고 `~/.claude/settings.json` 의 `PreToolUse` 에 연결하세요 (`jq` 필요).
-
-> 플러그인은 **스킬 + hook** 을 제공합니다. `knock` CLI 는 위 **설치** 단계(brew / install.sh)로 따로 설치하세요.
-
-## 모드
-
-### 1. annotate — 승인 / 주석 게이트
+### 승인 받기
 
 ```bash
 knock annotate plan.md --gate --json
 ```
 
-| 옵션 | 의미 |
-|------|------|
-| `--gate` | 명시적 `승인` 버튼 노출 |
-| `--json` | 결과를 JSON 으로 출력 (없으면 평문) |
-| `--title T` | 헤더 제목 (기본: 파일명) |
-| `--touch-id` | macOS Touch ID / Windows Hello 로 승인 (생체 없으면 시스템 암호 / 버튼 fallback) |
-| `--action-url <URL>` | 승인 시 브라우저로 그 URL 자동 오픈 (Scalr Apply / PR / 대시보드 — **action inbox**). 로컬 문서는 절대경로 `file:///abs/path/mockup.html` (HTML 목업·PDF·이미지 — 문서만, 실행 파일 거부). 본문 markdown 링크도 클릭 시 외부 브라우저로 열림 |
+사용자가 무엇을 눌렀는지 표준출력으로 돌려줍니다. 그걸 보고 다음 행동을 정하면 됩니다.
 
-**stdout 계약**:
+| 사용자가 한 일 | `--json` 출력 |
+|---|---|
+| 승인 | `{"decision":"approved"}` |
+| 변경요청 (의견 입력) | `{"decision":"annotated","feedback":"..."}` |
+| 닫기 · Esc | `{"decision":"dismissed"}` |
 
-| 사용자 행동 | 평문 | `--json` |
-|------------|------|----------|
-| 승인 | `The user approved.` | `{"decision":"approved"}` |
-| 닫기/Esc | (빈 출력) | `{"decision":"dismissed"}` |
-| 변경요청 | 주석 텍스트 | `{"decision":"annotated","feedback":"..."}` |
+자주 쓰는 옵션입니다.
 
-### 2. ask — 객관식 질문 (AskUserQuestion 대체)
+| 옵션 | 언제 쓰나요 |
+|---|---|
+| `--gate` | 승인 버튼을 보여줍니다 |
+| `--json` | 결과를 JSON 으로 받습니다 (없으면 사람이 읽는 문장) |
+| `--title T` | 창 제목. 기본은 파일 이름 |
+| `--touch-id` | 지문으로 승인받습니다. 지문이 없으면 암호나 버튼으로 넘어갑니다 |
+| `--action-url <URL>` | 승인하면 그 주소를 브라우저로 엽니다 |
+| `--checklist` | 승인 뒤에도 목록에 남겨둡니다. 브라우저에서 여러 단계를 밟는 동안 절차를 다시 볼 수 있어요 |
+
+### 객관식으로 묻기
 
 ```bash
 knock ask questions.json
 ```
 
-입력 JSON 은 Claude Code 의 **AskUserQuestion 스키마와 동형** (+ 선택적 `context`):
+Claude Code 의 AskUserQuestion 과 같은 모양이라, 쓰던 JSON 을 그대로 넣으면 됩니다.
 
 ```json
 {
-  "context": "## 배경\n\n결정 근거(배경·비교표·결론)를 markdown 으로. 선택지 위에 렌더된다.",
+  "context": "## 배경\n결정에 필요한 설명을 markdown 으로. 선택지 위에 보여요.",
   "questions": [
     {
       "header": "구현 방향",
-      "question": "어느 방향으로 갈까?",
+      "question": "어느 쪽으로 갈까요?",
       "options": [
-        { "label": "A안", "description": "설명..." },
-        { "label": "B안", "description": "설명..." }
+        { "label": "A안", "description": "설명" },
+        { "label": "B안", "description": "설명" }
       ]
     }
   ]
 }
 ```
 
-- **`context` (선택)** — 결정에 배경이 필요하면 최상위 `context` 에 markdown 을 담는다. 질문 위에 렌더되어 근거를 창에서 바로 본다.
-- `multiSelect: true` 면 체크박스 복수 선택, 생략/`false` 면 단일 선택. 한 질문만 있으면 요약 단계를 생략하고 바로 제출합니다. 응답은 두 경우 모두 문자열 배열입니다.
+답은 항상 배열로 옵니다 — `{"answers":{"구현 방향":["A안"]}}`. 닫으면 `{"decision":"dismissed"}` 입니다.
 
-한 질문씩(wizard) 보여주고 마지막에 선택 요약 → 제출. 항상 JSON 출력:
+`multiSelect: true` 를 주면 여러 개를 고를 수 있어요. 질문이 하나면 요약 단계 없이 바로 제출됩니다.
 
-| 결과 | 출력 |
-|------|------|
-| 답변 | `{"answers":{"구현 방향":["A안","B안"]}}` — **항상 string 배열** (선택 label + 기타 텍스트) |
-| 닫기 | `{"decision":"dismissed"}` |
+### 게이트 안에 그림 넣기
 
-## 키보드 (ask 질문)
+본문에 `<iframe src="https://...">` 를 넣으면 다이어그램이나 차트가 창 안에서 바로 보입니다. 안에서 JavaScript 도 돕니다.
 
-| 키 | 동작 |
-|----|------|
-| `↑` `↓` | 옵션 포커스 이동 |
-| `1`~`9` | 해당 옵션 토글 |
-| `Space` | 옵션 토글 (선택/해제) |
-| `Enter` | 다음 질문 (질문이 하나면 제출) |
-| `→` `←` | 다음 / 이전 질문 |
-| `Cmd+Enter` | 제출 |
-| `Esc` | 닫기 |
-
-annotate 모드: `Cmd+Enter`=승인(gate), `Esc`=닫기. 대기 목록에서는 `1`~`9`로 해당 요청을 바로 엽니다.
-
-## 설정 (knock settings)
-
-```bash
-knock settings
+```markdown
+<iframe src="https://example.com/architecture.html" width="100%" height="360"></iframe>
 ```
 
-설정 창에서 토글:
-- **🔒 승인·질문에 Touch ID를 기본 사용** → `~/.config/knock/config.json` 의 `{"touch_id": true}` 로 저장되어 모든 승인과 질문 제출에 적용됩니다. 개별 `annotate --touch-id` 요청은 이 설정이 꺼져 있어도 항상 인증합니다.
-- **🌐 Open action URL on approve** (default ON) → menubar 트레이의 체크박스로 토글. OFF 면 승인 시 `--action-url` 자동 점프를 끄고 대신 URL 을 클립보드에 복사 (`{"open_url": false}`). 다수 게이트 연속 승인 시 탭 폭주 회피.
+임베드는 **"외부 콘텐츠" 라벨이 붙은 박스**로 감싸여 보입니다. 승인 화면과 섞이지 않게 하려는 것이고, 아래 두 가지가 강제됩니다.
 
-설정 창 하단에 **버그 신고**(GitHub Issues) · **릴리스 노트** 링크와 현재 버전이 표시됩니다.
+- 임베드는 **승인 창을 만질 수 없습니다.** `sandbox="allow-scripts"` 가 강제로 붙고 `allow-same-origin` 은 붙지 않아요
+- 본문의 `<script>` 와 `onclick` 같은 코드는 **제거**됩니다
 
-## 데몬 상주 (멀티세션 단일창)
+주소는 `http(s)` 여야 합니다. 로컬 파일(`file:`)은 막혀 있으니, 파일을 보여주려면 `--action-url` 로 브라우저에서 열어주세요.
 
-여러 에이전트 세션이 동시에 knock 을 호출해도 **창이 여러 개 겹치지 않고 하나의 창에 대기 목록(큐)** 으로 모입니다. 로그인 시 데몬을 상주시키면 menubar 트레이가 항상 떠 있고 첫 호출 지연이 사라집니다:
+### 손으로 누르기 (Stream Deck)
+
+![knock Stream Deck 키](docs/images/streamdeck-keys.png)
+
+승인·취소·스크롤을 물리 키로 처리합니다. 대기 건수가 키에 숫자로 표시돼서, 화면을 안 봐도 뭐가 밀려 있는지 압니다.
 
 ```bash
-knock daemon install     # 로그인 시 자동 실행 (macOS LaunchAgent / Windows 레지스트리 Run 키)
-knock daemon status      # 설치 여부 확인
+cp -R com.knock.controller.sdPlugin \
+  ~/Library/Application\ Support/com.elgato.StreamDeck/Plugins/
+```
+
+복사한 뒤 **Stream Deck 앱을 재시작**하면 액션 목록에 `knock` 이 나옵니다.
+
+| 액션 | 하는 일 |
+|---|---|
+| 대기 슬롯 | 목록의 N번째 요청을 화면에 띄웁니다 |
+| 승인 · 취소 | 맨 앞 요청을 처리합니다 |
+| 위로 · 아래로 스크롤 | 창 본문을 한 화면씩 굴립니다 |
+| 에이전트 세션 | 그 세션에 대기 건이 있으면 승인하고, 없으면 터미널로 갑니다 |
+| 음성 알림 | 읽어주기 켜고 끄기 |
+
+### 키보드
+
+| 키 | 하는 일 |
+|---|---|
+| `1`~`9` | 선택지 고르기 · 대기 목록에서 그 번호 열기 |
+| `↑` `↓` | 선택지 이동 |
+| `Space` | 골랐다 풀기 |
+| `Enter` | 다음 질문 (질문이 하나면 제출) |
+| `Cmd+Enter` | 제출 · 승인 |
+| `Esc` | 닫기 |
+
+---
+
+## 알아두면 좋아요
+
+**창 크기는 기억됩니다.** 화면 크기에 맞춰 열리고, 손으로 조절하면 다음부터 그 크기로 엽니다. 내용이 긴 승인 창은 세로로 거의 꽉 차게 열려요.
+
+**여러 세션이 물어도 창은 하나입니다.** 대기 목록에 쌓이고, 각 항목에 프로젝트·호출한 곳·기다린 시간이 보입니다. 숫자키로 바로 열 수 있어요.
+
+**설정은 `knock settings` 로 엽니다.**
+- 승인할 때 항상 지문을 쓸지
+- 승인하면 브라우저를 열지, 주소만 복사할지 (연속 승인할 때 탭이 쏟아지는 걸 막습니다)
+
+**데몬은 이렇게 관리해요.**
+
+```bash
+knock daemon install     # 로그인할 때 자동 실행
+knock daemon status      # 지금 상태
 knock daemon uninstall   # 해제
 ```
 
-미설치 시에도 첫 호출 때 데몬이 자동으로 떠서 동작합니다(상주만 안 할 뿐). 새 요청이 오면 Dock 아이콘이 튀고(bounce) 뱃지 숫자(대기 건수)가 표시됩니다. 대기 목록에는 요청 번호와 프로젝트·호출자·대기 시간이 함께 표시되며, `1`~`9` 숫자키로 바로 선택할 수 있습니다. 자동 감지 대신 출처를 지정하려면 `KNOCK_PROJECT`, `KNOCK_CALLER` 환경 변수를 사용합니다.
+**되돌리기 어려운 명령을 자동으로 막고 싶다면** — `terraform destroy`, `gh pr merge`, 시크릿 삭제 같은 명령을 실행 직전에 승인 창으로 띄우는 예제가 있습니다: [`hooks/examples/knock-critical-gate.sh`](hooks/examples/knock-critical-gate.sh)
 
-## 업데이트
+---
 
-새 버전이 나오면 knock 창 상단에 **배너로 알립니다** (시작 시 GitHub Releases 확인, 24h 간격, 버전별로 한 번만). 배너에서 `brew upgrade` 명령 복사 · 릴리스 노트 열기 · 닫기 가능. 업데이트는 Homebrew 관리를 존중해 **자동 설치하지 않고 안내만** 합니다:
+## 설치 (자세히)
+
+### 🍎 macOS (Apple Silicon)
+
+셋 중 하나를 고르세요. **Homebrew 를 권합니다** — 보안 경고 없이 바로 실행됩니다.
 
 ```bash
-brew upgrade hihenen/tap/knock
+# 권장
+brew install hihenen/tap/knock
 ```
 
-## 알람
-
-- OS 네이티브 알림 (창 띄울 때)
-- macOS Dock 아이콘 튕김 (`request_user_attention`)
-- 항상 위(always-on-top) + 포커스 강제
-
-## 에이전트 워크플로우 연동
-
-```
-# 승인 게이트
-knock annotate /tmp/approve.md --gate --json
-# → {"decision":"approved"} 받으면 진행, dismissed 면 중단
-
-# 질문 (AskUserQuestion 대체)
-#  1. 질문 JSON 을 /tmp 에 작성
-#  2. knock ask /tmp/q.json
-#  3. {"answers":{...}} 파싱해서 분기
+```bash
+# Homebrew 없이 — ~/.local/bin 에 설치됩니다
+curl -fsSL https://raw.githubusercontent.com/hihenen/knock/master/install.sh | bash
 ```
 
-스킬: `~/.claude/skills/knock-annotate`, `~/.claude/skills/knock-ask`
+```bash
+# 직접 받기
+curl -L https://github.com/hihenen/knock/releases/latest/download/knock-macos-aarch64 -o knock
+chmod +x knock
+xattr -c knock          # 다운로드한 파일이라 격리 표시를 지워줘야 해요
+mv knock ~/.local/bin/
+```
 
-## 빌드 스택
+```bash
+knock --version         # 설치 확인
+```
 
-Tauri 2 + Rust(clap, pulldown-cmark, tauri-plugin-notification) + vanilla TS.
+### 🪟 Windows (x64)
+
+```powershell
+# 권장 — %LOCALAPPDATA%\knock 에 설치하고 PATH 에 추가합니다
+irm https://raw.githubusercontent.com/hihenen/knock/master/install.ps1 | iex
+```
+
+직접 받으려면 [릴리스 페이지](https://github.com/hihenen/knock/releases/latest)에서 `knock-windows-x64.exe` 를 받아 PATH 폴더에 두세요.
+
+```powershell
+knock --version         # 새 PowerShell 창에서 확인하세요 (PATH 가 반영되도록)
+```
+
+### 🔧 소스에서 빌드
+
+```bash
+bun install
+bun run build
+cd src-tauri && cargo build --release
+cp target/release/knock ~/.local/bin/knock
+```
+
+> knock 은 **CLI 도구**입니다. 아이콘을 더블클릭하는 앱이 아니라 `knock annotate <파일>` 처럼 실행합니다.
+
+---
+
+## 만든 방식
+
+Tauri 2 + Rust(clap, pulldown-cmark, ammonia) + vanilla TypeScript. 단일 바이너리 약 12MB.
+
+승인 창은 사용자에게 **사실을 보여주는 화면**이라고 보고 만들었습니다. 그래서 본문을 만든 쪽이 그 창을 조작하지 못하게 살균과 샌드박스를 겁니다. 자세한 변경 내역은 [CHANGELOG](CHANGELOG.md) 에 있어요.
