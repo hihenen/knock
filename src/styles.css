@@ -104,18 +104,56 @@ body {
   border-radius: 8px;
   overflow-x: auto;
 }
+/* `pre` already scrolls horizontally. Wrapping here fought that and destroyed
+   ASCII diagrams -- box-drawing lines folded mid-row. Keep lines intact and let
+   the parent scroll; long command lines scroll instead of folding. */
 .markdown pre code {
   background: none;
   padding: 0;
-  white-space: pre-wrap;
-  word-break: break-word;
-  overflow-wrap: anywhere;
+  white-space: pre;
+}
+/* Wide tables scroll inside their own box rather than crushing every cell.
+   The wrapper is added by decorateEmbeds(); the fallback keeps bare tables sane. */
+.markdown .table-scroll {
+  overflow-x: auto;
+  margin: 0.8em 0;
 }
 .markdown table {
   border-collapse: collapse;
-  width: 100%;
-  margin: 0.8em 0;
+  width: max-content;
+  min-width: 100%;
+  margin: 0;
   font-size: 0.95em;
+}
+/* `width: max-content` alone would never wrap, so one prose cell could stretch the
+   table absurdly wide. Cap each cell instead: short columns stay tight, long prose
+   wraps at a readable measure, and only genuinely wide tables scroll. */
+.markdown th,
+.markdown td {
+  max-width: 34ch;
+}
+/* Embedded content: visibly framed and labelled so it cannot pass itself off as
+   part of the approval chrome. Height is capped -- an embed must never push the
+   action bar out of view. */
+.markdown .embed {
+  margin: 0.8em 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.markdown .embed figcaption {
+  font-size: 0.78em;
+  color: var(--muted);
+  padding: 4px 10px;
+  background: rgba(127, 127, 127, 0.1);
+  border-bottom: 1px solid var(--border);
+}
+.markdown .embed iframe {
+  display: block;
+  width: 100%;
+  max-height: 420px;
+  border: 0;
+  background: #fff;
 }
 .markdown th,
 .markdown td {

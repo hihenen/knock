@@ -583,6 +583,77 @@ struct AppState {
     touch_id: bool,
 }
 
+/// Sandbox flags forced onto every `<iframe>` in gate content.
+///
+/// `allow-scripts` is deliberate: gate bodies embed generated diagrams that need
+/// JS (mermaid, chart libraries). `allow-same-origin` is deliberately absent --
+/// granting both together lets the frame remove its own sandbox and reach the
+/// parent document, which is exactly the approval UI we are trying to protect.
+const IFRAME_SANDBOX: &str =
+    r#"sandbox="allow-scripts" referrerpolicy="no-referrer" loading="lazy""#;
+
+/// Force our sandbox attributes to the front of every `<iframe` tag.
+///
+/// Duplicate attributes are legal in HTML and the *first* occurrence wins, so
+/// injecting at the front makes ours authoritative even when the author supplied
+/// their own `sandbox`. Runs before sanitization so html5ever drops the losers.
+fn force_iframe_sandbox(html: &str) -> String {
+    let mut out = String::with_capacity(html.len() + 64);
+    let bytes = html.as_bytes();
+    let mut i = 0;
+    while let Some(rel) = html[i..].find("<iframe") {
+        let at = i + rel;
+        // Only a real tag start: next char must end the tag name.
+        let after = at + "<iframe".len();
+        let boundary = bytes
+            .get(after)
+            .map(|c| c.is_ascii_whitespace() || *c == b'>' || *c == b'/')
+            .unwrap_or(false);
+        out.push_str(&html[i..after]);
+        if boundary {
+            out.push(' ');
+            out.push_str(IFRAME_SANDBOX);
+        }
+        i = after;
+    }
+    out.push_str(&html[i..]);
+    out
+}
+
+/// Sanitize rendered gate HTML.
+///
+/// The gate window is an *approval surface*: whoever authors the body must not be
+/// able to script the window it is being approved in, nor forge the chrome around
+/// it. Raw HTML used to pass straight through `render_md` into `innerHTML` with
+/// `csp: null`, so inline handlers ran and iframes loaded unconstrained.
+fn sanitize_gate_html(html: &str) -> String {
+    use std::collections::HashSet;
+    let mut tags: HashSet<&str> = ammonia::Builder::default()
+        .clone_tags()
+        .iter()
+        .copied()
+        .collect();
+    tags.insert("iframe");
+    let mut builder = ammonia::Builder::default();
+    builder
+        .tags(tags)
+        .add_tag_attributes(
+            "iframe",
+            [
+                "src",
+                "width",
+                "height",
+                "title",
+                "sandbox",
+                "referrerpolicy",
+                "loading",
+                "style",
+            ],
+        )
+        .add_tag_attributes("img", ["width", "height", "style"]);
+    builder.clean(html).to_string()
+}
+
 fn render_md(md: &str) -> String {
     use pulldown_cmark::{html, Options, Parser};
     let mut opts = Options::empty();
@@ -593,7 +664,7 @@ fn render_md(md: &str) -> String {
     let parser = Parser::new_ext(md, opts);
     let mut out = String::new();
     html::push_html(&mut out, parser);
-    out
+    sanitize_gate_html(&force_iframe_sandbox(&out))
 }
 
 /// Render the optional `context` markdown (background for an ask) to HTML.
@@ -2355,6 +2426,49 @@ mod tests {
     fn annotate_dismissed_json_some() {
         let s = annotate_contract("dismissed", None, true).unwrap();
         assert!(s.contains("\"dismissed\""));
+    }
+
+    #[test]
+    fn render_md_forces_iframe_sandbox_without_same_origin() {
+        let h = render_md("<iframe src=\"https://example.com/d.html\"></iframe>");
+        assert!(h.contains("sandbox=\"allow-scripts\""), "got: {h}");
+        assert!(!h.contains("allow-same-origin"), "got: {h}");
+    }
+
+    #[test]
+    fn render_md_author_sandbox_cannot_widen() {
+        // Author-supplied sandbox must lose to ours (first attribute wins).
+        let h = render_md(
+            "<iframe sandbox=\"allow-scripts allow-same-origin allow-top-navigation\" src=\"https://e.com\"></iframe>",
+        );
+        assert!(!h.contains("allow-same-origin"), "got: {h}");
+        assert!(!h.contains("allow-top-navigation"), "got: {h}");
+    }
+
+    #[test]
+    fn render_md_strips_inline_event_handlers() {
+        let h = render_md("<b onclick=\"steal()\">x</b>");
+        assert!(!h.contains("onclick"), "got: {h}");
+    }
+
+    #[test]
+    fn render_md_strips_script_tags() {
+        let h = render_md("<script>fetch('/approve')</script>");
+        assert!(!h.to_lowercase().contains("<script"), "got: {h}");
+    }
+
+    #[test]
+    fn force_iframe_sandbox_ignores_lookalike_tags() {
+        // Not a tag start -- must not be rewritten.
+        let s = force_iframe_sandbox("<iframexyz data=1>");
+        assert_eq!(s, "<iframexyz data=1>");
+    }
+
+    #[test]
+    fn render_md_keeps_ordinary_markdown() {
+        let h = render_md("**bold** and `code`\n\n- item");
+        assert!(h.contains("<strong>bold</strong>"), "got: {h}");
+        assert!(h.contains("<li>item</li>"), "got: {h}");
     }
 
     #[test]

@@ -105,6 +105,32 @@ const el = (tag: string, cls?: string, text?: string) => {
   return e;
 };
 
+// Embedded HTML (diagrams, charts) is author-supplied content shown *inside* the
+// approval window. The Rust side already forces `sandbox="allow-scripts"` without
+// `allow-same-origin`, so it cannot reach this document. What it still can do is
+// draw anything inside its own box -- including a fake approval header. So we
+// frame it and label it, making the boundary visible rather than invisible.
+function decorateEmbeds(container: HTMLElement) {
+  container.querySelectorAll<HTMLIFrameElement>("iframe").forEach((f) => {
+    if (f.parentElement?.classList.contains("embed")) return;
+    const box = document.createElement("figure");
+    box.className = "embed";
+    const cap = document.createElement("figcaption");
+    cap.textContent = "외부 콘텐츠 — 아래 승인 버튼과 무관";
+    f.replaceWith(box);
+    box.appendChild(cap);
+    box.appendChild(f);
+  });
+  // Wide tables get their own scroller so cells are not crushed in a narrow window.
+  container.querySelectorAll<HTMLTableElement>("table").forEach((t) => {
+    if (t.parentElement?.classList.contains("table-scroll")) return;
+    const wrap = document.createElement("div");
+    wrap.className = "table-scroll";
+    t.replaceWith(wrap);
+    wrap.appendChild(t);
+  });
+}
+
 // Open http(s) links from rendered markdown in the real browser, not the webview.
 function makeLinksExternal(container: HTMLElement) {
   container.querySelectorAll<HTMLAnchorElement>("a[href]").forEach((a) => {
@@ -313,6 +339,7 @@ function setupAnnotate(p: AnnotatePayload) {
   $("content").innerHTML = p.html;
   $("content").classList.remove("hidden");
   makeLinksExternal($("content"));
+  decorateEmbeds($("content"));
   $("annotate-footer").classList.remove("hidden");
   wireTtsHeader(p.configTts);
 
@@ -534,6 +561,7 @@ function setupAsk(p: AskPayload) {
     ctx.innerHTML = p.contextHtml;
     root.appendChild(ctx);
     makeLinksExternal(ctx);
+    decorateEmbeds(ctx);
   }
 
   const prevBtn = $<HTMLButtonElement>("ask-prev");
