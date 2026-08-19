@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="144" height="144" viewBox="0 0 144 144">
+<rect width="144" height="144" rx="18" fill="#334155"/>
+<path d="M44 60 L72 88 L100 60 M72 88 L72 32" fill="none" stroke="#ffffff" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="72" y="124" font-family="-apple-system,Helvetica,sans-serif" font-size="22"
+      font-weight="600" fill="#ffffff" text-anchor="middle">아래로</text>
+</svg>

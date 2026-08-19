@@ -196,6 +196,10 @@ async function refresh() {
         view.stale ? 4 : pend.length || view.unread ? 3 : view.status === "working" ? 2 : 1,
       );
       setTitle(context, sessionLabel(view));
+    } else if (meta.action === "scrollUp" || meta.action === "scrollDown") {
+      // 굴릴 창이 있을 때만 밝게. 방향은 아이콘에 있으니 제목은 비워 둔다.
+      setState(context, alive ? 1 : 0);
+      setTitle(context, "");
     } else if (meta.action === "tts") {
       // 음성이 켜져 있으면 밝게. 키의 정체(소리)는 두 상태 모두에 남는다.
       setState(context, alive && ttsOn ? 1 : 0);
@@ -278,6 +282,8 @@ ws.on("message", async (raw) => {
     else if (meta.action === "approve") res = await knock.approve("@1");
     else if (meta.action === "dismiss") res = await knock.dismiss("@1");
     else if (meta.action === "tts") res = await knock.toggleTts();
+    else if (meta.action === "scrollUp") res = await knock.scroll("up");
+    else if (meta.action === "scrollDown") res = await knock.scroll("down");
     // 대상이 없거나 데몬이 없으면 키에 경고를 띄운다. 아무 반응이 없으면
     // 눌리긴 한 건지 알 수 없다.
     if (!res || res.decision === "unknown") showAlert(context);

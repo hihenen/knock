@@ -147,6 +147,48 @@
           "FontSize": "9"
         }
       ]
+    },
+    {
+      "Name": "위로 스크롤",
+      "UUID": "com.knock.controller.scrollUp",
+      "Icon": "imgs/action",
+      "Tooltip": "열려 있는 승인 창 본문을 한 화면 위로 올립니다.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "States": [
+        {
+          "Image": "imgs/key-scroll-up-off",
+          "TitleAlignment": "bottom",
+          "FontSize": "12"
+        },
+        {
+          "Image": "imgs/key-scroll-up",
+          "TitleAlignment": "bottom",
+          "FontSize": "12"
+        }
+      ]
+    },
+    {
+      "Name": "아래로 스크롤",
+      "UUID": "com.knock.controller.scrollDown",
+      "Icon": "imgs/action",
+      "Tooltip": "열려 있는 승인 창 본문을 한 화면 아래로 내립니다.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "States": [
+        {
+          "Image": "imgs/key-scroll-down-off",
+          "TitleAlignment": "bottom",
+          "FontSize": "12"
+        },
+        {
+          "Image": "imgs/key-scroll-down",
+          "TitleAlignment": "bottom",
+          "FontSize": "12"
+        }
+      ]
     }
   ]
 }
