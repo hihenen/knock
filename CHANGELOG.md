@@ -4,6 +4,8 @@ All notable changes to knock are documented here. Versions follow [SemVer](https
 
 ## [Unreleased]
 
+## [0.6.4] - 2026-08-19
+
 ### Added
 - **Stream Deck 스크롤 키 2종** (`위로 스크롤` / `아래로 스크롤`) — 내용이 긴 게이트는 한
   화면에 안 들어오는데, 읽으려고 트랙패드로 손이 가면 물리 키로 결정한다는 전제가 깨진다.
