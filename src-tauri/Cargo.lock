@@ -2145,7 +2145,7 @@ dependencies = [
 
 [[package]]
 name = "knock"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "ammonia",
  "base64 0.22.1",

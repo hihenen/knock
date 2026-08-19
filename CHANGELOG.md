@@ -4,6 +4,8 @@ All notable changes to knock are documented here. Versions follow [SemVer](https
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-08-19
+
 ### Added
 - **게이트 본문에 HTML 임베드(`<iframe>`) 정식 지원** — 생성된 다이어그램·차트를 승인 창
   안에서 바로 볼 수 있다. 스크립트가 도는 임베드(mermaid, 차트 라이브러리)를 의도적으로
