@@ -2,95 +2,40 @@
 
 [한국어](README.md) · **English**
 
-A desktop approval / annotation / question gate for AI coding agents.
-Not a browser tab — a **native Tauri window** + OS notification + Dock bounce + keyboard nav.
+### Don't miss it when your AI agent asks.
 
-- Single binary (~9.5MB), Bun/Tauri build
-- Simple `stdout` contract → drops into existing skills, hooks, and CLIs
-- Replaces blocking chat questions (AskUserQuestion) with a desktop window
+Your agent needs approval, prints a question to the terminal, and waits. But you're looking at another window. Minutes later you notice it never moved.
 
-## Quick Start (macOS · Apple Silicon)
+knock puts that question **in a window in the middle of your screen**. A notification fires, the Dock bounces, and you answer with the keyboard.
 
-**1. Install the CLI** — pick one
-
-```bash
-brew install hihenen/tap/knock                                                       # recommended (no warning)
-curl -fsSL https://raw.githubusercontent.com/hihenen/knock/master/install.sh | bash  # or (without Homebrew)
-```
-
-**2. Claude Code plugin** (skills + hook)
-
-```
-/plugin marketplace add hihenen/knock
-/plugin install knock@knock
-/reload-plugins
-```
-
-**3. Resident daemon** (required)
-
-```bash
-knock daemon install   # run at login → menubar tray always visible + zero first-call latency
-```
-
-Multiple sessions can call at once — they queue into a single window instead of stacking, and the menubar tray always shows the pending count (badge). Turn on Touch ID right there via the 🔒 toggle in the approval window header.
-
-**4. Agent automation** — plan approval is automatic via the hook, but to route **every other approval / question / web action** through knock, add this to your project (or global) `CLAUDE.md`:
-
-```markdown
-## knock — desktop approval/question gate
-- When you need **approval** from the user, raise a `knock annotate <md> --gate --json`
-  gate instead of asking in chat.
-- For **multiple-choice questions**, use `knock ask <json>` instead of AskUserQuestion.
-  Put the rationale (background, comparison tables, conclusion) in the top-level
-  `context` (markdown) so the user sees the basis for the decision in the window.
-- When the user must **click/approve on the web** (Scalr Apply / GitHub PR / ArgoCD /
-  dashboard, etc.), pass `--action-url <URL>` so one approval jumps the browser
-  straight to that action.
-- For critical approvals (prd / IAM / destructive), add `--touch-id` (if enabled via knock settings).
-- knock output: annotate=`{"decision":"approved|annotated|dismissed"}`,
-  ask=`{"answers":{"<h>":["..."]}}` (always arrays).
-```
-
-**That's the whole flow** — install → plugin → resident daemon → agent guidance. Now any session can approve/ask through knock, and concurrent sessions queue into one window.
-
-> **Updates**: when a new version ships, knock shows a banner at the top of the window. `brew upgrade hihenen/tap/knock` (+ `/plugin marketplace update knock` → `/reload-plugins`)
+![knock approval window](docs/images/gate.png)
 
 ---
 
-## Install (detailed)
+## What you can do
 
-> Two tracks. Just copy-paste **your OS section only**, top to bottom. (macOS / Windows kept fully separate so they never mix.)
+| | |
+|---|---|
+| **Get approval** | Show a plan or a diff, get approve / request-changes / cancel back |
+| **Ask a question** | Show options and let them pick — number keys work |
+| **Send them where it happens** | On approve, the browser jumps straight to the PR or deploy screen |
+| **Lock it behind a fingerprint** | Touch ID / Windows Hello for anything hard to undo |
+| **Press a real button** | Approve, cancel and scroll from a Stream Deck key |
+| **Keep it in one window** | Many agents asking at once queue up instead of stacking windows |
 
 ---
 
-### 🍎 macOS (Apple Silicon) — start to finish
+## Up and running in 5 minutes
 
-**Step 1 · Install the CLI** (one of three — Homebrew recommended)
+For macOS (Apple Silicon). Windows is [below](#-windows-x64).
+
+**1. Install**
 
 ```bash
-# (recommended) Homebrew — handles Gatekeeper quarantine automatically, no warning
 brew install hihenen/tap/knock
 ```
 
-```bash
-# (alternative) without Homebrew — installs to ~/.local/bin/knock + removes quarantine
-curl -fsSL https://raw.githubusercontent.com/hihenen/knock/master/install.sh | bash
-```
-
-```bash
-# (alternative) download the binary directly
-curl -L https://github.com/hihenen/knock/releases/latest/download/knock-macos-aarch64 -o knock
-chmod +x knock
-xattr -c knock                 # remove Gatekeeper quarantine (needed for downloaded builds)
-mv knock ~/.local/bin/
-```
-
-```bash
-# verify
-knock --version
-```
-
-**Step 2 · Claude Code plugin** (skills + automatic plan-approval hook) — inside Claude Code:
+**2. Connect it to Claude Code**
 
 ```
 /plugin marketplace add hihenen/knock
@@ -98,132 +43,87 @@ knock --version
 /reload-plugins
 ```
 
-**Step 3 · Resident daemon** (required — runs at login / menubar tray / zero first-call latency)
+**3. Keep it running**
 
 ```bash
 knock daemon install
-knock daemon status            # confirm
 ```
 
-**Step 4 · Agent guidance** — paste the snippet from [Quick Start step 4](#quick-start-macos--apple-silicon) into your project (or global `~/.claude/CLAUDE.md`) `CLAUDE.md`. Done.
+You get a menu bar icon, and the first call stops being slow. It works without this — it's just nicer with it.
+
+**4. Tell your agent about it**
+
+That's already enough for **plan approvals** to show up in a knock window. To hand over the rest, paste this into your `CLAUDE.md`.
+
+<details>
+<summary><b>Snippet for CLAUDE.md</b> (expand)</summary>
+
+```markdown
+## knock — desktop approval/question gate
+- When you need **approval**, open `knock annotate <md> --gate --json` instead of asking in chat.
+- For **multiple-choice questions**, use `knock ask <json>` instead of AskUserQuestion. Put
+  background, comparison tables and your conclusion in the top-level `context` as markdown so
+  the reasoning is visible in the window.
+- When the user has to **click something on the web** (a deploy approval, a GitHub PR, a
+  dashboard), pass `--action-url <URL>` so approving jumps the browser straight there.
+- Use `--touch-id` for critical approvals — production, permissions, deletions.
+- When the user has to **walk through several steps in a browser**, add `--checklist`. Approving
+  opens the link and keeps the request in the queue as "in progress" so they can reopen the
+  steps while working, then mark it done.
+- To put a diagram in the body, embed `<iframe src="https://...">` (scripts run inside).
+- Responses: annotate=`{"decision":"approved|annotated|dismissed"}`,
+  ask=`{"answers":{"<header>":["..."]}}` (always an array).
+```
+
+</details>
+
+**That's it.** Any session that asks now opens a window.
+
+> New versions announce themselves with a banner in the window. `brew upgrade hihenen/tap/knock`
 
 ---
 
-### 🪟 Windows (x64) — start to finish
+## How to use it
 
-**Step 1 · Install the CLI** (PowerShell — one of two)
-
-```powershell
-# (recommended) install.ps1 — installs knock.exe to %LOCALAPPDATA%\knock + adds to user PATH
-irm https://raw.githubusercontent.com/hihenen/knock/master/install.ps1 | iex
-```
-
-```powershell
-# (alternative) binary directly — grab knock-windows-x64.exe from releases and put it on PATH
-#   https://github.com/hihenen/knock/releases/latest  →  knock-windows-x64.exe
-```
-
-```powershell
-# verify (in a NEW PowerShell window — so PATH is refreshed)
-knock --version
-```
-
-**Step 2 · Claude Code plugin** (skills + automatic plan-approval hook) — inside Claude Code:
-
-```
-/plugin marketplace add hihenen/knock
-/plugin install knock@knock
-/reload-plugins
-```
-
-**Step 3 · Resident daemon** (required — runs at login / taskbar resident / zero first-call latency)
-
-```powershell
-knock daemon install
-knock daemon status            # confirm (registry Run key)
-```
-
-**Step 4 · Agent guidance** — paste the snippet from [Quick Start step 4](#quick-start-macos--apple-silicon) into your project (or global) `CLAUDE.md`. Done.
-
-> Windows has the same features — single-window multi-session (named pipe), biometric auth (Windows Hello), resident daemon (registry Run key). Taskbar notification instead of a Dock badge.
-
----
-
-### 🔧 Build from source (developers · all platforms)
-
-```bash
-cd src-tauri && cargo build --release   # or: bun run tauri build --no-bundle
-cp target/release/knock ~/.local/bin/knock
-```
-
-> ⚠️ knock is a **CLI tool**. Don't double-click a `.app` — run it with arguments like `knock annotate <md>` / `knock ask <json>`. (Running with no arguments exits immediately.)
-
-## Claude Code plugin (skills)
-
-After installing the CLI, add the skill plugin in Claude Code so the agent calls `knock-annotate` / `knock-ask` directly:
-
-```
-/plugin marketplace add hihenen/knock
-/plugin install knock@knock
-```
-
-| Skill | Use |
-|-------|-----|
-| `knock-annotate` | approval / annotation gate |
-| `knock-ask` | multiple-choice question (AskUserQuestion replacement) |
-
-### Automatic plan approval (hook)
-
-The plugin includes `PermissionRequest` + `ExitPlanMode` hooks, so **a knock window opens automatically when you exit plan mode** to review and approve the plan — **works without any CLAUDE.md guidance**. (approve → plan proceeds / request-changes·close → plan rejected + feedback)
-
-### Agent automation (CLAUDE.md)
-
-To have the agent raise knock for approvals / questions / web actions (`--action-url`) / Touch ID **beyond plan approval**, add the [Quick Start step 4](#quick-start-macos--apple-silicon) `CLAUDE.md` snippet to your project (or global) `CLAUDE.md`.
-
-### (Optional) critical-bash auto-gate hook
-
-A PreToolUse hook example that automatically raises a knock approval window right before **hard-to-undo commands** — `terraform apply/destroy`, `gh pr merge`, secret/KMS/S3 deletions, force push: [`hooks/examples/knock-critical-gate.sh`](hooks/examples/knock-critical-gate.sh). The approval window also shows a **Korean summary of what the command does** (which repo's PR is being merged, which secret-id is being deleted, etc.). Put it in `~/.claude/hooks/` and wire it into the `PreToolUse` section of `~/.claude/settings.json` (`jq` required).
-
-> The plugin provides **skills + hooks**. Install the `knock` CLI separately via the **Install** steps above (brew / install.sh).
-
-## Modes
-
-### 1. annotate — approval / annotation gate
+### Getting approval
 
 ```bash
 knock annotate plan.md --gate --json
 ```
 
-| Option | Meaning |
-|--------|---------|
-| `--gate` | show an explicit `Approve` button |
-| `--json` | output the result as JSON (plain text otherwise) |
-| `--title T` | header title (default: filename) |
-| `--touch-id` | approve via macOS Touch ID / Windows Hello (falls back to system password / button if no biometrics) |
-| `--action-url <URL>` | on approval, open that URL in the browser (Scalr Apply / PR / dashboard — **action inbox**). For local files use an absolute path `file:///abs/path/mockup.html` (HTML mockups·PDF·images — documents only, executables refused). Markdown links in the body also open in the external browser on click |
+What the person did comes back on stdout. Branch on it.
 
-**stdout contract**:
+| What they did | `--json` output |
+|---|---|
+| Approved | `{"decision":"approved"}` |
+| Requested changes (with a note) | `{"decision":"annotated","feedback":"..."}` |
+| Closed · Esc | `{"decision":"dismissed"}` |
 
-| User action | Plain | `--json` |
-|-------------|-------|----------|
-| Approve | `The user approved.` | `{"decision":"approved"}` |
-| Close/Esc | (empty output) | `{"decision":"dismissed"}` |
-| Request changes | annotation text | `{"decision":"annotated","feedback":"..."}` |
+The options you'll actually use:
 
-### 2. ask — multiple-choice question (AskUserQuestion replacement)
+| Option | When |
+|---|---|
+| `--gate` | Show an explicit Approve button |
+| `--json` | Get JSON back (without it, a plain sentence) |
+| `--title T` | Window title. Defaults to the file name |
+| `--touch-id` | Approve with a fingerprint. Falls back to password or a button |
+| `--action-url <URL>` | Open this URL in the browser on approve |
+| `--checklist` | Keep it in the queue after approval, so a multi-step browser task can be reopened and finished |
+
+### Asking a question
 
 ```bash
 knock ask questions.json
 ```
 
-The input JSON mirrors Claude Code's **AskUserQuestion schema** (+ optional `context`):
+Same shape as Claude Code's AskUserQuestion, so existing JSON works as-is.
 
 ```json
 {
-  "context": "## Background\n\nDecision rationale (background, comparison tables, conclusion) in markdown. Rendered above the options.",
+  "context": "## Background\nMarkdown shown above the options.",
   "questions": [
     {
-      "header": "Approach",
+      "header": "Direction",
       "question": "Which way should we go?",
       "options": [
         { "label": "Option A", "description": "..." },
@@ -234,82 +134,137 @@ The input JSON mirrors Claude Code's **AskUserQuestion schema** (+ optional `con
 }
 ```
 
-- **`context` (optional)** — if a decision needs background, put markdown in the top-level `context`. It renders above the questions so the rationale is visible in the window.
-- `multiSelect: true` uses checkbox multi-select; omitted/`false` uses single-select. A one-question ask skips the summary step and submits directly. Both modes still return string arrays.
+Answers always come back as arrays — `{"answers":{"Direction":["Option A"]}}`. Closing gives `{"decision":"dismissed"}`.
 
-Shows one question at a time (wizard), then a selection summary → submit. Always JSON output:
+Add `multiSelect: true` to allow several picks. With a single question, it submits without a summary step.
 
-| Result | Output |
-|--------|--------|
-| Answered | `{"answers":{"Approach":["Option A","Option B"]}}` — **always string arrays** (selected labels + any Other text) |
-| Closed | `{"decision":"dismissed"}` |
+### Putting a diagram in the gate
 
-## Keyboard (ask questions)
+Embed `<iframe src="https://...">` in the body and a diagram or chart renders right in the window. JavaScript runs inside it.
 
-| Key | Action |
-|-----|--------|
-| `↑` `↓` | move option focus |
-| `1`~`9` | toggle that option |
-| `Space` | toggle option (select/deselect) |
-| `Enter` | next question (submit when there is only one) |
-| `→` `←` | next / previous question |
-| `Cmd+Enter` | submit |
-| `Esc` | close |
-
-annotate mode: `Cmd+Enter`=approve (gate), `Esc`=close. In the pending list, `1`–`9` opens that request directly.
-
-## Settings (knock settings)
-
-```bash
-knock settings
+```markdown
+<iframe src="https://example.com/architecture.html" width="100%" height="360"></iframe>
 ```
 
-Toggle in the settings window:
-- **🔒 Use Touch ID by default for approvals and questions** → saved to `~/.config/knock/config.json` as `{"touch_id": true}` and applied to every approval and question submission. An explicit `annotate --touch-id` always requires authentication even when this default is off.
+Embeds render inside a box labelled **"external content"**, so they can't blend into the approval UI. Two things are enforced:
 
-The settings window footer shows **Report a bug** (GitHub Issues) · **Release notes** links and the current version.
+- An embed **cannot touch the approval window.** `sandbox="allow-scripts"` is forced on, and `allow-same-origin` is deliberately left off
+- `<script>` and inline handlers like `onclick` in the body are **stripped**
 
-## Resident daemon (single-window multi-session)
+The URL must be `http(s)`. Local files (`file:`) are blocked — use `--action-url` to open those in a browser instead.
 
-When multiple agent sessions call knock at once, **windows don't stack — they queue into a single window**. Run the daemon at login so the menubar tray is always present and there's no first-call latency:
+### Pressing a real button (Stream Deck)
+
+![knock Stream Deck keys](docs/images/streamdeck-keys.png)
+
+Approve, cancel and scroll from physical keys. The pending count shows on the key, so you know what's waiting without looking at the screen.
 
 ```bash
-knock daemon install     # auto-start at login (macOS LaunchAgent / Windows registry Run key)
-knock daemon status      # check whether installed
+cp -R com.knock.controller.sdPlugin \
+  ~/Library/Application\ Support/com.elgato.StreamDeck/Plugins/
+```
+
+Copy it, then **restart the Stream Deck app** and `knock` appears in the action list.
+
+| Action | What it does |
+|---|---|
+| Pending slot | Opens the Nth queued request |
+| Approve · Cancel | Handles the first request |
+| Scroll up · down | Moves the window body by a screenful |
+| Agent session | Approves that session's pending request, or jumps to its terminal |
+| Voice alerts | Toggles read-aloud |
+
+### Keyboard
+
+| Key | What it does |
+|---|---|
+| `1`–`9` | Pick an option · open that request from the queue |
+| `↑` `↓` | Move between options |
+| `Space` | Toggle an option |
+| `Enter` | Next question (submits if there's only one) |
+| `Cmd+Enter` | Submit · approve |
+| `Esc` | Close |
+
+---
+
+## Good to know
+
+**The window remembers its size.** It opens sized to your screen, and if you resize it by hand, it opens that way next time. Long approval bodies open nearly full height.
+
+**Many sessions, one window.** Requests queue up, each showing its project, caller and how long it's been waiting. Number keys open them.
+
+**Settings live in `knock settings`.**
+- Always require a fingerprint to approve
+- On approve, open the browser or just copy the URL (keeps tabs from piling up during a run of approvals)
+
+**Managing the daemon:**
+
+```bash
+knock daemon install     # start at login
+knock daemon status      # current state
 knock daemon uninstall   # remove
 ```
 
-Even if not installed, the daemon spins up automatically on first call (it just won't stay resident). On a new request the Dock icon bounces and a badge (pending count) appears. The pending list shows each request's number, project, caller, and wait time; press `1`–`9` to open one directly. Set `KNOCK_PROJECT` or `KNOCK_CALLER` to override automatic source detection.
+**To gate hard-to-undo commands automatically** — there's an example hook that opens an approval window right before things like `terraform destroy`, `gh pr merge` or a secret deletion: [`hooks/examples/knock-critical-gate.sh`](hooks/examples/knock-critical-gate.sh)
 
-## Updates
+---
 
-When a new version ships, knock shows a **banner at the top of the window** (checked at startup against GitHub Releases, throttled to 24h, once per version). The banner lets you copy the `brew upgrade` command · open release notes · dismiss. Updates respect Homebrew management — **it only notifies, never auto-installs**:
+## Install (in detail)
+
+### 🍎 macOS (Apple Silicon)
+
+Pick one. **Homebrew is recommended** — it runs without security warnings.
 
 ```bash
-brew upgrade hihenen/tap/knock
+# recommended
+brew install hihenen/tap/knock
 ```
 
-## Alarms
-
-- Native OS notification (when the window opens)
-- macOS Dock icon bounce (`request_user_attention`)
-- Always-on-top + forced focus
-
-## Agent workflow integration
-
-```
-# approval gate
-knock annotate /tmp/approve.md --gate --json
-# → proceed on {"decision":"approved"}, stop on dismissed
-
-# question (AskUserQuestion replacement)
-#  1. write the question JSON to /tmp
-#  2. knock ask /tmp/q.json
-#  3. parse {"answers":{...}} and branch
+```bash
+# without Homebrew — installs to ~/.local/bin
+curl -fsSL https://raw.githubusercontent.com/hihenen/knock/master/install.sh | bash
 ```
 
-Skills: `~/.claude/skills/knock-annotate`, `~/.claude/skills/knock-ask`
+```bash
+# download it yourself
+curl -L https://github.com/hihenen/knock/releases/latest/download/knock-macos-aarch64 -o knock
+chmod +x knock
+xattr -c knock          # clears the quarantine flag on downloaded files
+mv knock ~/.local/bin/
+```
 
-## Build stack
+```bash
+knock --version         # check
+```
 
-Tauri 2 + Rust (clap, pulldown-cmark, tauri-plugin-notification) + vanilla TS.
+### 🪟 Windows (x64)
+
+```powershell
+# recommended — installs to %LOCALAPPDATA%\knock and adds it to PATH
+irm https://raw.githubusercontent.com/hihenen/knock/master/install.ps1 | iex
+```
+
+Or grab `knock-windows-x64.exe` from the [latest release](https://github.com/hihenen/knock/releases/latest) and drop it in a PATH folder.
+
+```powershell
+knock --version         # in a new PowerShell window, so PATH is picked up
+```
+
+### 🔧 Build from source
+
+```bash
+bun install
+bun run build
+cd src-tauri && cargo build --release
+cp target/release/knock ~/.local/bin/knock
+```
+
+> knock is a **CLI tool**. You don't double-click it — you run `knock annotate <file>`.
+
+---
+
+## How it's built
+
+Tauri 2 + Rust (clap, pulldown-cmark, ammonia) + vanilla TypeScript. Single binary, about 12MB.
+
+The approval window is treated as a surface that **shows the user the truth**, so whoever writes the body is not allowed to manipulate it — hence the sanitizing and the sandbox. Full history in the [CHANGELOG](CHANGELOG.md).
