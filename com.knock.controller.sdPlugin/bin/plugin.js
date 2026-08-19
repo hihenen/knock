@@ -3165,7 +3165,7 @@ async function refresh() {
       const view = { ...s, pending: pend.length, stale: isStale(s) };
       setState(context, view.stale ? 4 : pend.length || view.unread ? 3 : view.status === "working" ? 2 : 1);
       setTitle(context, sessionLabel(view));
-    } else if (meta.action === "scrollUp" || meta.action === "scrollDown") {
+    } else if (meta.action === "scrollup" || meta.action === "scrolldown") {
       setState(context, alive ? 1 : 0);
       setTitle(context, "");
     } else if (meta.action === "tts") {
@@ -3198,7 +3198,7 @@ ws.on("message", async (raw) => {
   if (event === "willAppear") {
     const settings = payload?.settings ?? {};
     keys.set(context, {
-      action: action?.split(".").pop() ?? "slot",
+      action: (action?.split(".").pop() ?? "slot").toLowerCase(),
       fixed: Number(settings.slot) || 0,
       coord: coordKey(payload),
       slot: 1
@@ -3245,9 +3245,9 @@ ws.on("message", async (raw) => {
       res = await dismiss("@1");
     else if (meta.action === "tts")
       res = await toggleTts();
-    else if (meta.action === "scrollUp")
+    else if (meta.action === "scrollup")
       res = await scroll("up");
-    else if (meta.action === "scrollDown")
+    else if (meta.action === "scrolldown")
       res = await scroll("down");
     if (!res || res.decision === "unknown")
       showAlert(context);
