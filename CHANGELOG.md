@@ -4,6 +4,8 @@ All notable changes to knock are documented here. Versions follow [SemVer](https
 
 ## [Unreleased]
 
+## [0.6.5] - 2026-08-27
+
 ### Added
 - **`--view <FILE>` 옆 패널** — 자립 HTML(다이어그램, 설계 페이지)을 요청 옆에 띄운다.
   기존 본문 `<iframe>` 임베드는 흐름 안 420px 로 잘려 "그림을 보면서 판단" 이 안 됐고,
