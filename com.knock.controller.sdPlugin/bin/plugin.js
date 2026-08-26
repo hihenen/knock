@@ -2962,6 +2962,7 @@ var approve = (at) => request({ kind: "approve", target: at });
 var dismiss = (at) => request({ kind: "dismiss", target: at });
 var toggleTts = () => request({ kind: "tts-toggle" });
 var scroll = (dir) => request({ kind: "scroll", dir });
+var scrollRaw = (dir) => request({ kind: "scroll", dir, raw: true });
 
 // src/orca.js
 import { execFile } from "node:child_process";
@@ -3219,6 +3220,22 @@ ws.on("message", async (raw) => {
     refresh();
     return;
   }
+  const HOLD_MS = 350;
+  const REPEAT_MS = 220;
+  if (event === "keyDown") {
+    const meta = keys.get(context);
+    if (!meta)
+      return;
+    if (meta.action !== "scrollup" && meta.action !== "scrolldown")
+      return;
+    const dir = meta.action === "scrollup" ? "up" : "down";
+    meta.holdTimer = setTimeout(() => {
+      meta.held = true;
+      scrollRaw(dir);
+      meta.repeatTimer = setInterval(() => scrollRaw(dir), REPEAT_MS);
+    }, HOLD_MS);
+    return;
+  }
   if (event === "keyUp") {
     const meta = keys.get(context);
     if (!meta)
@@ -3245,10 +3262,16 @@ ws.on("message", async (raw) => {
       res = await dismiss("@1");
     else if (meta.action === "tts")
       res = await toggleTts();
-    else if (meta.action === "scrollup")
-      res = await scroll("up");
-    else if (meta.action === "scrolldown")
-      res = await scroll("down");
+    else if (meta.action === "scrollup" || meta.action === "scrolldown") {
+      clearTimeout(meta.holdTimer);
+      clearInterval(meta.repeatTimer);
+      meta.holdTimer = meta.repeatTimer = undefined;
+      if (meta.held) {
+        meta.held = false;
+        return refresh();
+      }
+      res = await scroll(meta.action === "scrollup" ? "up" : "down");
+    }
     if (!res || res.decision === "unknown")
       showAlert(context);
     refresh();

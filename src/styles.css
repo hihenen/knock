@@ -630,3 +630,169 @@ body {
   background: #b45309;
   color: #fff;
 }
+
+/* ---- Side panel (--view) ----
+   A local, self-contained page shown beside the request: a diagram, a design
+   doc. It is embedded (srcdoc) rather than linked because a remote page that
+   sets `frame-ancestors` cannot be framed here at all.
+
+   Two boundaries matter and both are visual as well as technical: the iframe
+   has no `allow-same-origin`, so it cannot touch this document; and the decision
+   controls stay in the left column, so a fake button drawn inside the panel
+   never sits where the real one does. */
+.view-panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  border-left: 1px solid var(--border);
+  background: rgba(127, 127, 127, 0.06);
+}
+.view-cap {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 0.78em;
+  color: var(--muted);
+  padding: 4px 6px 4px 12px;
+  background: rgba(127, 127, 127, 0.1);
+  border-bottom: 1px solid var(--border);
+}
+/* The panel is for glancing while deciding. Reading the whole document — find,
+   print, zoom — belongs in a browser, so hand it over rather than growing the
+   panel into a browser. */
+.view-open {
+  flex: 0 0 auto;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  border-radius: 5px;
+  padding: 2px 8px;
+  font-size: 1.05em;
+  line-height: 1.4;
+  cursor: pointer;
+}
+.view-cap-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Mode button carries a word, not a glyph — "카드 3/7" has to fit. */
+.view-mode {
+  font-size: 0.95em;
+  font-variant-numeric: tabular-nums;
+  min-width: 68px;
+}
+.view-open:hover,
+.view-open:focus-visible {
+  color: var(--fg, inherit);
+  border-color: #4a90d9;
+  outline: none;
+}
+.view-panel iframe {
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 0;
+  border: 0;
+  background: #fff;
+}
+
+/* Split layout: header/banner/footer span both columns, request and panel
+   share the middle row. Grid keeps the DOM order untouched — the annotate
+   scroll container is still `#content`. */
+body.split {
+  display: grid;
+  /* --split-left is the request column, set by dragging the handle. The panel
+     takes the rest, and both keep a floor so neither can be dragged away. */
+  grid-template-columns: minmax(280px, var(--split-left, 1.05fr)) 6px minmax(280px, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  grid-template-areas:
+    "top  top    top"
+    "band band   band"
+    "main handle view"
+    "foot foot   foot";
+}
+body.split > .topbar { grid-area: top; }
+body.split > .update-banner { grid-area: band; }
+body.split > #content { grid-area: main; min-height: 0; }
+body.split > .split-handle { grid-area: handle; }
+body.split > .view-panel { grid-area: view; }
+body.split > .actions { grid-area: foot; }
+
+.split-handle {
+  cursor: col-resize;
+  background: var(--border);
+  /* The hit area is wider than the line: a 6px target is a miss half the time. */
+  position: relative;
+}
+.split-handle::after {
+  content: "";
+  position: absolute;
+  inset: 0 -5px;
+}
+.split-handle:hover,
+.split-handle:focus-visible,
+body.dragging-split .split-handle {
+  background: #4a90d9;
+  outline: none;
+}
+/* While dragging, the iframe would swallow pointer events the moment the cursor
+   crosses into it — the drag would stick. Disable it for the duration. */
+body.dragging-split {
+  cursor: col-resize;
+  user-select: none;
+}
+body.dragging-split .view-panel iframe {
+  pointer-events: none;
+}
+
+/* ---- One-row footer (side-panel gates) ----
+   With a panel open, the vertical option stack eats a third of the height for
+   three short labels. Same controls, one row: approve, cancel, the note field,
+   then submit. Nothing is removed and the number keys still map to the same
+   options — only the geometry changes.
+
+   Scoped to `body.split`: gates without a panel keep the familiar stack. */
+body.split #annotate-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+body.split #annotate-footer .ask-options {
+  display: flex;
+  /* The stacked layout sets column; row has to be stated, not assumed. */
+  flex-direction: row;
+  flex: 1 1 auto;
+  align-items: stretch;
+  gap: 8px;
+  min-width: 0;
+}
+body.split #annotate-footer .ask-opt {
+  flex: 0 0 auto;
+  width: auto;
+  padding: 6px 12px;
+  white-space: nowrap;
+}
+body.split #annotate-footer #opt-approve { order: 1; }
+body.split #annotate-footer #opt-cancel { order: 2; }
+/* The note grows into whatever is left; it is the only field that wants room. */
+body.split #annotate-footer .ann-input {
+  order: 3;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+body.split #annotate-footer .ann-textarea {
+  height: 34px;
+  min-height: 34px;
+  resize: none;
+}
+body.split #annotate-footer .btn-row {
+  order: 4;
+  flex: 0 0 auto;
+  margin: 0;
+}
+body.split .actions {
+  padding: 10px 16px;
+}

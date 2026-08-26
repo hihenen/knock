@@ -86,6 +86,13 @@ enum Command {
         /// "완료" instead of on approve.
         #[arg(long)]
         checklist: bool,
+        /// Local self-contained HTML to show in a side panel next to the request
+        /// (a diagram, a design page). The file is embedded as sandboxed srcdoc,
+        /// so it renders offline and cannot reach this window. Remote pages that
+        /// set `frame-ancestors` cannot be framed at all — that is why this takes
+        /// a file, not a URL.
+        #[arg(long, value_name = "FILE")]
+        view: Option<PathBuf>,
     },
     /// Ask a multiple-choice question (AskUserQuestion schema). Always emits JSON.
     Ask {
@@ -559,6 +566,11 @@ fn speak_os_native(spoken: &str, times: u32, female: bool) {
     }
 }
 
+/// Upper bound for `--view` payloads. The file is inlined into the window
+/// payload as srcdoc, so a huge document would bloat every IPC hop for content
+/// nobody can read in a side panel anyway.
+const MAX_VIEW_BYTES: usize = 2 * 1024 * 1024;
+
 enum Mode {
     Annotate {
         html: String,
@@ -566,6 +578,8 @@ enum Mode {
         gate: bool,
         action_url: Option<String>,
         checklist: bool,
+        view_html: Option<String>,
+        view_url: Option<String>,
     },
     Ask {
         questions: Value,
@@ -795,6 +809,8 @@ fn get_payload(state: tauri::State<AppState>) -> Value {
             gate,
             action_url,
             checklist,
+            view_html,
+            view_url,
         } => serde_json::json!({
             "mode": "annotate",
             "html": html,
@@ -809,6 +825,8 @@ fn get_payload(state: tauri::State<AppState>) -> Value {
             "configTtsRepeat": config_tts_repeat(),
             "actionUrl": action_url,
             "checklist": checklist,
+            "viewHtml": view_html,
+            "viewUrl": view_url,
         }),
         Mode::Ask { questions, title } => serde_json::json!({
             "mode": "ask",
@@ -1534,8 +1552,18 @@ fn run_daemon() {
                             .and_then(|v| v.as_str())
                             .unwrap_or("down")
                             .to_string();
+                        // `raw` means "move the pixels", not "advance a step". A long
+                        // press on the physical key sends it so the side panel can be
+                        // scrolled even while card mode owns short presses.
+                        let raw = payload
+                            .get("raw")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
                         let delivered = if let Some(w) = h.get_webview_window("main") {
-                            let _ = w.emit("scroll-request", serde_json::json!({ "dir": dir }));
+                            let _ = w.emit(
+                                "scroll-request",
+                                serde_json::json!({ "dir": dir, "raw": raw }),
+                            );
                             true
                         } else {
                             false
@@ -1691,6 +1719,11 @@ fn run_daemon() {
     ipc::cleanup();
 }
 
+#[tauri::command]
+fn zoom_debug(msg: String) {
+    eprintln!("[zoom-debug] {}", msg);
+}
+
 fn launch(state: AppState) {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
@@ -1708,7 +1741,8 @@ fn launch(state: AppState) {
             save_tts_opt,
             dismiss,
             open_url,
-            app_version
+            app_version,
+            zoom_debug
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { .. } = event {
@@ -2159,6 +2193,8 @@ fn run_hook() {
             gate: true,
             action_url: None,
             checklist: false,
+            view_html: None,
+            view_url: None,
         },
         json: false,
         hook: true,
@@ -2190,6 +2226,7 @@ pub fn run() {
             touch_id,
             action_url,
             checklist,
+            view,
         } => {
             // Pre-authorization: a `--gate` annotation (the critical gate) can be
             // satisfied by a live grant the owner set via an ask-confirm — spend
@@ -2214,6 +2251,38 @@ pub fn run() {
                     .unwrap_or_else(|| "Knock".to_string())
             });
             let html = render_md(&md);
+            // Side-panel content is embedded, not linked: a remote page with
+            // `frame-ancestors` cannot be framed here at all, and a local file
+            // keeps the gate working offline. Oversized files are dropped with a
+            // warning rather than silently truncated — a half-rendered diagram is
+            // worse than none.
+            let view_html = view
+                .as_ref()
+                .and_then(|path| match std::fs::read_to_string(path) {
+                    Ok(body) if body.len() > MAX_VIEW_BYTES => {
+                        eprintln!(
+                            "knock: --view {} is {} bytes (limit {}); skipping the side panel",
+                            path.display(),
+                            body.len(),
+                            MAX_VIEW_BYTES
+                        );
+                        None
+                    }
+                    Ok(body) => Some(body),
+                    Err(e) => {
+                        eprintln!("knock: cannot read --view {}: {}", path.display(), e);
+                        None
+                    }
+                });
+            // Absolute file:// URL so the panel's "open in browser" button can hand
+            // the same document to a real browser — where it gets the full window,
+            // find-in-page, and printing. The panel is for glancing; the browser is
+            // for reading.
+            let view_url = view.as_ref().and_then(|path| {
+                std::fs::canonicalize(path)
+                    .ok()
+                    .map(|abs| format!("file://{}", abs.to_string_lossy()))
+            });
             let inner = serde_json::json!({
                 "mode": "annotate",
                 "html": html.clone(),
@@ -2228,6 +2297,8 @@ pub fn run() {
                 "configTtsRepeat": config_tts_repeat(),
                 "actionUrl": action_url,
                 "checklist": checklist,
+                "viewHtml": view_html.clone(),
+                "viewUrl": view_url.clone(),
             });
             try_daemon("annotate", inner, json, false, None);
             launch(AppState {
@@ -2237,6 +2308,8 @@ pub fn run() {
                     gate,
                     action_url,
                     checklist,
+                    view_html,
+                    view_url,
                 },
                 json,
                 hook: false,

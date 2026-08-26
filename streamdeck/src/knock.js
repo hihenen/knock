@@ -71,3 +71,6 @@ export const dismiss = (at) => request({ kind: "dismiss", target: at });
 export const toggleTts = () => request({ kind: "tts-toggle" });
 /** 열려 있는 창 본문을 한 화면 굴린다. 창이 없으면 no-window 로 돌아온다. */
 export const scroll = (dir) => request({ kind: "scroll", dir });
+// Long press: move the pixels rather than advance a step, so a long card can be
+// scrolled while short presses still flip cards.
+export const scrollRaw = (dir) => request({ kind: "scroll", dir, raw: true });

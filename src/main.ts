@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 
 interface AnnotatePayload {
   mode: "annotate";
@@ -17,6 +18,10 @@ interface AnnotatePayload {
   actionUrl?: string | null;
   /// 승인 후에도 큐에 남겨 절차를 다시 볼 수 있게 하고, "완료"로 resolve 한다.
   checklist?: boolean;
+  /// Self-contained HTML for the side panel (--view). Embedded as srcdoc.
+  viewHtml?: string | null;
+  /// file:// URL of that same document, for the "open in browser" button.
+  viewUrl?: string | null;
   /// 이 요청이 이미 승인돼 진행 중인가 (큐에서 다시 열었을 때 채워진다).
   inProgress?: boolean;
 }
@@ -147,7 +152,15 @@ function scrollableBody(): HTMLElement | null {
 
 /// One press moves just under a screenful, keeping a couple of lines of overlap
 /// so a sentence is never split across two presses.
-function scrollBody(dir: "up" | "down") {
+function scrollBody(dir: "up" | "down", raw = false) {
+  // With a panel open, the long document is almost always on the right — that is
+  // why it was opened. Send the keys there when it has somewhere to go, and fall
+  // back to the request body otherwise.
+  if (document.body.classList.contains("split") && viewScrollable) {
+    const frame = document.getElementById("view-frame") as HTMLIFrameElement | null;
+    frame?.contentWindow?.postMessage({ __knockView: "scroll", dir, raw }, "*");
+    return;
+  }
   const box = scrollableBody();
   if (!box) return;
   const step = Math.max(120, box.clientHeight * 0.85);
@@ -253,7 +266,7 @@ function setKey(h: ((e: KeyboardEvent) => void) | null) {
   if (h) window.addEventListener("keydown", h);
 }
 
-type WindowLayout = "compact" | "ask-single" | "large" | "queue" | "settings";
+type WindowLayout = "compact" | "ask-single" | "large" | "queue" | "settings" | "split";
 let activeWindowLayout = "";
 
 // Fixed pixel sizes assumed a screen size. On a large display a content-rich gate
@@ -267,6 +280,9 @@ function screenBox() {
 }
 
 const SIZE_KEY = "knock_win_size";
+const SPLIT_KEY = "knock_split_left";
+const VIEW_MODE_KEY = "knock_view_mode";
+const ZOOM_KEY = "knock_zoom";
 
 /// Sizes the owner set by hand, per layout. Their choice outranks our defaults --
 /// they are looking at the content and we are guessing from its length.
@@ -337,6 +353,10 @@ async function applyWindowLayout(layout: WindowLayout, itemCount = 0) {
       // body in a short window means scrolling past the decision itself.
       case "large":
         return cap(Math.min(1320, availW * 0.86), availH * 0.94);
+      // Side panel: the request keeps its readable column and the panel gets a
+      // real one next to it. Only widens when --view actually carried content.
+      case "split":
+        return cap(Math.min(1680, availW * 0.94), availH * 0.94);
       default:
         return cap(Math.min(1000, availW * 0.72), availH * 0.82);
     }
@@ -420,8 +440,439 @@ function wireTtsHeader(configTts?: boolean) {
   });
 }
 
+// The panel is sandboxed without `allow-same-origin`, so this window cannot
+// touch its document — which also means physical scroll keys (Stream Deck)
+// cannot reach it. Rather than weaken the sandbox, we append a tiny bridge to
+// the embedded document: it scrolls itself on request and reports whether it
+// has anywhere to scroll. Messages are one-way commands with a fixed shape; the
+// panel gets no capability it did not already have over its own scroll position.
+const VIEW_BRIDGE = `
+<script>
+(function () {
+  // Three ways to move through the same document, because the right one depends
+  // on what you are doing: skimming while deciding (scroll), hunting for a
+  // specific part (section), or reading one thing at a time (card).
+  var MODES = ["scroll", "section", "card"];
+  // Seeded by the parent from the last mode used, so the panel opens the way it
+  // was left. Card mode has to build its groups before it can show one.
+  var SEED_MODE = "__SEED__";
+  var mode = SEED_MODE;
+  var cards = [];
+  var at = 0;
+
+  function root() {
+    // The widest element that actually holds the flow — falls back to body.
+    var c = document.querySelector(".page, main, article") || document.body;
+    return c;
+  }
+  function headings() {
+    return [].slice.call(root().querySelectorAll("h1, h2"));
+  }
+
+  // Card mode groups top-level children into chunks that each start at a
+  // heading. Grouping (rather than showing one element at a time) keeps a
+  // section's prose, tables and figures together.
+  function buildCards() {
+    if (cards.length) return;
+    var host = root();
+    var kids = [].slice.call(host.children);
+    var group = [];
+    kids.forEach(function (el) {
+      var startsCard =
+        el.matches("h1, h2") || !!el.querySelector(":scope > h1, :scope > h2");
+      if (startsCard && group.length) {
+        cards.push(group);
+        group = [];
+      }
+      group.push(el);
+    });
+    if (group.length) cards.push(group);
+  }
+  function showCard(i) {
+    at = Math.max(0, Math.min(i, cards.length - 1));
+    cards.forEach(function (group, n) {
+      group.forEach(function (el) {
+        el.style.display = n === at ? "" : "none";
+      });
+    });
+    scrollTo({ top: 0 });
+  }
+  function clearCards() {
+    cards.forEach(function (group) {
+      group.forEach(function (el) {
+        el.style.display = "";
+      });
+    });
+  }
+
+  function step(dir) {
+    if (mode === "card") {
+      buildCards();
+      showCard(at + (dir === "up" ? -1 : 1));
+      return;
+    }
+    if (mode === "section") {
+      var hs = headings();
+      var y = scrollY + 4;
+      var target = null;
+      if (dir === "down") {
+        for (var i = 0; i < hs.length; i++) {
+          if (hs[i].offsetTop > y + 8) { target = hs[i]; break; }
+        }
+      } else {
+        for (var j = hs.length - 1; j >= 0; j--) {
+          if (hs[j].offsetTop < y - 8) { target = hs[j]; break; }
+        }
+      }
+      if (target) scrollTo({ top: target.offsetTop - 12, behavior: "smooth" });
+      else scrollTo({ top: dir === "up" ? 0 : document.body.scrollHeight, behavior: "smooth" });
+      return;
+    }
+    var page = Math.max(120, innerHeight * 0.85);
+    scrollBy({ top: dir === "up" ? -page : page, behavior: "smooth" });
+  }
+
+  function setMode(next) {
+    if (mode === "card" && next !== "card") clearCards();
+    mode = next;
+    if (mode === "card") {
+      cards = [];
+      buildCards();
+      showCard(0);
+    }
+    report();
+  }
+
+  function report() {
+    var d = document.documentElement;
+    parent.postMessage(
+      {
+        __knockView: "state",
+        scrollable: d.scrollHeight > d.clientHeight + 4 || mode === "card",
+        mode: mode,
+        at: mode === "card" ? at + 1 : 0,
+        total: mode === "card" ? cards.length : 0
+      },
+      "*"
+    );
+  }
+
+  // Focus can be inside this document (a click, a scroll) — in which case the
+  // parent window never sees the keydown at all (cross-document events don't
+  // bubble). Zoom has to be requested here too and forwarded, since setZoom()
+  // can only be called from the Tauri-aware parent.
+  addEventListener("keydown", function (e) {
+    if (!e.metaKey && !e.ctrlKey) return;
+    if (e.key === "+" || e.key === "=" || e.code === "NumpadAdd") {
+      e.preventDefault();
+      parent.postMessage({ __knockView: "zoom", delta: 1 }, "*");
+    } else if (e.key === "-" || e.key === "_" || e.code === "NumpadSubtract") {
+      e.preventDefault();
+      parent.postMessage({ __knockView: "zoom", delta: -1 }, "*");
+    } else if (e.key === "0") {
+      e.preventDefault();
+      parent.postMessage({ __knockView: "zoom", delta: 0 }, "*");
+    }
+  });
+
+  addEventListener("message", function (e) {
+    var m = e.data;
+    if (!m || !m.__knockView) return;
+    if (m.__knockView === "scroll") {
+      // raw = move the pixels. Card mode owns short presses; a long press still
+      // has to be able to scroll inside a long card.
+      if (m.raw) {
+        var px = Math.max(80, innerHeight * 0.4);
+        scrollBy({ top: m.dir === "up" ? -px : px, behavior: "auto" });
+      } else {
+        step(m.dir);
+      }
+      report();
+    }
+    if (m.__knockView === "mode") {
+      setMode(MODES[(MODES.indexOf(mode) + 1) % MODES.length]);
+    }
+  });
+  if (mode === "card") {
+    buildCards();
+    showCard(0);
+  }
+  addEventListener("load", report);
+  addEventListener("resize", report);
+  report();
+})();
+<\/script>`;
+
+/// Whether the panel reported that it has room to scroll. Defaults to false so
+/// a panel that never reports (no scripts, load failure) simply opts out.
+let viewScrollable = false;
+
+let viewMode = "scroll";
+
+addEventListener("message", (e) => {
+  const m = (e as MessageEvent).data;
+  if (m && m.__knockView === "zoom") {
+    stepZoom(m.delta as 1 | -1 | 0);
+    return;
+  }
+  if (!m || m.__knockView !== "state") return;
+  viewScrollable = !!m.scrollable;
+  viewMode = m.mode || "scroll";
+  try {
+    localStorage.setItem(VIEW_MODE_KEY, viewMode);
+  } catch {
+    // Non-fatal: we just lose the memory for next time.
+  }
+  const btn = document.getElementById("view-mode");
+  if (btn) {
+    const label =
+      viewMode === "card"
+        ? `카드 ${m.at}/${m.total}`
+        : viewMode === "section"
+          ? "섹션"
+          : "스크롤";
+    btn.textContent = label;
+    btn.title = "이동 방식 바꾸기 (스크롤 → 섹션 → 카드)";
+  }
+});
+
+// Side panel (--view). The daemon reuses one window across requests, so this
+// must also *clear* the panel when the next request carries no view — otherwise
+// a diagram from a previous gate would sit next to an unrelated decision.
+//
+// srcdoc, not src: the content is local and self-contained, and a remote page
+// that sets `frame-ancestors` could not be framed here at all. The iframe has
+// `allow-scripts` without `allow-same-origin`, so scripts inside it run but
+// cannot reach this document, its storage, or the approval controls.
+function applyViewPanel(
+  viewHtml?: string | null,
+  viewUrl?: string | null,
+): boolean {
+  const panel = $("view-panel");
+  const frame = $<HTMLIFrameElement>("view-frame");
+  const handle = $("split-handle");
+  const openBtn = $<HTMLButtonElement>("view-open");
+  const modeBtn = $<HTMLButtonElement>("view-mode");
+  modeBtn.classList.toggle("hidden", !viewHtml);
+  openBtn.classList.toggle("hidden", !viewUrl);
+  openBtn.dataset.url = viewUrl || "";
+  if (!viewHtml) {
+    panel.classList.add("hidden");
+    handle.classList.add("hidden");
+    document.body.classList.remove("split");
+    frame.removeAttribute("srcdoc");
+    viewScrollable = false;
+    return false;
+  }
+  let seed = "scroll";
+  try {
+    const saved = localStorage.getItem(VIEW_MODE_KEY);
+    if (saved === "section" || saved === "card") seed = saved;
+  } catch {
+    // no memory available; the default is fine
+  }
+  frame.srcdoc = viewHtml + VIEW_BRIDGE.replace("__SEED__", seed);
+  panel.classList.remove("hidden");
+  handle.classList.remove("hidden");
+  document.body.classList.add("split");
+  restoreSplit();
+  return true;
+}
+
+// --- Split handle -------------------------------------------------------
+// The right balance depends on the content: a wide diagram wants room, a long
+// request body wants to stay readable. Rather than guess, let the owner drag —
+// and remember it, the same way manual window resizes are remembered.
+
+/// Keep both columns usable no matter how far the drag goes.
+const SPLIT_MIN_PX = 280;
+
+function setSplitLeft(px: number) {
+  const total = document.body.clientWidth;
+  const clamped = Math.max(
+    SPLIT_MIN_PX,
+    Math.min(px, total - SPLIT_MIN_PX - 6),
+  );
+  document.body.style.setProperty("--split-left", `${Math.round(clamped)}px`);
+  try {
+    localStorage.setItem(SPLIT_KEY, String(Math.round(clamped)));
+  } catch {
+    // Non-fatal: we just lose the memory for next time.
+  }
+}
+
+function restoreSplit() {
+  const saved = Number(localStorage.getItem(SPLIT_KEY) || "");
+  if (!Number.isFinite(saved) || saved <= 0) return;
+  setSplitLeft(saved);
+}
+
+// "Open in browser": same document, real browser. Bound once on the static
+// button; the URL travels on the element so re-renders don't stack listeners.
+// Panel navigation keys. These live outside setKey() on purpose: setKey swaps a
+// single handler per view and belongs to the decision UI (1/2/3, Enter). The
+// panel is a second surface in the same window, so it needs its own listener —
+// one that stays quiet while typing feedback, and while no panel is open.
+// ── Zoom ────────────────────────────────────────────────────────────────
+// Cmd/Ctrl +/-/0, like a browser. Zooming the webview (rather than scaling CSS)
+// takes the whole window with it — request body and side panel together — and
+// the panel is a separate document, so a CSS-only approach would miss it.
+const ZOOM_STEPS = [0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
+
+function currentZoom(): number {
+  const saved = Number(localStorage.getItem(ZOOM_KEY) || "");
+  return Number.isFinite(saved) && saved > 0 ? saved : 1;
+}
+
+async function applyZoom(scale: number) {
+  try {
+    await getCurrentWebview().setZoom(scale);
+    localStorage.setItem(ZOOM_KEY, String(scale));
+    invoke("zoom_debug", { msg: `setZoom(${scale}) ok` }).catch(() => {});
+  } catch (err) {
+    invoke("zoom_debug", { msg: `setZoom failed: ${String(err)}` }).catch(() => {});
+  }
+}
+
+function stepZoom(delta: 1 | -1 | 0) {
+  if (delta === 0) return void applyZoom(1);
+  const now = currentZoom();
+  // Nearest step, then move one — so an odd saved value still lands sensibly.
+  let i = ZOOM_STEPS.reduce(
+    (best, v, n) =>
+      Math.abs(v - now) < Math.abs(ZOOM_STEPS[best] - now) ? n : best,
+    0,
+  );
+  i = Math.max(0, Math.min(ZOOM_STEPS.length - 1, i + delta));
+  void applyZoom(ZOOM_STEPS[i]);
+}
+
+function wireZoomKeys() {
+  void applyZoom(currentZoom());
+  window.addEventListener("keydown", (e) => {
+    invoke("zoom_debug", {
+      msg: `key=${e.key} code=${e.code} meta=${e.metaKey} ctrl=${e.ctrlKey}`,
+    }).catch(() => {});
+    if (!e.metaKey && !e.ctrlKey) return;
+    // "=" is the unshifted "+" on most layouts; accept both plus NumpadAdd.
+    if (e.key === "+" || e.key === "=" || e.code === "NumpadAdd") {
+      e.preventDefault();
+      invoke("zoom_debug", { msg: "zoom in requested" }).catch(() => {});
+      return stepZoom(1);
+    }
+    if (e.key === "-" || e.key === "_" || e.code === "NumpadSubtract") {
+      e.preventDefault();
+      invoke("zoom_debug", { msg: "zoom out requested" }).catch(() => {});
+      return stepZoom(-1);
+    }
+    if (e.key === "0") {
+      e.preventDefault();
+      return stepZoom(0);
+    }
+  });
+}
+
+function wireViewKeys() {
+  window.addEventListener("keydown", (e) => {
+    if (!document.body.classList.contains("split")) return;
+    const t = e.target as HTMLElement | null;
+    if (t && (t.tagName === "TEXTAREA" || t.tagName === "INPUT")) return;
+    if (t && t.id === "split-handle") return; // arrows there resize the columns
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+
+    const frame = document.getElementById("view-frame") as HTMLIFrameElement | null;
+    const send = (dir: "up" | "down") => {
+      e.preventDefault();
+      frame?.contentWindow?.postMessage({ __knockView: "scroll", dir }, "*");
+    };
+
+    switch (e.key) {
+      case "]":
+      case "ArrowRight":
+      case "PageDown":
+        return send("down");
+      case "[":
+      case "ArrowLeft":
+      case "PageUp":
+        return send("up");
+      case "v":
+        e.preventDefault();
+        frame?.contentWindow?.postMessage({ __knockView: "mode" }, "*");
+        return;
+    }
+  });
+}
+
+function wireViewMode() {
+  const btn = document.getElementById("view-mode");
+  if (!btn) return;
+  btn.addEventListener("click", () => {
+    const frame = document.getElementById("view-frame") as HTMLIFrameElement | null;
+    frame?.contentWindow?.postMessage({ __knockView: "mode" }, "*");
+  });
+}
+
+function wireViewOpen() {
+  const btn = $<HTMLButtonElement>("view-open");
+  if (!btn) return;
+  btn.addEventListener("click", () => {
+    const url = btn.dataset.url;
+    if (url) invoke("open_url", { url }).catch(() => {});
+  });
+}
+
+function wireSplitHandle() {
+  const handle = $("split-handle");
+  if (!handle) return;
+
+  handle.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    handle.setPointerCapture((e as PointerEvent).pointerId);
+    document.body.classList.add("dragging-split");
+  });
+  handle.addEventListener("pointermove", (e) => {
+    if (!document.body.classList.contains("dragging-split")) return;
+    setSplitLeft((e as PointerEvent).clientX);
+  });
+  const end = (e: Event) => {
+    if (!document.body.classList.contains("dragging-split")) return;
+    document.body.classList.remove("dragging-split");
+    try {
+      handle.releasePointerCapture((e as PointerEvent).pointerId);
+    } catch {
+      // capture may already be gone; nothing to release
+    }
+  };
+  handle.addEventListener("pointerup", end);
+  handle.addEventListener("pointercancel", end);
+
+  // Keyboard: the handle is focusable, so arrows must move it too. A physical
+  // controller or a keyboard-only owner should not need the mouse.
+  handle.addEventListener("keydown", (e) => {
+    const ev = e as KeyboardEvent;
+    if (ev.key !== "ArrowLeft" && ev.key !== "ArrowRight") return;
+    ev.preventDefault();
+    const current =
+      $("content").getBoundingClientRect().width || document.body.clientWidth / 2;
+    setSplitLeft(current + (ev.key === "ArrowLeft" ? -40 : 40));
+  });
+
+  // Double-click restores the default balance.
+  handle.addEventListener("dblclick", () => {
+    document.body.style.removeProperty("--split-left");
+    try {
+      localStorage.removeItem(SPLIT_KEY);
+    } catch {
+      // ignore
+    }
+  });
+}
+
 function setupAnnotate(p: AnnotatePayload) {
-  void applyWindowLayout(p.html.length > 6000 ? "large" : "compact");
+  const hasView = applyViewPanel(p.viewHtml, p.viewUrl);
+  void applyWindowLayout(
+    hasView ? "split" : p.html.length > 6000 ? "large" : "compact",
+  );
   $("badge").textContent = "승인 요청";
   $("title").textContent = p.title;
   $("content").innerHTML = p.html;
@@ -623,6 +1074,7 @@ interface QState {
 }
 
 function setupAsk(p: AskPayload) {
+  applyViewPanel(null, null); // the daemon reuses one window — never carry a panel into another mode
   const badgeEl = $("badge");
   $("title").textContent = p.title;
 
@@ -975,6 +1427,7 @@ function setupAsk(p: AskPayload) {
 
 // =====================================================================
 function setupSettings(p: SettingsPayload) {
+  applyViewPanel(null, null); // the daemon reuses one window — never carry a panel into another mode
   void applyWindowLayout("settings");
   $("badge").textContent = "설정";
   $("title").textContent = "Knock 설정";
@@ -1209,6 +1662,12 @@ async function init() {
   void checkUpdateBanner();
   // Remember whatever size the owner drags the window to, per layout.
   watchManualResize();
+  // Split handle lives on a static element, so bind once here — not per request.
+  wireSplitHandle();
+  wireViewOpen();
+  wireViewMode();
+  wireViewKeys();
+  wireZoomKeys();
   // Daemon first: if a queue command answers, we're the single-window daemon.
   try {
     const q = await invoke<QueuePayload>("daemon_queue");
@@ -1266,8 +1725,8 @@ async function init() {
         },
       );
       // Physical scroll keys (Stream Deck) drive the same body the trackpad does.
-      listen<{ dir: "up" | "down" }>("scroll-request", (e) =>
-        scrollBody(e.payload?.dir === "up" ? "up" : "down"),
+      listen<{ dir: "up" | "down"; raw?: boolean }>("scroll-request", (e) =>
+        scrollBody(e.payload?.dir === "up" ? "up" : "down", !!e.payload?.raw),
       );
       // Event-driven refresh + a slow poll as a backstop for missed events.
       listen("queue-changed", () => void renderDaemon());

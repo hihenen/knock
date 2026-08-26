@@ -261,6 +261,29 @@ ws.on("message", async (raw) => {
     refresh();
     return;
   }
+  // ── Long press on the scroll keys ────────────────────────────────────────
+  // Short press advances a step (a card, a section, a screenful). Held down, the
+  // same key scrolls the panel by pixels and repeats — needed because card mode
+  // claims the short press, and a card taller than the panel would otherwise be
+  // unreachable from the physical keys.
+  const HOLD_MS = 350;
+  const REPEAT_MS = 220;
+
+  if (event === "keyDown") {
+    const meta = keys.get(context);
+    if (!meta) return;
+    if (meta.action !== "scrollup" && meta.action !== "scrolldown") return;
+    const dir = meta.action === "scrollup" ? "up" : "down";
+    // Fires only if the key is still down after HOLD_MS; from then on it repeats
+    // until keyUp clears both timers.
+    meta.holdTimer = setTimeout(() => {
+      meta.held = true;
+      knock.scrollRaw(dir);
+      meta.repeatTimer = setInterval(() => knock.scrollRaw(dir), REPEAT_MS);
+    }, HOLD_MS);
+    return;
+  }
+
   if (event === "keyUp") {
     const meta = keys.get(context);
     if (!meta) return;
@@ -284,8 +307,17 @@ ws.on("message", async (raw) => {
     else if (meta.action === "approve") res = await knock.approve("@1");
     else if (meta.action === "dismiss") res = await knock.dismiss("@1");
     else if (meta.action === "tts") res = await knock.toggleTts();
-    else if (meta.action === "scrollup") res = await knock.scroll("up");
-    else if (meta.action === "scrolldown") res = await knock.scroll("down");
+    else if (meta.action === "scrollup" || meta.action === "scrolldown") {
+      clearTimeout(meta.holdTimer);
+      clearInterval(meta.repeatTimer);
+      meta.holdTimer = meta.repeatTimer = undefined;
+      if (meta.held) {
+        // The hold already did the scrolling; a step here would double-move.
+        meta.held = false;
+        return refresh();
+      }
+      res = await knock.scroll(meta.action === "scrollup" ? "up" : "down");
+    }
     // 대상이 없거나 데몬이 없으면 키에 경고를 띄운다. 아무 반응이 없으면
     // 눌리긴 한 건지 알 수 없다.
     if (!res || res.decision === "unknown") showAlert(context);

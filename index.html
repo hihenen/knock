@@ -35,6 +35,37 @@
     <!-- annotate mode -->
     <main id="content" class="markdown hidden"></main>
 
+    <!-- drag to rebalance request vs panel; arrows work too (see main.ts) -->
+    <div
+      id="split-handle"
+      class="split-handle hidden"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="요청과 패널 너비 조절"
+      tabindex="0"
+    ></div>
+
+    <!-- annotate side panel (--view): sandboxed local HTML, never the decision surface -->
+    <aside id="view-panel" class="view-panel hidden">
+      <div class="view-cap">
+        <span class="view-cap-text">외부 콘텐츠 — 왼쪽 요청과 별개, 승인 버튼 없음</span>
+        <button
+          id="view-mode"
+          class="view-open view-mode hidden"
+          type="button"
+          title="이동 방식 바꾸기 — 스크롤 → 섹션 → 카드 (단축키 v)"
+        >스크롤</button>
+        <button
+          id="view-open"
+          class="view-open hidden"
+          type="button"
+          title="브라우저에서 열기 — 전체 화면 · 찾기 · 인쇄"
+          aria-label="브라우저에서 열기"
+        >↗</button>
+      </div>
+      <iframe id="view-frame" sandbox="allow-scripts" referrerpolicy="no-referrer"></iframe>
+    </aside>
+
     <!-- ask mode -->
     <div id="ask-root" class="ask hidden"></div>
 
