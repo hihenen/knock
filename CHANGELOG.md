@@ -4,6 +4,10 @@ All notable changes to knock are documented here. Versions follow [SemVer](https
 
 ## [Unreleased]
 
+## [0.6.7] - 2026-10-03
+
+- 머지 승인 창 헤더에 "자동 승인" 토글 추가 (`annotate --merge-toggle`). 켜면 `auto_approve_merge` 만 저장하고 이번 요청 결정은 바꾸지 않는다.
+
 ## [0.6.6] - 2026-10-03
 
 - 설정 창과 트레이 메뉴에 "PR 머지 승인을 자동 승인" 토글 추가 (`auto_approve_merge`, 기본 꺼짐).
