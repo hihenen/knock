@@ -554,6 +554,7 @@ body {
   display: inline-flex; align-items: center; gap: 7px;
   cursor: pointer; user-select: none;
 }
+.merge-toggle { margin-left: 0; }
 .td-toggle input { position: absolute; opacity: 0; width: 0; height: 0; }
 .td-switch {
   position: relative; width: 36px; height: 20px; flex: none;

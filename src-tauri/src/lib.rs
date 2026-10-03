@@ -79,6 +79,9 @@ enum Command {
         /// Require Touch ID / Windows Hello to approve (falls back to a button if unavailable).
         #[arg(long)]
         touch_id: bool,
+        /// Show the opt-in auto-approve toggle on this merge approval gate.
+        #[arg(long)]
+        merge_toggle: bool,
         /// URL to open in the browser when the user approves (e.g. a Scalr Apply page,
         /// GitHub PR, ArgoCD app). Makes knock an "action inbox": approve -> jump to the action.
         #[arg(long)]
@@ -595,6 +598,7 @@ enum Mode {
         gate: bool,
         action_url: Option<String>,
         checklist: bool,
+        merge_toggle: bool,
         view_html: Option<String>,
         view_url: Option<String>,
     },
@@ -828,6 +832,7 @@ fn get_payload(state: tauri::State<AppState>) -> Value {
             gate,
             action_url,
             checklist,
+            merge_toggle,
             view_html,
             view_url,
         } => serde_json::json!({
@@ -844,6 +849,8 @@ fn get_payload(state: tauri::State<AppState>) -> Value {
             "configTtsRepeat": config_tts_repeat(),
             "actionUrl": action_url,
             "checklist": checklist,
+            "mergeToggle": *gate && *merge_toggle,
+            "configAutoApproveMerge": config_auto_approve_merge(),
             "viewHtml": view_html,
             "viewUrl": view_url,
         }),
@@ -1252,6 +1259,7 @@ struct DaemonState {
 #[tauri::command]
 fn daemon_queue(state: tauri::State<DaemonState>) -> Value {
     let q = state.queue.lock().unwrap();
+    let auto_approve_merge = config_auto_approve_merge();
     let items: Vec<Value> = q
         .iter()
         .map(|e| {
@@ -1261,13 +1269,17 @@ fn daemon_queue(state: tauri::State<DaemonState>) -> Value {
                 .and_then(|t| t.as_str())
                 .unwrap_or("Knock")
                 .to_string();
+            let mut payload = e.payload.clone();
+            if payload.get("mode").and_then(Value::as_str) == Some("annotate") {
+                payload["configAutoApproveMerge"] = Value::Bool(auto_approve_merge);
+            }
             serde_json::json!({
                 "id": e.id,
                 "kind": e.kind,
                 "title": title,
                 "source": e.source,
                 "createdAt": e.created_at,
-                "payload": e.payload,
+                "payload": payload,
                 "inProgress": e.in_progress,
             })
         })
@@ -2263,6 +2275,8 @@ fn run_hook() {
         "gate": true,
         "touchId": false,
         "configTouchId": config_touch_id(),
+        "mergeToggle": false,
+        "configAutoApproveMerge": config_auto_approve_merge(),
         "configOpenUrl": config_open_url(),
         "configTts": config_tts(),
         "configTtsScope": config_tts_scope(),
@@ -2286,6 +2300,7 @@ fn run_hook() {
             checklist: false,
             view_html: None,
             view_url: None,
+            merge_toggle: false,
         },
         json: false,
         hook: true,
@@ -2317,6 +2332,7 @@ pub fn run() {
             touch_id,
             action_url,
             checklist,
+            merge_toggle,
             view,
         } => {
             // Pre-authorization: a `--gate` annotation (the critical gate) can be
@@ -2388,6 +2404,8 @@ pub fn run() {
                 "configTtsRepeat": config_tts_repeat(),
                 "actionUrl": action_url,
                 "checklist": checklist,
+                "mergeToggle": gate && merge_toggle,
+                "configAutoApproveMerge": config_auto_approve_merge(),
                 "viewHtml": view_html.clone(),
                 "viewUrl": view_url.clone(),
             });
@@ -2399,6 +2417,7 @@ pub fn run() {
                     gate,
                     action_url,
                     checklist,
+                    merge_toggle,
                     view_html,
                     view_url,
                 },
@@ -2514,6 +2533,31 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn annotate_merge_toggle_flag_is_parsed_and_documented() {
+        let enabled = Cli::try_parse_from([
+            "knock",
+            "annotate",
+            "request.md",
+            "--gate",
+            "--merge-toggle",
+        ])
+        .unwrap();
+        match enabled.command {
+            Command::Annotate { merge_toggle, .. } => assert!(merge_toggle),
+            _ => panic!("expected annotate command"),
+        }
+
+        let absent = Cli::try_parse_from(["knock", "annotate", "request.md", "--gate"]).unwrap();
+        match absent.command {
+            Command::Annotate { merge_toggle, .. } => assert!(!merge_toggle),
+            _ => panic!("expected annotate command"),
+        }
+
+        let help = Cli::try_parse_from(["knock", "annotate", "--help"]).unwrap_err();
+        assert!(help.to_string().contains("--merge-toggle"));
     }
 
     #[test]
