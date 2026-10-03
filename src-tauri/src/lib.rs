@@ -13,7 +13,9 @@ use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 use serde_json::Value;
-use tauri::menu::{CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder, PredefinedMenuItem};
+use tauri::menu::{
+    CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder, PredefinedMenuItem,
+};
 use tauri::tray::TrayIconBuilder;
 use tauri::{Emitter, Manager, UserAttentionType, WindowEvent};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
@@ -161,16 +163,31 @@ fn config_path() -> PathBuf {
     PathBuf::from(base).join(".config/knock/config.json")
 }
 
-fn read_config() -> Value {
-    std::fs::read_to_string(config_path())
+fn read_config_at(path: &Path) -> Value {
+    std::fs::read_to_string(path)
         .ok()
         .and_then(|s| serde_json::from_str::<Value>(&s).ok())
         .unwrap_or_else(|| serde_json::json!({}))
 }
 
+fn read_config() -> Value {
+    read_config_at(&config_path())
+}
+
 fn config_touch_id() -> bool {
     read_config()
         .get("touch_id")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+fn config_auto_approve_merge() -> bool {
+    config_auto_approve_merge_at(&config_path())
+}
+
+fn config_auto_approve_merge_at(path: &Path) -> bool {
+    read_config_at(path)
+        .get("auto_approve_merge")
         .and_then(|v| v.as_bool())
         .unwrap_or(false)
 }
@@ -597,6 +614,8 @@ struct AppState {
     touch_id: bool,
 }
 
+struct AutoApproveMergeMenu(CheckMenuItem<tauri::Wry>);
+
 /// Sandbox flags forced onto every `<iframe>` in gate content.
 ///
 /// `allow-scripts` is deliberate: gate bodies embed generated diagrams that need
@@ -843,6 +862,7 @@ fn get_payload(state: tauri::State<AppState>) -> Value {
         Mode::Settings => serde_json::json!({
             "mode": "settings",
             "touchId": config_touch_id(),
+            "autoApproveMerge": config_auto_approve_merge(),
             "tts": config_tts(),
             "ttsStyle": config_tts_style(),
             "ttsScope": config_tts_scope(),
@@ -872,6 +892,35 @@ fn set_config_touch_id(enabled: bool) -> Result<(), String> {
 #[tauri::command]
 fn save_touch_id(enabled: bool) -> Result<(), String> {
     set_config_touch_id(enabled)
+}
+
+fn set_config_auto_approve_merge_at(path: &Path, enabled: bool) -> Result<(), String> {
+    let mut cfg = read_config_at(path);
+    cfg["auto_approve_merge"] = serde_json::json!(enabled);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(
+        path,
+        serde_json::to_string_pretty(&cfg).unwrap_or_else(|_| "{}".to_string()),
+    )
+    .map_err(|e| e.to_string())
+}
+
+fn set_config_auto_approve_merge(enabled: bool) -> Result<(), String> {
+    set_config_auto_approve_merge_at(&config_path(), enabled)
+}
+
+#[tauri::command]
+fn save_auto_approve_merge(
+    enabled: bool,
+    app: tauri::AppHandle,
+    menu: tauri::State<AutoApproveMergeMenu>,
+) -> Result<(), String> {
+    set_config_auto_approve_merge(enabled)?;
+    let _ = menu.0.set_checked(enabled);
+    let _ = app.emit("auto-approve-merge-changed", enabled);
+    Ok(())
 }
 
 /// Persist the auto-open action URL toggle.
@@ -1332,6 +1381,7 @@ fn run_daemon() {
             save_pasted_image,
             touch_id_approve,
             save_touch_id,
+            save_auto_approve_merge,
             save_open_url,
             save_tts,
             save_tts_opt,
@@ -1657,6 +1707,11 @@ fn run_daemon() {
             let touch_toggle = CheckMenuItemBuilder::with_id("touch_id", "Use Touch ID by default")
                 .checked(config_touch_id())
                 .build(app)?;
+            let auto_approve_merge_toggle =
+                CheckMenuItemBuilder::with_id("auto_approve_merge", "🔀 PR 머지 승인을 자동 승인")
+                    .checked(config_auto_approve_merge())
+                    .build(app)?;
+            let _ = app.manage(AutoApproveMergeMenu(auto_approve_merge_toggle.clone()));
             let open_url_toggle =
                 CheckMenuItemBuilder::with_id("open_url", "Open action URL on approve")
                     .checked(config_open_url())
@@ -1671,6 +1726,7 @@ fn run_daemon() {
                     &info,
                     &sep,
                     &touch_toggle,
+                    &auto_approve_merge_toggle,
                     &open_url_toggle,
                     &tts_toggle,
                     &sep2,
@@ -1678,6 +1734,7 @@ fn run_daemon() {
                 ])
                 .build()?;
             let toggle_handle = touch_toggle.clone();
+            let auto_approve_merge_handle = auto_approve_merge_toggle.clone();
             let open_url_handle = open_url_toggle.clone();
             let tts_handle = tts_toggle.clone();
             if let Some(icon) = app.default_window_icon().cloned() {
@@ -1695,6 +1752,19 @@ fn run_daemon() {
                             let next = !config_touch_id();
                             let _ = set_config_touch_id(next);
                             let _ = toggle_handle.set_checked(next);
+                        }
+                        "auto_approve_merge" => {
+                            let next = !config_auto_approve_merge();
+                            let saved = set_config_auto_approve_merge(next).is_ok();
+                            let checked = if saved {
+                                next
+                            } else {
+                                config_auto_approve_merge()
+                            };
+                            let _ = auto_approve_merge_handle.set_checked(checked);
+                            if saved {
+                                let _ = app.emit("auto-approve-merge-changed", next);
+                            }
                         }
                         "open_url" => {
                             let next = !config_open_url();
@@ -1736,6 +1806,7 @@ fn launch(state: AppState) {
             save_pasted_image,
             touch_id_approve,
             save_touch_id,
+            save_auto_approve_merge,
             save_open_url,
             save_tts,
             save_tts_opt,
@@ -1793,6 +1864,11 @@ fn launch(state: AppState) {
             let touch_toggle = CheckMenuItemBuilder::with_id("touch_id", "Use Touch ID by default")
                 .checked(config_touch_id())
                 .build(app)?;
+            let auto_approve_merge_toggle =
+                CheckMenuItemBuilder::with_id("auto_approve_merge", "🔀 PR 머지 승인을 자동 승인")
+                    .checked(config_auto_approve_merge())
+                    .build(app)?;
+            let _ = app.manage(AutoApproveMergeMenu(auto_approve_merge_toggle.clone()));
             let open_url_toggle =
                 CheckMenuItemBuilder::with_id("open_url", "Open action URL on approve")
                     .checked(config_open_url())
@@ -1807,6 +1883,7 @@ fn launch(state: AppState) {
                     &info,
                     &sep,
                     &touch_toggle,
+                    &auto_approve_merge_toggle,
                     &open_url_toggle,
                     &tts_toggle,
                     &sep2,
@@ -1814,6 +1891,7 @@ fn launch(state: AppState) {
                 ])
                 .build()?;
             let toggle_handle = touch_toggle.clone();
+            let auto_approve_merge_handle = auto_approve_merge_toggle.clone();
             let open_url_handle = open_url_toggle.clone();
             let tts_handle = tts_toggle.clone();
             if let Some(icon) = app.default_window_icon().cloned() {
@@ -1831,6 +1909,19 @@ fn launch(state: AppState) {
                             let next = !config_touch_id();
                             let _ = set_config_touch_id(next);
                             let _ = toggle_handle.set_checked(next);
+                        }
+                        "auto_approve_merge" => {
+                            let next = !config_auto_approve_merge();
+                            let saved = set_config_auto_approve_merge(next).is_ok();
+                            let checked = if saved {
+                                next
+                            } else {
+                                config_auto_approve_merge()
+                            };
+                            let _ = auto_approve_merge_handle.set_checked(checked);
+                            if saved {
+                                let _ = app.emit("auto-approve-merge-changed", next);
+                            }
                         }
                         "open_url" => {
                             let next = !config_open_url();
@@ -2416,6 +2507,53 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct TempConfigDir(PathBuf);
+
+    impl Drop for TempConfigDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn auto_approve_merge_config_reads_and_writes_boolean_without_dropping_other_keys() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "knock-auto-approve-merge-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let _temp = TempConfigDir(dir.clone());
+        let path = dir.join("config.json");
+        std::fs::write(&path, r#"{"touch_id":true,"other_key":{"preserve":42}}"#).unwrap();
+
+        assert!(!config_auto_approve_merge_at(&path));
+
+        set_config_auto_approve_merge_at(&path, true).unwrap();
+        assert!(config_auto_approve_merge_at(&path));
+        let stored = read_config_at(&path);
+        assert_eq!(stored["auto_approve_merge"], Value::Bool(true));
+        assert_eq!(stored["other_key"], serde_json::json!({"preserve": 42}));
+        assert_eq!(stored["touch_id"], Value::Bool(true));
+
+        let mut string_value = stored;
+        string_value["auto_approve_merge"] = Value::String("true".to_string());
+        std::fs::write(&path, serde_json::to_string(&string_value).unwrap()).unwrap();
+        assert!(!config_auto_approve_merge_at(&path));
+
+        set_config_auto_approve_merge_at(&path, false).unwrap();
+        assert!(!config_auto_approve_merge_at(&path));
+        assert_eq!(
+            read_config_at(&path)["auto_approve_merge"],
+            Value::Bool(false)
+        );
+    }
 
     #[test]
     fn grant_is_single_use_then_empty() {

@@ -49,6 +49,7 @@ interface AskPayload {
 interface SettingsPayload {
   mode: "settings";
   touchId: boolean;
+  autoApproveMerge: boolean;
   tts?: boolean;
   ttsStyle?: string;
   ttsScope?: string;
@@ -1438,6 +1439,26 @@ function setupSettings(p: SettingsPayload) {
   toggle.checked = p.touchId;
   toggle.addEventListener("change", () => {
     invoke("save_touch_id", { enabled: toggle.checked });
+  });
+
+  const autoApproveMergeToggle = $<HTMLInputElement>("auto-approve-merge-toggle");
+  autoApproveMergeToggle.checked = p.autoApproveMerge;
+  autoApproveMergeToggle.addEventListener("change", async () => {
+    const enabled = autoApproveMergeToggle.checked;
+    autoApproveMergeToggle.disabled = true;
+    try {
+      await invoke("save_auto_approve_merge", { enabled });
+    } catch (error) {
+      console.error("auto_approve_merge 설정 저장 실패:", error);
+      autoApproveMergeToggle.checked = !enabled;
+    } finally {
+      autoApproveMergeToggle.disabled = false;
+    }
+  });
+  void listen<boolean>("auto-approve-merge-changed", (event) => {
+    if (autoApproveMergeToggle.isConnected) {
+      autoApproveMergeToggle.checked = event.payload;
+    }
   });
 
   const ttsToggle = $<HTMLInputElement>("tts-toggle");
