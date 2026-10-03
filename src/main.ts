@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { setupMergeToggle } from "./merge-toggle";
 
 interface AnnotatePayload {
   mode: "annotate";
@@ -24,6 +25,8 @@ interface AnnotatePayload {
   viewUrl?: string | null;
   /// 이 요청이 이미 승인돼 진행 중인가 (큐에서 다시 열었을 때 채워진다).
   inProgress?: boolean;
+  mergeToggle?: boolean;
+  configAutoApproveMerge?: boolean;
 }
 interface AskOption {
   label: string;
@@ -382,6 +385,7 @@ async function applyWindowLayout(layout: WindowLayout, itemCount = 0) {
 // binds fresh ones. getElementById still resolves (clone keeps ids).
 function dropStaleListeners() {
   for (const id of [
+    "merge-toggle-wrap", // merge auto-approve (header)
     "td-toggle-wrap", // td-toggle (header)
     "tts-toggle-wrap", // tts-header-toggle (header)
     "annotate-footer", // opt-approve, opt-cancel, feedback, send + focusin
@@ -410,6 +414,7 @@ function resetView() {
     document.getElementById(id)?.classList.add("hidden");
   }
   document.getElementById("td-toggle-wrap")?.classList.add("hidden");
+  document.getElementById("merge-toggle-wrap")?.classList.add("hidden");
   document.getElementById("tts-toggle-wrap")?.classList.add("hidden");
   const ar = document.getElementById("ask-root");
   if (ar) ar.innerHTML = "";
@@ -882,6 +887,12 @@ function setupAnnotate(p: AnnotatePayload) {
   decorateEmbeds($("content"));
   $("annotate-footer").classList.remove("hidden");
   wireTtsHeader(p.configTts);
+  setupMergeToggle(
+    p,
+    $("merge-toggle-wrap"),
+    $<HTMLInputElement>("merge-toggle"),
+    invoke,
+  );
 
   const optApprove = $("opt-approve");
   const optCancel = $("opt-cancel");
