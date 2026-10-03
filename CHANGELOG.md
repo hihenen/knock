@@ -4,6 +4,10 @@ All notable changes to knock are documented here. Versions follow [SemVer](https
 
 ## [Unreleased]
 
+## [0.6.6] - 2026-10-03
+
+- 설정 창과 트레이 메뉴에 "PR 머지 승인을 자동 승인" 토글 추가 (`auto_approve_merge`, 기본 꺼짐).
+
 ## [0.6.5] - 2026-08-27
 
 ### Added
