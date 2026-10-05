@@ -4,6 +4,10 @@ All notable changes to knock are documented here. Versions follow [SemVer](https
 
 ## [Unreleased]
 
+## [0.6.8] - 2026-10-06
+
+- 머지 자동 승인에 4시간 자동 만료 추가. 켜면 `auto_approve_merge_expires_at` 을 함께 저장하고, 만료되면 설정 창·헤더·트레이가 꺼진 상태로 보인다. 구형 설정(true 만)은 꺼진 것으로 본다.
+
 ## [0.6.7] - 2026-10-03
 
 - 머지 승인 창 헤더에 "자동 승인" 토글 추가 (`annotate --merge-toggle`). 켜면 `auto_approve_merge` 만 저장하고 이번 요청 결정은 바꾸지 않는다.
