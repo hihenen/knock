@@ -2,7 +2,12 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { setupMergeToggle } from "./merge-toggle";
+import {
+  autoApproveMergeStatusText,
+  autoApproveMergeTitle,
+  setupMergeToggle,
+  type AutoApproveMergeStatus,
+} from "./merge-toggle";
 
 interface AnnotatePayload {
   mode: "annotate";
@@ -27,6 +32,7 @@ interface AnnotatePayload {
   inProgress?: boolean;
   mergeToggle?: boolean;
   configAutoApproveMerge?: boolean;
+  configAutoApproveMergeExpiresAt?: number | null;
 }
 interface AskOption {
   label: string;
@@ -53,6 +59,7 @@ interface SettingsPayload {
   mode: "settings";
   touchId: boolean;
   autoApproveMerge: boolean;
+  autoApproveMergeExpiresAt?: number | null;
   tts?: boolean;
   ttsStyle?: string;
   ttsScope?: string;
@@ -887,12 +894,23 @@ function setupAnnotate(p: AnnotatePayload) {
   decorateEmbeds($("content"));
   $("annotate-footer").classList.remove("hidden");
   wireTtsHeader(p.configTts);
+  const mergeToggleWrap = $("merge-toggle-wrap");
+  const mergeToggle = $<HTMLInputElement>("merge-toggle");
   setupMergeToggle(
     p,
-    $("merge-toggle-wrap"),
-    $<HTMLInputElement>("merge-toggle"),
+    mergeToggleWrap,
+    mergeToggle,
     invoke,
   );
+  void listen<AutoApproveMergeStatus>("auto-approve-merge-changed", (event) => {
+    if (mergeToggleWrap.isConnected) {
+      mergeToggle.checked = event.payload.enabled;
+      mergeToggleWrap.title = autoApproveMergeTitle(
+        event.payload.enabled,
+        event.payload.expiresAt,
+      );
+    }
+  });
 
   const optApprove = $("opt-approve");
   const optCancel = $("opt-cancel");
@@ -1453,22 +1471,33 @@ function setupSettings(p: SettingsPayload) {
   });
 
   const autoApproveMergeToggle = $<HTMLInputElement>("auto-approve-merge-toggle");
-  autoApproveMergeToggle.checked = p.autoApproveMerge;
+  const autoApproveMergeDescription = $("auto-approve-merge-desc");
+  let autoApproveMergeStatus: AutoApproveMergeStatus = {
+    enabled: p.autoApproveMerge,
+    expiresAt: p.autoApproveMergeExpiresAt ?? null,
+  };
+  const renderAutoApproveMergeStatus = (status: AutoApproveMergeStatus) => {
+    autoApproveMergeStatus = status;
+    autoApproveMergeToggle.checked = status.enabled;
+    autoApproveMergeDescription.textContent = `${autoApproveMergeStatusText(status.enabled, status.expiresAt)} 다른 위험 명령이 섞이면 창이 뜹니다. 켜져 있는 동안 머지마다 하던 검토가 생략됩니다.`;
+  };
+  renderAutoApproveMergeStatus(autoApproveMergeStatus);
   autoApproveMergeToggle.addEventListener("change", async () => {
     const enabled = autoApproveMergeToggle.checked;
     autoApproveMergeToggle.disabled = true;
     try {
-      await invoke("save_auto_approve_merge", { enabled });
+      const status = await invoke<AutoApproveMergeStatus>("save_auto_approve_merge", { enabled });
+      renderAutoApproveMergeStatus(status);
     } catch (error) {
       console.error("auto_approve_merge 설정 저장 실패:", error);
-      autoApproveMergeToggle.checked = !enabled;
+      renderAutoApproveMergeStatus(autoApproveMergeStatus);
     } finally {
       autoApproveMergeToggle.disabled = false;
     }
   });
-  void listen<boolean>("auto-approve-merge-changed", (event) => {
+  void listen<AutoApproveMergeStatus>("auto-approve-merge-changed", (event) => {
     if (autoApproveMergeToggle.isConnected) {
-      autoApproveMergeToggle.checked = event.payload;
+      renderAutoApproveMergeStatus(event.payload);
     }
   });
 

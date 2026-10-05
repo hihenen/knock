@@ -16,7 +16,7 @@ use serde_json::Value;
 use tauri::menu::{
     CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder, PredefinedMenuItem,
 };
-use tauri::tray::TrayIconBuilder;
+use tauri::tray::{TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, Manager, UserAttentionType, WindowEvent};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 use tauri_plugin_notification::NotificationExt;
@@ -185,14 +185,43 @@ fn config_touch_id() -> bool {
 }
 
 fn config_auto_approve_merge() -> bool {
-    config_auto_approve_merge_at(&config_path())
+    config_auto_approve_merge_at(&config_path(), epoch_seconds())
 }
 
-fn config_auto_approve_merge_at(path: &Path) -> bool {
-    read_config_at(path)
+const AUTO_APPROVE_MERGE_TTL_SECS: u64 = 14_400;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AutoApproveMergeState {
+    enabled: bool,
+    expires_at: Option<u64>,
+}
+
+fn auto_approve_merge_state_at(config: &Value, now: u64) -> AutoApproveMergeState {
+    let requested = config
         .get("auto_approve_merge")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let expires_at = config
+        .get("auto_approve_merge_expires_at")
+        .and_then(Value::as_u64)
+        .filter(|expires_at| *expires_at > now);
+    let enabled = requested && expires_at.is_some();
+    AutoApproveMergeState {
+        enabled,
+        expires_at: if enabled { expires_at } else { None },
+    }
+}
+
+fn config_auto_approve_merge_state_at(path: &Path, now: u64) -> AutoApproveMergeState {
+    auto_approve_merge_state_at(&read_config_at(path), now)
+}
+
+fn config_auto_approve_merge_state() -> AutoApproveMergeState {
+    config_auto_approve_merge_state_at(&config_path(), epoch_seconds())
+}
+
+fn config_auto_approve_merge_at(path: &Path, now: u64) -> bool {
+    config_auto_approve_merge_state_at(path, now).enabled
 }
 
 /// 물리 컨트롤러(Stream Deck 등)로 들어온 승인에서 Touch ID 를 건너뛸지.
@@ -825,6 +854,7 @@ fn finish(decision: &str, feedback: Option<&str>, state: &AppState) -> ! {
 
 #[tauri::command]
 fn get_payload(state: tauri::State<AppState>) -> Value {
+    let auto_approve_merge = config_auto_approve_merge_state();
     match &state.mode {
         Mode::Annotate {
             html,
@@ -850,7 +880,8 @@ fn get_payload(state: tauri::State<AppState>) -> Value {
             "actionUrl": action_url,
             "checklist": checklist,
             "mergeToggle": *gate && *merge_toggle,
-            "configAutoApproveMerge": config_auto_approve_merge(),
+            "configAutoApproveMerge": auto_approve_merge.enabled,
+            "configAutoApproveMergeExpiresAt": auto_approve_merge.expires_at,
             "viewHtml": view_html,
             "viewUrl": view_url,
         }),
@@ -869,7 +900,8 @@ fn get_payload(state: tauri::State<AppState>) -> Value {
         Mode::Settings => serde_json::json!({
             "mode": "settings",
             "touchId": config_touch_id(),
-            "autoApproveMerge": config_auto_approve_merge(),
+            "autoApproveMerge": auto_approve_merge.enabled,
+            "autoApproveMergeExpiresAt": auto_approve_merge.expires_at,
             "tts": config_tts(),
             "ttsStyle": config_tts_style(),
             "ttsScope": config_tts_scope(),
@@ -883,14 +915,17 @@ fn get_payload(state: tauri::State<AppState>) -> Value {
 
 /// Persist the Touch ID requirement toggle to the config file.
 fn set_config_touch_id(enabled: bool) -> Result<(), String> {
-    let mut cfg = read_config();
+    set_config_touch_id_at(&config_path(), enabled)
+}
+
+fn set_config_touch_id_at(path: &Path, enabled: bool) -> Result<(), String> {
+    let mut cfg = read_config_at(path);
     cfg["touch_id"] = serde_json::json!(enabled);
-    let path = config_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     std::fs::write(
-        &path,
+        path,
         serde_json::to_string_pretty(&cfg).unwrap_or_else(|_| "{}".to_string()),
     )
     .map_err(|e| e.to_string())
@@ -901,9 +936,20 @@ fn save_touch_id(enabled: bool) -> Result<(), String> {
     set_config_touch_id(enabled)
 }
 
-fn set_config_auto_approve_merge_at(path: &Path, enabled: bool) -> Result<(), String> {
+fn set_config_auto_approve_merge_at(path: &Path, enabled: bool, now: u64) -> Result<(), String> {
     let mut cfg = read_config_at(path);
-    cfg["auto_approve_merge"] = serde_json::json!(enabled);
+    let cfg = cfg
+        .as_object_mut()
+        .ok_or_else(|| "설정 파일이 JSON 객체가 아닙니다".to_string())?;
+    cfg.insert("auto_approve_merge".to_string(), serde_json::json!(enabled));
+    if enabled {
+        cfg.insert(
+            "auto_approve_merge_expires_at".to_string(),
+            serde_json::json!(now.saturating_add(AUTO_APPROVE_MERGE_TTL_SECS)),
+        );
+    } else {
+        cfg.remove("auto_approve_merge_expires_at");
+    }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -915,7 +961,11 @@ fn set_config_auto_approve_merge_at(path: &Path, enabled: bool) -> Result<(), St
 }
 
 fn set_config_auto_approve_merge(enabled: bool) -> Result<(), String> {
-    set_config_auto_approve_merge_at(&config_path(), enabled)
+    set_config_auto_approve_merge_for_path(&config_path(), enabled)
+}
+
+fn set_config_auto_approve_merge_for_path(path: &Path, enabled: bool) -> Result<(), String> {
+    set_config_auto_approve_merge_at(path, enabled, epoch_seconds())
 }
 
 #[tauri::command]
@@ -923,11 +973,13 @@ fn save_auto_approve_merge(
     enabled: bool,
     app: tauri::AppHandle,
     menu: tauri::State<AutoApproveMergeMenu>,
-) -> Result<(), String> {
+) -> Result<Value, String> {
     set_config_auto_approve_merge(enabled)?;
-    let _ = menu.0.set_checked(enabled);
-    let _ = app.emit("auto-approve-merge-changed", enabled);
-    Ok(())
+    let state = config_auto_approve_merge_state();
+    let _ = menu.0.set_checked(state.enabled);
+    let status = serde_json::json!({ "enabled": state.enabled, "expiresAt": state.expires_at });
+    let _ = app.emit("auto-approve-merge-changed", status.clone());
+    Ok(status)
 }
 
 /// Persist the auto-open action URL toggle.
@@ -1259,7 +1311,7 @@ struct DaemonState {
 #[tauri::command]
 fn daemon_queue(state: tauri::State<DaemonState>) -> Value {
     let q = state.queue.lock().unwrap();
-    let auto_approve_merge = config_auto_approve_merge();
+    let auto_approve_merge = config_auto_approve_merge_state();
     let items: Vec<Value> = q
         .iter()
         .map(|e| {
@@ -1271,7 +1323,9 @@ fn daemon_queue(state: tauri::State<DaemonState>) -> Value {
                 .to_string();
             let mut payload = e.payload.clone();
             if payload.get("mode").and_then(Value::as_str) == Some("annotate") {
-                payload["configAutoApproveMerge"] = Value::Bool(auto_approve_merge);
+                payload["configAutoApproveMerge"] = Value::Bool(auto_approve_merge.enabled);
+                payload["configAutoApproveMergeExpiresAt"] =
+                    serde_json::json!(auto_approve_merge.expires_at);
             }
             serde_json::json!({
                 "id": e.id,
@@ -1747,6 +1801,7 @@ fn run_daemon() {
                 .build()?;
             let toggle_handle = touch_toggle.clone();
             let auto_approve_merge_handle = auto_approve_merge_toggle.clone();
+            let auto_approve_merge_refresh_handle = auto_approve_merge_toggle.clone();
             let open_url_handle = open_url_toggle.clone();
             let tts_handle = tts_toggle.clone();
             if let Some(icon) = app.default_window_icon().cloned() {
@@ -1755,6 +1810,12 @@ fn run_daemon() {
                     .tooltip("Knock daemon")
                     .menu(&menu)
                     .show_menu_on_left_click(true)
+                    .on_tray_icon_event(move |_tray, event| {
+                        if matches!(event, TrayIconEvent::Click { .. }) {
+                            let _ = auto_approve_merge_refresh_handle
+                                .set_checked(config_auto_approve_merge());
+                        }
+                    })
                     .on_menu_event(move |app, event| match event.id().as_ref() {
                         "quit" => {
                             ipc::cleanup();
@@ -1768,14 +1829,13 @@ fn run_daemon() {
                         "auto_approve_merge" => {
                             let next = !config_auto_approve_merge();
                             let saved = set_config_auto_approve_merge(next).is_ok();
-                            let checked = if saved {
-                                next
-                            } else {
-                                config_auto_approve_merge()
-                            };
-                            let _ = auto_approve_merge_handle.set_checked(checked);
+                            let state = config_auto_approve_merge_state();
+                            let _ = auto_approve_merge_handle.set_checked(state.enabled);
                             if saved {
-                                let _ = app.emit("auto-approve-merge-changed", next);
+                                let _ = app.emit(
+                                    "auto-approve-merge-changed",
+                                    serde_json::json!({ "enabled": state.enabled, "expiresAt": state.expires_at }),
+                                );
                             }
                         }
                         "open_url" => {
@@ -1904,6 +1964,7 @@ fn launch(state: AppState) {
                 .build()?;
             let toggle_handle = touch_toggle.clone();
             let auto_approve_merge_handle = auto_approve_merge_toggle.clone();
+            let auto_approve_merge_refresh_handle = auto_approve_merge_toggle.clone();
             let open_url_handle = open_url_toggle.clone();
             let tts_handle = tts_toggle.clone();
             if let Some(icon) = app.default_window_icon().cloned() {
@@ -1912,6 +1973,12 @@ fn launch(state: AppState) {
                     .tooltip("Knock — 응답 대기 중")
                     .menu(&menu)
                     .show_menu_on_left_click(true)
+                    .on_tray_icon_event(move |_tray, event| {
+                        if matches!(event, TrayIconEvent::Click { .. }) {
+                            let _ = auto_approve_merge_refresh_handle
+                                .set_checked(config_auto_approve_merge());
+                        }
+                    })
                     .on_menu_event(move |app, event| match event.id().as_ref() {
                         "quit" => {
                             let state = app.state::<AppState>();
@@ -1925,14 +1992,13 @@ fn launch(state: AppState) {
                         "auto_approve_merge" => {
                             let next = !config_auto_approve_merge();
                             let saved = set_config_auto_approve_merge(next).is_ok();
-                            let checked = if saved {
-                                next
-                            } else {
-                                config_auto_approve_merge()
-                            };
-                            let _ = auto_approve_merge_handle.set_checked(checked);
+                            let state = config_auto_approve_merge_state();
+                            let _ = auto_approve_merge_handle.set_checked(state.enabled);
                             if saved {
-                                let _ = app.emit("auto-approve-merge-changed", next);
+                                let _ = app.emit(
+                                    "auto-approve-merge-changed",
+                                    serde_json::json!({ "enabled": state.enabled, "expiresAt": state.expires_at }),
+                                );
                             }
                         }
                         "open_url" => {
@@ -2390,6 +2456,7 @@ pub fn run() {
                     .ok()
                     .map(|abs| format!("file://{}", abs.to_string_lossy()))
             });
+            let auto_approve_merge = config_auto_approve_merge_state();
             let inner = serde_json::json!({
                 "mode": "annotate",
                 "html": html.clone(),
@@ -2405,7 +2472,8 @@ pub fn run() {
                 "actionUrl": action_url,
                 "checklist": checklist,
                 "mergeToggle": gate && merge_toggle,
-                "configAutoApproveMerge": config_auto_approve_merge(),
+                "configAutoApproveMerge": auto_approve_merge.enabled,
+                "configAutoApproveMergeExpiresAt": auto_approve_merge.expires_at,
                 "viewHtml": view_html.clone(),
                 "viewUrl": view_url.clone(),
             });
@@ -2535,6 +2603,22 @@ mod tests {
         }
     }
 
+    fn temporary_config_path() -> (TempConfigDir, PathBuf) {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "knock-auto-approve-merge-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        (TempConfigDir(dir), path)
+    }
+
     #[test]
     fn annotate_merge_toggle_flag_is_parsed_and_documented() {
         let enabled = Cli::try_parse_from([
@@ -2561,42 +2645,191 @@ mod tests {
     }
 
     #[test]
-    fn auto_approve_merge_config_reads_and_writes_boolean_without_dropping_other_keys() {
-        use std::time::{SystemTime, UNIX_EPOCH};
+    fn auto_approve_merge_is_enabled_before_expiry() {
+        let (_temp, path) = temporary_config_path();
+        let now = 1_000;
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "auto_approve_merge": true,
+                "auto_approve_merge_expires_at": now + 1,
+            })
+            .to_string(),
+        )
+        .unwrap();
 
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!(
-            "knock-auto-approve-merge-{}-{nonce}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let _temp = TempConfigDir(dir.clone());
-        let path = dir.join("config.json");
-        std::fs::write(&path, r#"{"touch_id":true,"other_key":{"preserve":42}}"#).unwrap();
+        assert!(config_auto_approve_merge_at(&path, now));
+    }
 
-        assert!(!config_auto_approve_merge_at(&path));
+    #[test]
+    fn auto_approve_merge_is_disabled_at_expiry() {
+        let (_temp, path) = temporary_config_path();
+        let now = 1_000;
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "auto_approve_merge": true,
+                "auto_approve_merge_expires_at": now,
+            })
+            .to_string(),
+        )
+        .unwrap();
 
-        set_config_auto_approve_merge_at(&path, true).unwrap();
-        assert!(config_auto_approve_merge_at(&path));
+        assert!(!config_auto_approve_merge_at(&path, now));
+    }
+
+    #[test]
+    fn auto_approve_merge_is_disabled_after_expiry() {
+        let (_temp, path) = temporary_config_path();
+        let now = 1_000;
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "auto_approve_merge": true,
+                "auto_approve_merge_expires_at": now - 1,
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        assert!(!config_auto_approve_merge_at(&path, now));
+    }
+
+    #[test]
+    fn auto_approve_merge_requires_an_expiry_key() {
+        let (_temp, path) = temporary_config_path();
+        std::fs::write(&path, r#"{"auto_approve_merge":true}"#).unwrap();
+
+        assert!(!config_auto_approve_merge_at(&path, 1_000));
+    }
+
+    #[test]
+    fn auto_approve_merge_rejects_non_unsigned_integer_expiry_values() {
+        let (_temp, path) = temporary_config_path();
+        let now = 1_000;
+        for expires_at in [
+            Value::String("2000".to_string()),
+            serde_json::json!(2_000.0),
+            serde_json::json!(-1),
+            Value::Null,
+        ] {
+            std::fs::write(
+                &path,
+                serde_json::json!({
+                    "auto_approve_merge": true,
+                    "auto_approve_merge_expires_at": expires_at,
+                })
+                .to_string(),
+            )
+            .unwrap();
+            assert!(!config_auto_approve_merge_at(&path, now));
+        }
+    }
+
+    #[test]
+    fn auto_approve_merge_requires_a_true_boolean_even_with_a_valid_future_expiry() {
+        let (_temp, path) = temporary_config_path();
+        let now = 1_000;
+        let valid_expiry = now + 1;
+        let invalid_flags = [
+            Some(Value::Bool(false)),
+            Some(Value::String("true".to_string())),
+            Some(Value::Null),
+            None,
+        ];
+
+        for flag in invalid_flags {
+            let mut config = serde_json::json!({
+                "auto_approve_merge_expires_at": valid_expiry,
+            });
+            let object = config.as_object_mut().unwrap();
+            if let Some(flag) = flag {
+                object.insert("auto_approve_merge".to_string(), flag);
+            }
+            std::fs::write(&path, config.to_string()).unwrap();
+            assert!(!config_auto_approve_merge_at(&path, now));
+        }
+    }
+
+    #[test]
+    fn auto_approve_merge_fails_closed_for_malformed_or_missing_config_files() {
+        let (_temp, path) = temporary_config_path();
+        std::fs::write(&path, "not json").unwrap();
+        assert!(!config_auto_approve_merge_at(&path, 1_000));
+
+        std::fs::remove_file(&path).unwrap();
+        assert!(!config_auto_approve_merge_at(&path, 1_000));
+    }
+
+    #[test]
+    fn enabling_auto_approve_merge_saves_a_four_hour_expiry_and_preserves_other_keys() {
+        let (_temp, path) = temporary_config_path();
+        std::fs::write(
+            &path,
+            r#"{"touch_id":true,"other_key":{"preserve":42},"auto_approve_merge_expires_at":7}"#,
+        )
+        .unwrap();
+        let now = 1_000;
+
+        set_config_auto_approve_merge_at(&path, true, now).unwrap();
+
         let stored = read_config_at(&path);
         assert_eq!(stored["auto_approve_merge"], Value::Bool(true));
+        assert_eq!(
+            stored["auto_approve_merge_expires_at"],
+            serde_json::json!(15_400)
+        );
         assert_eq!(stored["other_key"], serde_json::json!({"preserve": 42}));
         assert_eq!(stored["touch_id"], Value::Bool(true));
+        assert!(config_auto_approve_merge_at(&path, now));
+    }
 
-        let mut string_value = stored;
-        string_value["auto_approve_merge"] = Value::String("true".to_string());
-        std::fs::write(&path, serde_json::to_string(&string_value).unwrap()).unwrap();
-        assert!(!config_auto_approve_merge_at(&path));
+    #[test]
+    fn disabling_auto_approve_merge_removes_expiry_and_preserves_other_keys() {
+        let (_temp, path) = temporary_config_path();
+        std::fs::write(
+            &path,
+            r#"{"auto_approve_merge":true,"auto_approve_merge_expires_at":2000,"touch_id":true}"#,
+        )
+        .unwrap();
 
-        set_config_auto_approve_merge_at(&path, false).unwrap();
-        assert!(!config_auto_approve_merge_at(&path));
-        assert_eq!(
-            read_config_at(&path)["auto_approve_merge"],
-            Value::Bool(false)
-        );
+        set_config_auto_approve_merge_at(&path, false, 1_000).unwrap();
+
+        let stored = read_config_at(&path);
+        assert_eq!(stored["auto_approve_merge"], Value::Bool(false));
+        assert!(stored.get("auto_approve_merge_expires_at").is_none());
+        assert_eq!(stored["touch_id"], Value::Bool(true));
+    }
+
+    #[test]
+    fn saving_touch_id_through_its_operational_path_preserves_merge_expiry() {
+        let (_temp, path) = temporary_config_path();
+        let now = 1_000;
+        set_config_auto_approve_merge_at(&path, true, now).unwrap();
+        let expected_expiry = read_config_at(&path)["auto_approve_merge_expires_at"].clone();
+
+        set_config_touch_id_at(&path, false).unwrap();
+
+        let stored = read_config_at(&path);
+        assert_eq!(stored["auto_approve_merge_expires_at"], expected_expiry);
+        assert_eq!(stored["touch_id"], Value::Bool(false));
+        assert!(config_auto_approve_merge_at(&path, now));
+    }
+
+    #[test]
+    fn path_scoped_production_save_uses_the_real_clock_without_changing_home() {
+        let (_temp, path) = temporary_config_path();
+        let before = epoch_seconds();
+
+        set_config_auto_approve_merge_for_path(&path, true).unwrap();
+
+        let after = epoch_seconds();
+        let expires_at = read_config_at(&path)["auto_approve_merge_expires_at"]
+            .as_u64()
+            .unwrap();
+        assert!(expires_at >= before + AUTO_APPROVE_MERGE_TTL_SECS);
+        assert!(expires_at <= after + AUTO_APPROVE_MERGE_TTL_SECS);
+        assert!(config_auto_approve_merge_at(&path, after));
     }
 
     #[test]
