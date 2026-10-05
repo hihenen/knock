@@ -33,6 +33,12 @@ class FakeToggle {
 }
 
 describe("merge approval header toggle", () => {
+  const expiresAt = 1_800_000_000;
+  const localTime = (value: number) => {
+    const date = new Date(value * 1000);
+    return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+  };
+
   it("stays hidden when the CLI flag is absent", () => {
     const wrap = new FakeWrap();
     const toggle = new FakeToggle();
@@ -68,7 +74,12 @@ describe("merge approval header toggle", () => {
     const toggle = new FakeToggle();
 
     setupMergeToggle(
-      { gate: true, mergeToggle: true, configAutoApproveMerge: true },
+      {
+        gate: true,
+        mergeToggle: true,
+        configAutoApproveMerge: true,
+        configAutoApproveMergeExpiresAt: expiresAt,
+      },
       wrap,
       toggle,
       async () => {},
@@ -76,9 +87,25 @@ describe("merge approval header toggle", () => {
 
     expect(wrap.classList.names.has("hidden")).toBe(false);
     expect(wrap.title).toBe(
-      "켜면 이후 머지 승인 창 없이 바로 실행됩니다. 다른 위험 명령이 섞이면 창이 뜹니다.",
+      `자동 승인은 ${localTime(expiresAt)} 까지 유지됩니다. 다른 위험 명령이 섞이면 창이 뜹니다.`,
     );
     expect(toggle.checked).toBe(true);
+  });
+
+  it("explains that enabling the toggle lasts four hours", () => {
+    const wrap = new FakeWrap();
+    const toggle = new FakeToggle();
+
+    setupMergeToggle(
+      { gate: true, mergeToggle: true, configAutoApproveMerge: false },
+      wrap,
+      toggle,
+      async () => {},
+    );
+
+    expect(wrap.title).toBe(
+      "켜면 4시간 동안 유지됩니다. 다른 위험 명령이 섞이면 창이 뜹니다.",
+    );
   });
 
   it("only saves the toggle value without resolving the approval", async () => {
@@ -130,5 +157,25 @@ describe("merge approval header toggle", () => {
 
     expect(toggle.checked).toBe(false);
     expect(toggle.disabled).toBe(false);
+  });
+
+  it("updates the header title from the saved expiry returned by Rust", async () => {
+    const wrap = new FakeWrap();
+    const toggle = new FakeToggle();
+
+    setupMergeToggle(
+      { gate: true, mergeToggle: true, configAutoApproveMerge: false },
+      wrap,
+      toggle,
+      async () => ({ enabled: true, expiresAt }),
+    );
+
+    toggle.checked = true;
+    await toggle.change();
+
+    expect(toggle.checked).toBe(true);
+    expect(wrap.title).toBe(
+      `자동 승인은 ${localTime(expiresAt)} 까지 유지됩니다. 다른 위험 명령이 섞이면 창이 뜹니다.`,
+    );
   });
 });
