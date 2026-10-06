@@ -4,6 +4,10 @@ All notable changes to knock are documented here. Versions follow [SemVer](https
 
 ## [Unreleased]
 
+## [0.6.9] - 2026-10-07
+
+- 머지 자동 승인 토글이 일반 권한 확인 창을 포함한 모든 게이트 창의 헤더에 보인다. 토글은 머지 자동 승인만 바꾸고 해당 요청의 결정은 바꾸지 않는다.
+
 ## [0.6.8] - 2026-10-06
 
 - 머지 자동 승인에 4시간 자동 만료 추가. 켜면 `auto_approve_merge_expires_at` 을 함께 저장하고, 만료되면 설정 창·헤더·트레이가 꺼진 상태로 보인다. 구형 설정(true 만)은 꺼진 것으로 본다.
