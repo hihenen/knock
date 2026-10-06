@@ -627,6 +627,8 @@ enum Mode {
         gate: bool,
         action_url: Option<String>,
         checklist: bool,
+        // 옛 훅이 넘기는 --merge-toggle 호환용. 토글은 모든 게이트 창에 보여서 값은 읽지 않는다.
+        #[allow(dead_code)]
         merge_toggle: bool,
         view_html: Option<String>,
         view_url: Option<String>,
@@ -852,6 +854,12 @@ fn finish(decision: &str, feedback: Option<&str>, state: &AppState) -> ! {
     }
 }
 
+/// 머지 자동 승인 헤더 토글을 보일지. 모든 게이트 창에서 보이고, 게이트가 아닌 창(일반 메모)에서는 숨긴다.
+/// `--merge-toggle` 플래그는 옛 훅과의 호환용이라 판정에 쓰지 않는다.
+fn merge_toggle_visible(gate: bool) -> bool {
+    gate
+}
+
 #[tauri::command]
 fn get_payload(state: tauri::State<AppState>) -> Value {
     let auto_approve_merge = config_auto_approve_merge_state();
@@ -862,7 +870,8 @@ fn get_payload(state: tauri::State<AppState>) -> Value {
             gate,
             action_url,
             checklist,
-            merge_toggle,
+            // --merge-toggle 은 옛 훅과의 호환용으로만 받는다. 게이트 창이면 항상 보이므로 값은 쓰지 않는다.
+            merge_toggle: _,
             view_html,
             view_url,
         } => serde_json::json!({
@@ -879,7 +888,9 @@ fn get_payload(state: tauri::State<AppState>) -> Value {
             "configTtsRepeat": config_tts_repeat(),
             "actionUrl": action_url,
             "checklist": checklist,
-            "mergeToggle": *gate && *merge_toggle,
+            // 머지 자동 승인 토글은 모든 게이트 창(일반 권한 창 포함)의 헤더에 보인다.
+            // 이 토글은 머지 자동 승인(auto_approve_merge) 하나만 바꾸고 해당 요청의 결정은 바꾸지 않는다.
+            "mergeToggle": merge_toggle_visible(*gate),
             "configAutoApproveMerge": auto_approve_merge.enabled,
             "configAutoApproveMergeExpiresAt": auto_approve_merge.expires_at,
             "viewHtml": view_html,
@@ -2659,6 +2670,12 @@ mod tests {
         .unwrap();
 
         assert!(config_auto_approve_merge_at(&path, now));
+    }
+
+    #[test]
+    fn merge_toggle_is_visible_on_every_gate_window() {
+        assert!(merge_toggle_visible(true));
+        assert!(!merge_toggle_visible(false));
     }
 
     #[test]
