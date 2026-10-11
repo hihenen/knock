@@ -1471,6 +1471,7 @@ function setupSettings(p: SettingsPayload) {
   });
 
   const autoApproveMergeToggle = $<HTMLInputElement>("auto-approve-merge-toggle");
+  const autoApproveMergeDuration = $<HTMLSelectElement>("auto-approve-merge-duration");
   const autoApproveMergeDescription = $("auto-approve-merge-desc");
   let autoApproveMergeStatus: AutoApproveMergeStatus = {
     enabled: p.autoApproveMerge,
@@ -1479,20 +1480,36 @@ function setupSettings(p: SettingsPayload) {
   const renderAutoApproveMergeStatus = (status: AutoApproveMergeStatus) => {
     autoApproveMergeStatus = status;
     autoApproveMergeToggle.checked = status.enabled;
-    autoApproveMergeDescription.textContent = `${autoApproveMergeStatusText(status.enabled, status.expiresAt)} 다른 위험 명령이 섞이면 창이 뜹니다. 켜져 있는 동안 머지마다 하던 검토가 생략됩니다.`;
+    const offStatusText = {
+      four_hours: "켜면 4시간 동안 유지됩니다.",
+      eight_hours: "켜면 8시간 동안 유지됩니다.",
+      midnight: "켜면 오늘 자정(로컬 시간)에 만료됩니다.",
+    }[autoApproveMergeDuration.value] ?? "켜면 4시간 동안 유지됩니다.";
+    const statusText = status.enabled
+      ? autoApproveMergeStatusText(true, status.expiresAt)
+      : offStatusText;
+    autoApproveMergeDescription.textContent = `${statusText} 다른 위험 명령이 섞이면 창이 뜹니다. 켜져 있는 동안 머지마다 하던 검토가 생략됩니다.`;
   };
   renderAutoApproveMergeStatus(autoApproveMergeStatus);
+  autoApproveMergeDuration.addEventListener("change", () => {
+    if (!autoApproveMergeStatus.enabled) renderAutoApproveMergeStatus(autoApproveMergeStatus);
+  });
   autoApproveMergeToggle.addEventListener("change", async () => {
     const enabled = autoApproveMergeToggle.checked;
     autoApproveMergeToggle.disabled = true;
+    autoApproveMergeDuration.disabled = true;
     try {
-      const status = await invoke<AutoApproveMergeStatus>("save_auto_approve_merge", { enabled });
+      const status = await invoke<AutoApproveMergeStatus>("save_auto_approve_merge", {
+        enabled,
+        duration: autoApproveMergeDuration.value,
+      });
       renderAutoApproveMergeStatus(status);
     } catch (error) {
       console.error("auto_approve_merge 설정 저장 실패:", error);
       renderAutoApproveMergeStatus(autoApproveMergeStatus);
     } finally {
       autoApproveMergeToggle.disabled = false;
+      autoApproveMergeDuration.disabled = false;
     }
   });
   void listen<AutoApproveMergeStatus>("auto-approve-merge-changed", (event) => {

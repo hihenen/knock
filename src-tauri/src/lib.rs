@@ -8,6 +8,7 @@
 //                                                             payload on stdin, shows the
 //                                                             plan, returns allow/deny JSON.
 
+use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -177,6 +178,46 @@ fn read_config() -> Value {
     read_config_at(&config_path())
 }
 
+fn update_config_at<F>(path: &Path, update: F) -> Result<(), String>
+where
+    F: FnOnce(&mut serde_json::Map<String, Value>) -> Result<(), String>,
+{
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| "설정 파일 경로에 파일명이 없습니다".to_string())?;
+    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    let lock_path = parent.join(format!("{}.lock", file_name.to_string_lossy()));
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(lock_path)
+        .map_err(|e| e.to_string())?;
+    lock.lock().map_err(|e| e.to_string())?;
+
+    let mut config = match std::fs::read_to_string(path) {
+        Ok(contents) => serde_json::from_str::<Value>(&contents).map_err(|e| e.to_string())?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+        Err(error) => return Err(error.to_string()),
+    };
+    let object = config
+        .as_object_mut()
+        .ok_or_else(|| "설정 파일이 JSON 객체가 아닙니다".to_string())?;
+    update(object)?;
+
+    let contents = serde_json::to_vec_pretty(&config).map_err(|e| e.to_string())?;
+    let mut temp = tempfile::NamedTempFile::new_in(parent).map_err(|e| e.to_string())?;
+    temp.write_all(&contents).map_err(|e| e.to_string())?;
+    temp.as_file().sync_all().map_err(|e| e.to_string())?;
+    temp.persist(path).map_err(|e| e.error.to_string())?;
+    Ok(())
+}
+
 fn config_touch_id() -> bool {
     read_config()
         .get("touch_id")
@@ -189,6 +230,8 @@ fn config_auto_approve_merge() -> bool {
 }
 
 const AUTO_APPROVE_MERGE_TTL_SECS: u64 = 14_400;
+const AUTO_APPROVE_MERGE_EIGHT_HOURS_SECS: u64 = 28_800;
+const AUTO_APPROVE_MERGE_MAX_TTL_SECS: u64 = 86_400;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct AutoApproveMergeState {
@@ -930,16 +973,10 @@ fn set_config_touch_id(enabled: bool) -> Result<(), String> {
 }
 
 fn set_config_touch_id_at(path: &Path, enabled: bool) -> Result<(), String> {
-    let mut cfg = read_config_at(path);
-    cfg["touch_id"] = serde_json::json!(enabled);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    std::fs::write(
-        path,
-        serde_json::to_string_pretty(&cfg).unwrap_or_else(|_| "{}".to_string()),
-    )
-    .map_err(|e| e.to_string())
+    update_config_at(path, |config| {
+        config.insert("touch_id".to_string(), serde_json::json!(enabled));
+        Ok(())
+    })
 }
 
 #[tauri::command]
@@ -947,28 +984,65 @@ fn save_touch_id(enabled: bool) -> Result<(), String> {
     set_config_touch_id(enabled)
 }
 
+fn next_local_midnight_epoch(now: u64) -> Result<u64, String> {
+    use chrono::TimeZone;
+
+    let timestamp = i64::try_from(now).map_err(|e| e.to_string())?;
+    let local_now = chrono::DateTime::<chrono::Utc>::from_timestamp(timestamp, 0)
+        .ok_or_else(|| "현재 시각을 변환할 수 없습니다".to_string())?
+        .with_timezone(&chrono::Local);
+    let midnight = local_now
+        .date_naive()
+        .succ_opt()
+        .and_then(|date| date.and_hms_opt(0, 0, 0))
+        .ok_or_else(|| "다음 로컬 자정을 계산할 수 없습니다".to_string())?;
+    let expiry: u64 = chrono::Local
+        .from_local_datetime(&midnight)
+        .earliest()
+        .ok_or_else(|| "다음 로컬 자정이 존재하지 않습니다".to_string())?
+        .timestamp()
+        .try_into()
+        .map_err(|e: std::num::TryFromIntError| e.to_string())?;
+    if expiry <= now {
+        return Err("다음 로컬 자정이 현재 시각보다 빠릅니다".to_string());
+    }
+    Ok(expiry.min(now.saturating_add(AUTO_APPROVE_MERGE_MAX_TTL_SECS)))
+}
+
+fn auto_approve_merge_expiry(now: u64, duration: Option<&str>) -> Result<u64, String> {
+    match duration.unwrap_or("four_hours") {
+        "four_hours" => Ok(now.saturating_add(AUTO_APPROVE_MERGE_TTL_SECS)),
+        "eight_hours" => Ok(now.saturating_add(AUTO_APPROVE_MERGE_EIGHT_HOURS_SECS)),
+        "midnight" => next_local_midnight_epoch(now),
+        other => Err(format!("unknown auto-approve merge duration: {other}")),
+    }
+}
+
 fn set_config_auto_approve_merge_at(path: &Path, enabled: bool, now: u64) -> Result<(), String> {
-    let mut cfg = read_config_at(path);
-    let cfg = cfg
-        .as_object_mut()
-        .ok_or_else(|| "설정 파일이 JSON 객체가 아닙니다".to_string())?;
-    cfg.insert("auto_approve_merge".to_string(), serde_json::json!(enabled));
-    if enabled {
-        cfg.insert(
-            "auto_approve_merge_expires_at".to_string(),
-            serde_json::json!(now.saturating_add(AUTO_APPROVE_MERGE_TTL_SECS)),
-        );
-    } else {
-        cfg.remove("auto_approve_merge_expires_at");
-    }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    std::fs::write(
-        path,
-        serde_json::to_string_pretty(&cfg).unwrap_or_else(|_| "{}".to_string()),
-    )
-    .map_err(|e| e.to_string())
+    set_config_auto_approve_merge_with_duration_at(path, enabled, now, None)
+}
+
+fn set_config_auto_approve_merge_with_duration_at(
+    path: &Path,
+    enabled: bool,
+    now: u64,
+    duration: Option<&str>,
+) -> Result<(), String> {
+    let expires_at = enabled
+        .then(|| auto_approve_merge_expiry(now, duration))
+        .transpose()?;
+    update_config_at(path, |config| {
+        config.insert("auto_approve_merge".to_string(), serde_json::json!(enabled));
+        if let Some(expires_at) = expires_at {
+            config.insert(
+                "auto_approve_merge_expires_at".to_string(),
+                serde_json::json!(expires_at),
+            );
+        } else {
+            config.remove("auto_approve_merge_expires_at");
+        }
+        Ok(())
+    })
 }
 
 fn set_config_auto_approve_merge(enabled: bool) -> Result<(), String> {
@@ -982,10 +1056,16 @@ fn set_config_auto_approve_merge_for_path(path: &Path, enabled: bool) -> Result<
 #[tauri::command]
 fn save_auto_approve_merge(
     enabled: bool,
+    duration: Option<String>,
     app: tauri::AppHandle,
     menu: tauri::State<AutoApproveMergeMenu>,
 ) -> Result<Value, String> {
-    set_config_auto_approve_merge(enabled)?;
+    set_config_auto_approve_merge_with_duration_at(
+        &config_path(),
+        enabled,
+        epoch_seconds(),
+        duration.as_deref(),
+    )?;
     let state = config_auto_approve_merge_state();
     let _ = menu.0.set_checked(state.enabled);
     let status = serde_json::json!({ "enabled": state.enabled, "expiresAt": state.expires_at });
@@ -995,17 +1075,10 @@ fn save_auto_approve_merge(
 
 /// Persist the auto-open action URL toggle.
 fn set_config_open_url(enabled: bool) -> Result<(), String> {
-    let mut cfg = read_config();
-    cfg["open_url"] = serde_json::json!(enabled);
-    let path = config_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    std::fs::write(
-        &path,
-        serde_json::to_string_pretty(&cfg).unwrap_or_else(|_| "{}".to_string()),
-    )
-    .map_err(|e| e.to_string())
+    update_config_at(&config_path(), |config| {
+        config.insert("open_url".to_string(), serde_json::json!(enabled));
+        Ok(())
+    })
 }
 
 #[tauri::command]
@@ -1015,17 +1088,10 @@ fn save_open_url(enabled: bool) -> Result<(), String> {
 
 /// Persist the speak-alerts (TTS) toggle.
 fn set_config_tts(enabled: bool) -> Result<(), String> {
-    let mut cfg = read_config();
-    cfg["tts"] = serde_json::json!(enabled);
-    let path = config_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    std::fs::write(
-        &path,
-        serde_json::to_string_pretty(&cfg).unwrap_or_else(|_| "{}".to_string()),
-    )
-    .map_err(|e| e.to_string())
+    update_config_at(&config_path(), |config| {
+        config.insert("tts".to_string(), serde_json::json!(enabled));
+        Ok(())
+    })
 }
 
 #[tauri::command]
@@ -1047,32 +1113,18 @@ fn save_tts_opt(key: String, value: Value) -> Result<(), String> {
     if !ALLOWED.contains(&key.as_str()) {
         return Err(format!("disallowed tts key: {key}"));
     }
-    let mut cfg = read_config();
-    cfg[key] = value;
-    let path = config_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    std::fs::write(
-        &path,
-        serde_json::to_string_pretty(&cfg).unwrap_or_else(|_| "{}".to_string()),
-    )
-    .map_err(|e| e.to_string())
+    update_config_at(&config_path(), |config| {
+        config.insert(key, value);
+        Ok(())
+    })
 }
 
 /// Persist the TTS engine selector ("os" | "supertonic").
 fn set_config_tts_engine(engine: &str) -> Result<(), String> {
-    let mut cfg = read_config();
-    cfg["tts_engine"] = serde_json::json!(engine);
-    let path = config_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    std::fs::write(
-        &path,
-        serde_json::to_string_pretty(&cfg).unwrap_or_else(|_| "{}".to_string()),
-    )
-    .map_err(|e| e.to_string())
+    update_config_at(&config_path(), |config| {
+        config.insert("tts_engine".to_string(), serde_json::json!(engine));
+        Ok(())
+    })
 }
 
 /// `knock tts status` — report engine + sidecar readiness.
@@ -2831,6 +2883,120 @@ mod tests {
         assert_eq!(stored["auto_approve_merge_expires_at"], expected_expiry);
         assert_eq!(stored["touch_id"], Value::Bool(false));
         assert!(config_auto_approve_merge_at(&path, now));
+    }
+
+    #[test]
+    fn config_writes_reject_malformed_and_non_object_files_without_changing_them() {
+        let (_temp, path) = temporary_config_path();
+        for original in ["{broken", "[1, 2]"] {
+            std::fs::write(&path, original).unwrap();
+
+            assert!(set_config_touch_id_at(&path, true).is_err());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        }
+    }
+
+    #[test]
+    fn concurrent_config_updates_preserve_every_key() {
+        use std::sync::{Arc, Barrier};
+
+        const WORKERS: usize = 6;
+        const WRITES: usize = 30;
+        let (_temp, path) = temporary_config_path();
+        update_config_at(&path, |_| Ok(())).unwrap();
+
+        let barrier = Arc::new(Barrier::new(WORKERS));
+        let workers: Vec<_> = (0..WORKERS)
+            .map(|worker| {
+                let barrier = Arc::clone(&barrier);
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    for iteration in 0..WRITES {
+                        barrier.wait();
+                        update_config_at(&path, |config| {
+                            config.insert(format!("worker_{worker}"), serde_json::json!(iteration));
+                            Ok(())
+                        })
+                        .unwrap();
+                    }
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        let stored = read_config_at(&path);
+        for worker in 0..WORKERS {
+            assert_eq!(stored[format!("worker_{worker}")], WRITES - 1);
+        }
+    }
+
+    #[test]
+    fn enabling_auto_approve_merge_with_eight_hours_saves_integer_epoch_seconds() {
+        let (_temp, path) = temporary_config_path();
+        let now = 1_000;
+
+        set_config_auto_approve_merge_with_duration_at(&path, true, now, Some("eight_hours"))
+            .unwrap();
+
+        assert_eq!(
+            read_config_at(&path)["auto_approve_merge_expires_at"].as_u64(),
+            Some(now + AUTO_APPROVE_MERGE_EIGHT_HOURS_SECS)
+        );
+    }
+
+    #[test]
+    fn enabling_auto_approve_merge_until_midnight_uses_next_local_midnight_within_24_hours() {
+        let (_temp, path) = temporary_config_path();
+        let now = 1_750_000_000;
+        let local_now = chrono::DateTime::<chrono::Utc>::from_timestamp(now as i64, 0)
+            .unwrap()
+            .with_timezone(&chrono::Local);
+        let expected_date = local_now.date_naive().succ_opt().unwrap();
+
+        set_config_auto_approve_merge_with_duration_at(&path, true, now, Some("midnight")).unwrap();
+
+        let expiry = read_config_at(&path)["auto_approve_merge_expires_at"]
+            .as_u64()
+            .unwrap();
+        let local_expiry = chrono::DateTime::<chrono::Utc>::from_timestamp(expiry as i64, 0)
+            .unwrap()
+            .with_timezone(&chrono::Local);
+        assert_eq!(local_expiry.date_naive(), expected_date);
+        assert_eq!(local_expiry.format("%H:%M:%S").to_string(), "00:00:00");
+        assert!(expiry > now);
+        assert!(expiry - now <= AUTO_APPROVE_MERGE_MAX_TTL_SECS);
+    }
+
+    #[test]
+    fn local_midnight_expiry_is_capped_at_24_hours() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-01T04:01:00Z")
+            .unwrap()
+            .timestamp()
+            .try_into()
+            .unwrap();
+
+        let expiry = next_local_midnight_epoch(now).unwrap();
+
+        assert!(expiry <= now + AUTO_APPROVE_MERGE_MAX_TTL_SECS);
+    }
+
+    #[test]
+    fn enabling_auto_approve_merge_rejects_unknown_duration_without_writing() {
+        let (_temp, path) = temporary_config_path();
+        std::fs::write(&path, r#"{"preserve":true}"#).unwrap();
+
+        assert!(set_config_auto_approve_merge_with_duration_at(
+            &path,
+            true,
+            1_000,
+            Some("forever")
+        )
+        .is_err());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            r#"{"preserve":true}"#
+        );
     }
 
     #[test]

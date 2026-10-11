@@ -95,6 +95,17 @@
           </div>
         </div>
       </label>
+      <div class="tts-options" id="auto-approve-merge-options">
+        <label class="tts-opt-row">
+          <span class="tts-opt-label">자동 승인 기간</span>
+          <select id="auto-approve-merge-duration">
+            <option value="four_hours">4시간 (기본)</option>
+            <option value="eight_hours">8시간</option>
+            <option value="midnight">오늘 자정까지 (로컬 시간)</option>
+          </select>
+        </label>
+        <div class="toggle-desc">기간 선택은 다음에 켤 때 적용됩니다. 현재 켜진 승인의 만료 시각은 바뀌지 않습니다.</div>
+      </div>
       <label class="toggle-row">
         <input type="checkbox" id="tts-toggle" />
         <div class="toggle-text">
