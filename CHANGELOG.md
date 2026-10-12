@@ -4,6 +4,12 @@ All notable changes to knock are documented here. Versions follow [SemVer](https
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-10-12
+
+### Changed
+- Slack 승인 DM 을 Block Kit 구조로: 제목 → 요청자·시각 → 실행 명령 코드 블록 → 본문(마크다운→mrkdwn) → AI 판단 → 버튼
+- 맥 창: 본문 맨 위 ⏱/👤/▶️ 메타 줄을 각각 줄바꿈
+
 ## [0.7.0] - 2026-10-12
 
 ### Added
