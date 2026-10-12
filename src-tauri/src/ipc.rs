@@ -140,10 +140,16 @@ pub struct Incoming {
 
 /// Holds the client's stream so the daemon can write a single decision back.
 pub struct Responder {
-    stream: Stream,
+    stream: Box<dyn Write + Send>,
 }
 
 impl Responder {
+    pub fn new(writer: impl Write + Send + 'static) -> Self {
+        Self {
+            stream: Box::new(writer),
+        }
+    }
+
     /// Send the decision JSON back to the waiting client and close.
     pub fn reply(mut self, decision: &Value) {
         let line = decision.to_string() + "\n";
@@ -194,7 +200,7 @@ where
         };
         on_request(Incoming {
             payload,
-            responder: Responder { stream },
+            responder: Responder::new(stream),
         });
     }
     Ok(())

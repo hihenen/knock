@@ -216,6 +216,16 @@ cp -R com.knock.controller.sdPlugin \
 
 ## 알아두면 좋아요
 
+### Slack에서 PR·Scalr 승인하기
+
+Slack 앱을 만들 때 [Slack 앱 설정](https://api.slack.com/apps)에서 **Create New App → From an app manifest**를 고르고 [docs/slack-app-manifest.yaml](docs/slack-app-manifest.yaml)을 가져옵니다. Socket Mode와 Interactivity를 켜고 앱을 워크스페이스에 설치하세요. Bot Token Scopes는 **chat:write**, **im:write**이며, **App-Level Token**을 만들 때 **connections:write**를 부여합니다.
+
+knock settings의 Slack 승인에서 owner의 Slack 사용자 ID(**U…**)와 **xapp-** App-Level Token, 설치 후 발급된 **xoxb-** Bot Token을 입력하고 **Slack 사용**을 켠 뒤 설정을 저장하고 연결을 시험합니다. 토큰은 저장 후 다시 표시되지 않고 macOS 키체인(**knock-slack**)에 보관됩니다. Slack 연동은 기본으로 꺼져 있습니다.
+
+PR 머지 게이트에는 반드시 **--gate --remote-approve**를 함께 붙이세요 (예: **knock annotate pr.md --gate --remote-approve --json**). **--action-url** 호스트가 허용 목록과 정확히 일치하거나 **\*.example.com** 접미 wildcard에 맞으면 대상이 되며, 기본 목록은 **fnfcorp.scalr.io**이고 설정에서 쉼표나 줄바꿈으로 추가할 수 있습니다. Slack과 맥 창의 결정은 먼저 도착한 한 번만 처리되며, Scalr Apply는 Scalr UI에서 한 번 더 승인해야 합니다. **--touch-id**가 필요한 승인과 **ask** 질문은 Slack으로 보내지 않습니다. 다른 게이트도 맥 창에서 처리되지만, 호출자가 플래그를 잘못 붙이거나 호스트 범위를 넓히면 대상이 커질 수 있으므로 그 범위 지정은 호출자 책임입니다.
+
+Slack 승인 버튼은 설정된 owner 사용자만 처리할 수 있습니다. Slack 연결이나 API가 실패해도 로컬 승인 창은 계속 동작하며 자동 승인되지 않습니다. Slack에는 본문을 마스킹해 최대 1,500자까지만 보냅니다. 전체 내용은 맥 창에서 확인하세요. 승인용 로컬 소켓 명령은 추가되지 않습니다.
+
 **창 크기는 기억됩니다.** 화면 크기에 맞춰 열리고, 손으로 조절하면 다음부터 그 크기로 엽니다. 내용이 긴 승인 창은 세로로 거의 꽉 차게 열려요.
 
 **여러 세션이 물어도 창은 하나입니다.** 대기 목록에 쌓이고, 각 항목에 프로젝트·호출한 곳·기다린 시간이 보입니다. 숫자키로 바로 열 수 있어요.
