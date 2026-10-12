@@ -190,6 +190,14 @@ fn unwrap_code_fence(value: &str) -> String {
     rest.join("\n").trim().into()
 }
 
+fn unwrap_inline_code(value: &str) -> String {
+    static CODE: OnceLock<Regex> = OnceLock::new();
+    CODE.get_or_init(|| Regex::new(r"`([^`]+)`").unwrap())
+        .replace_all(value.trim(), "$1")
+        .trim()
+        .into()
+}
+
 fn extract_body_sections(masked_body: &str) -> ExtractedBody {
     let lines: Vec<&str> = masked_body.lines().collect();
     let mut result = ExtractedBody::default();
@@ -243,7 +251,17 @@ fn extract_body_sections(masked_body: &str) -> ExtractedBody {
         }
     }
     if !execution_lines.is_empty() {
-        result.execution = Some(unwrap_code_fence(&execution_lines.join("\n")));
+        let execution = execution_lines.join("\n");
+        let fenced = execution
+            .lines()
+            .next()
+            .is_some_and(|line| fence_marker(line).is_some());
+        let execution = unwrap_code_fence(&execution);
+        result.execution = Some(if fenced {
+            execution
+        } else {
+            unwrap_inline_code(&execution)
+        });
     }
 
     let mut remaining = Vec::new();
@@ -322,7 +340,40 @@ fn format_inline_mrkdwn(text: &str) -> String {
 fn format_plain_inline(text: &str, bold: &Regex, underscore_bold: &Regex) -> String {
     let escaped = escape_mrkdwn_text(text);
     let text = bold.replace_all(&escaped, "*$1*");
-    underscore_bold.replace_all(&text, "_${1}_").into_owned()
+    let text = underscore_bold.replace_all(&text, "_${1}_");
+    insert_emphasis_boundaries(&text)
+}
+
+fn insert_emphasis_boundaries(text: &str) -> String {
+    static MARKER: OnceLock<Regex> = OnceLock::new();
+    let marker = MARKER.get_or_init(|| {
+        Regex::new(r"(?:\*[^*\s](?:[^*]*?[^*\s])?\*|_[^_\s](?:[^_]*?[^_\s])?_|~~[^~\s](?:[^~]*?[^~\s])?~~|~[^~\s](?:[^~]*?[^~\s])?~)").unwrap()
+    });
+    let is_word = |ch: char| ch.is_alphanumeric() || ch == '_';
+    let mut boundaries = Vec::new();
+    for found in marker.find_iter(text) {
+        if text[..found.start()]
+            .chars()
+            .next_back()
+            .is_some_and(is_word)
+        {
+            boundaries.push(found.start());
+        }
+        if text[found.end()..].chars().next().is_some_and(is_word) {
+            boundaries.push(found.end());
+        }
+    }
+    boundaries.sort_unstable();
+    boundaries.dedup();
+    let mut output = String::with_capacity(text.len() + boundaries.len() * 3);
+    let mut start = 0;
+    for boundary in boundaries {
+        output.push_str(&text[start..boundary]);
+        output.push('\u{200b}');
+        start = boundary;
+    }
+    output.push_str(&text[start..]);
+    output
 }
 
 fn is_table_separator(line: &str) -> bool {
@@ -389,7 +440,15 @@ fn markdown_to_mrkdwn(markdown: &str) -> String {
 
         let converted = markdown_heading(line)
             .map(|(_, title)| format!("*{}*", format_inline_mrkdwn(title)))
-            .unwrap_or_else(|| format_inline_mrkdwn(line));
+            .unwrap_or_else(|| {
+                let indentation = &line[..line.len() - line.trim_start().len()];
+                let item = &line[indentation.len()..];
+                if let Some(item) = item.strip_prefix("- ").or_else(|| item.strip_prefix("* ")) {
+                    format!("{indentation}• {}", format_inline_mrkdwn(item))
+                } else {
+                    format_inline_mrkdwn(line)
+                }
+            });
         output.push_str(&format!("{converted}\n"));
         index += 1;
     }
@@ -542,6 +601,20 @@ fn resolution_summary(decision: &str) -> &'static str {
     resolution_parts(decision).2
 }
 
+fn processed_title(text: &str, decision: &str) -> Option<String> {
+    let title = ["⚠️", "⚠", ":warning:"]
+        .into_iter()
+        .find_map(|prefix| text.strip_prefix(prefix))?
+        .trim_start()
+        .strip_suffix("승인이 필요합니다")?
+        .trim();
+    if title.is_empty() {
+        return None;
+    }
+    let (emoji, verb, _) = resolution_parts(decision);
+    Some(format!("{emoji} {title} {verb}됨"))
+}
+
 pub(super) fn status_text(decision: &str, via: &str) -> String {
     let (emoji, verb, _) = resolution_parts(decision);
     let source = match via {
@@ -559,7 +632,6 @@ pub(super) fn status_text(decision: &str, via: &str) -> String {
 }
 
 fn processed_message_blocks(original: Option<&[Value]>, decision: &str, via: &str) -> Value {
-    let (emoji, verb, _) = resolution_parts(decision);
     let Some(original) = original else {
         return json!([{ "type": "context", "elements": [
             { "type": "mrkdwn", "text": status_text(decision, via) }
@@ -578,11 +650,8 @@ fn processed_message_blocks(original: Option<&[Value]>, decision: &str, via: &st
         if !title_section_seen && block["type"] == "section" {
             title_section_seen = true;
             if let Some(title) = block["text"]["text"].as_str() {
-                if let Some(title) = title
-                    .strip_prefix("⚠️ ")
-                    .and_then(|title| title.strip_suffix(" 승인이 필요합니다"))
-                {
-                    block["text"]["text"] = Value::String(format!("{emoji} {title} {verb}됨"));
+                if let Some(title) = processed_title(title, decision) {
+                    block["text"]["text"] = Value::String(title);
                 }
             }
         }
@@ -758,7 +827,7 @@ impl Integration {
         let tracked = self.messages.lock().unwrap().contains_key(id);
         if tracked {
             if let Some(message) = message {
-                if let Some(update) = self.posted(id, message, payload_blocks) {
+                if let Some(update) = self.posted(id, message) {
                     self.enqueue(update);
                 }
             }
@@ -777,26 +846,18 @@ impl Integration {
         }
     }
 
-    fn posted(
-        &self,
-        id: &str,
-        message: SlackMessageRef,
-        actual_blocks: Option<Vec<Value>>,
-    ) -> Option<Work> {
+    fn posted(&self, id: &str, message: SlackMessageRef) -> Option<Work> {
         let mut messages = self.messages.lock().unwrap();
         let state = messages.get_mut(id)?;
         match state {
             MessageState::Pending { blocks } => {
                 *state = MessageState::Posted {
                     messages: vec![message],
-                    blocks: actual_blocks.unwrap_or_else(|| blocks.clone()),
+                    blocks: blocks.clone(),
                 };
                 None
             }
-            MessageState::Posted { messages, blocks } => {
-                if let Some(actual_blocks) = actual_blocks {
-                    *blocks = actual_blocks;
-                }
+            MessageState::Posted { messages, .. } => {
                 if !messages.contains(&message) {
                     messages.push(message);
                 }
@@ -1406,7 +1467,7 @@ fn execute_http(
                 Some(version),
             ) {
                 Ok(message) => {
-                    if let Some(update) = integration.posted(id, message, None) {
+                    if let Some(update) = integration.posted(id, message) {
                         integration.enqueue(update);
                     }
                     Ok(())
@@ -1806,6 +1867,28 @@ mod tests {
     }
 
     #[test]
+    fn execution_inline_code_delimiters_are_removed_but_fenced_shell_ticks_remain() {
+        let (_, inline) = build_message_blocks(
+            "q-inline",
+            "title",
+            "▶️ 승인 시 실행: `echo noop` (설명)",
+            None,
+        );
+        let inline = inline[1]["text"]["text"].as_str().unwrap();
+        assert!(inline.contains("```\necho noop (설명)\n```"), "{inline}");
+        assert!(!inline.contains("`echo noop`"), "{inline}");
+
+        let (_, fenced) = build_message_blocks(
+            "q-shell",
+            "title",
+            "▶️ 승인 시 실행:\n```sh\necho `date`\n```",
+            None,
+        );
+        let fenced = fenced[1]["text"]["text"].as_str().unwrap();
+        assert!(fenced.contains("```\necho `date`\n```"), "{fenced}");
+    }
+
+    #[test]
     fn processed_blocks_keep_original_content_and_replace_buttons_with_one_status_line() {
         let title = "승인이 필요합니다.md";
         let body = "⏱ 요청시각: 12:30\n👤 요청자: Alice\n▶️ 승인 시 실행: cargo test\n\n## 승인이 필요합니다\n**본문 유지**\n\n## 🤖 AI 판단\n위험 없음";
@@ -1823,7 +1906,6 @@ mod tests {
                     channel: "D1".into(),
                     ts: "1.2".into(),
                 },
-                None,
             )
             .is_none());
         integration.mark_processed("q-status", "approved", "mac");
@@ -1877,6 +1959,55 @@ mod tests {
     }
 
     #[test]
+    fn resolved_actions_prefer_cached_blocks_and_fallback_recognizes_warning_variants() {
+        let (tracked, receiver) = Integration::new();
+        let payload = action("U_OWNER", "knock_approve", "q-cached");
+        tracked.queue_request(
+            "q-cached".into(),
+            "cached title".into(),
+            "**cached body**".into(),
+            None,
+        );
+        assert!(matches!(receiver.try_recv(), Ok(Work::Post { .. })));
+        assert!(tracked
+            .posted("q-cached", message_ref(&payload).unwrap())
+            .is_none());
+        tracked.resolve_action("q-cached", &payload, "approved");
+        let cached = match receiver.try_recv() {
+            Ok(Work::Update {
+                blocks: Some(blocks),
+                ..
+            }) => blocks,
+            _ => panic!("tracked action must update with cached original blocks"),
+        };
+        let cached_blocks = cached.as_array().unwrap();
+        assert_eq!(cached_blocks[0]["text"]["text"], "✅ *cached title* 승인됨");
+        assert!(cached.to_string().contains("*cached body*"));
+        assert!(!cached.to_string().contains("original body"));
+        assert!(cached_blocks.iter().all(|block| block["type"] != "actions"));
+
+        let (untracked, receiver) = Integration::new();
+        let mut payload = action("U_OWNER", "knock_approve", "q-untracked");
+        payload["message"]["blocks"][0]["text"]["text"] =
+            Value::String(":warning: *fallback title* 승인이 필요합니다".into());
+        untracked.resolve_action("q-untracked", &payload, "approved");
+        let fallback = match receiver.try_recv() {
+            Ok(Work::Update {
+                blocks: Some(blocks),
+                ..
+            }) => blocks,
+            _ => panic!("untracked action must use payload blocks"),
+        };
+        let fallback = fallback.to_string();
+        assert!(fallback.contains("✅ *fallback title* 승인됨"));
+        assert!(fallback.contains("original body"));
+        assert!(
+            processed_title("⚠️ *literal *star* title* 승인이 필요합니다", "approved")
+                .is_some_and(|title| title == "✅ *literal *star* title* 승인됨")
+        );
+    }
+
+    #[test]
     fn missing_original_blocks_fall_back_to_one_status_context() {
         let (untracked, receiver) = Integration::new();
         let mut payload = action("U_OWNER", "knock_dismiss", "q-old");
@@ -1909,7 +2040,7 @@ mod tests {
     fn markdown_converter_keeps_code_and_table_literals() {
         let output = markdown_to_mrkdwn(concat!(
             "# Heading\n**bold** __under__ [docs `literal`](https://example.test?a=1&b=2) `**[x](y)**`\n\n",
-            "```sh\n**[x](y)** <tag>\n```\n\n| A | B |\n|---|---|\n| **cell** | [link](url) |\n\n**after**"
+            "```sh\n**[x](y)** <tag>한글\n```\n\n| A | B |\n|---|---|\n| **cell**한글 | [link](url) |\n\n**after**"
         ));
         assert!((1..=6).all(|level| {
             markdown_to_mrkdwn(&format!("{} Heading", "#".repeat(level))).contains("*Heading*")
@@ -1919,8 +2050,8 @@ mod tests {
             "{output}"
         );
         assert!(output.contains("`**[x](y)**`"));
-        assert!(output.contains("```\n**[x](y)** &lt;tag&gt;\n```"));
-        assert!(output.contains("```\n| A | B |\n|---|---|\n| **cell** | [link](url) |\n```"));
+        assert!(output.contains("```\n**[x](y)** &lt;tag&gt;한글\n```"));
+        assert!(output.contains("```\n| A | B |\n|---|---|\n| **cell**한글 | [link](url) |\n```"));
         assert!(output.ends_with("*after*"));
         let (fallback, blocks) =
             build_message_blocks("q-plain", "title", "## Summary\n**body**", None);
@@ -1928,6 +2059,36 @@ mod tests {
         let plain_body = blocks[2]["text"]["text"].as_str().unwrap();
         assert!(plain_body.contains("*Summary*\n*body*"));
         assert!(fallback.contains("*body*"));
+    }
+
+    #[test]
+    fn inline_emphasis_boundaries_separate_word_characters_only() {
+        for (input, expected) in [
+            ("한글**강조**입니다", "한글\u{200b}*강조*\u{200b}입니다"),
+            ("x**bold**", "x\u{200b}*bold*"),
+            ("**bold**x", "*bold*\u{200b}x"),
+            ("1**two**2", "1\u{200b}*two*\u{200b}2"),
+            ("name__bold__", "name\u{200b}_bold_"),
+            ("__bold__name", "_bold_\u{200b}name"),
+            ("_기울임_12", "_기울임_\u{200b}12"),
+            ("~취소~입니다", "~취소~\u{200b}입니다"),
+            ("left _space_ right", "left _space_ right"),
+            (".*punct*!", ".*punct*!"),
+            ("unpaired *", "unpaired *"),
+        ] {
+            assert_eq!(markdown_to_mrkdwn(input), expected, "{input}");
+        }
+    }
+
+    #[test]
+    fn markdown_bullets_become_bullets_while_numbers_and_indentation_remain() {
+        let output = markdown_to_mrkdwn(
+            "- **첫 항목** [문서](url)\n  * 둘째\n\t- 셋째\n1. 첫 번호\n  2. 둘째 번호",
+        );
+        assert_eq!(
+            output,
+            "• *첫 항목* <url|문서>\n  • 둘째\n\t• 셋째\n1. 첫 번호\n  2. 둘째 번호"
+        );
     }
 
     #[test]
@@ -2069,7 +2230,6 @@ mod tests {
                 channel: "D1".into(),
                 ts: "1.2".into(),
             },
-            None,
         );
         match update {
             Some(Work::Update {
@@ -2105,7 +2265,8 @@ mod tests {
                 assert_eq!(text, "승인됨");
                 let serialized = blocks.to_string();
                 assert!(serialized.contains("✅ Slack에서 승인"));
-                assert!(serialized.contains("*original body*"));
+                assert!(serialized.contains("body"));
+                assert!(!serialized.contains("original body"));
                 assert!(serialized.contains("✅ *title* 승인됨"));
                 assert!(!serialized.contains("actions"));
             }
