@@ -4,6 +4,11 @@ All notable changes to knock are documented here. Versions follow [SemVer](https
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-10-12
+
+### Fixed
+- Slack 승인 DM 이 처리 후 "처리됨" 한 줄로 덮어써지던 문제: 원문 유지 + 버튼 자리에 결과·출처·시각 표시
+
 ## [0.7.1] - 2026-10-12
 
 ### Changed
