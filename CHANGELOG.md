@@ -4,6 +4,11 @@ All notable changes to knock are documented here. Versions follow [SemVer](https
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-10-12
+
+### Fixed
+- Slack: 처리 후 제목이 ✅/✖️ 로 바뀌지 않던 문제, 실행 명령 코드 블록의 백틱, 한글에 붙은 굵게, 목록 기호(•)
+
 ## [0.7.2] - 2026-10-12
 
 ### Fixed
