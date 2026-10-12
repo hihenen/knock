@@ -4,6 +4,12 @@ All notable changes to knock are documented here. Versions follow [SemVer](https
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-12
+
+### Added
+- Slack 원격 승인: PR 머지 게이트(`--remote-approve`)와 Scalr `--action-url` 게이트를 owner Slack DM 버튼으로 승인/취소. Touch ID 게이트·ask 는 제외. 설정 창에서 토큰(키체인)·owner ID 입력, `docs/slack-app-manifest.yaml`
+- Slack 경유 결정은 `annotate --json` 에 `"via":"slack"`
+
 ## [0.6.10] - 2026-10-12
 
 ### Fixed
