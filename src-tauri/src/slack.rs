@@ -529,6 +529,78 @@ fn build_message_blocks(
     (fallback, blocks)
 }
 
+fn resolution_parts(decision: &str) -> (&'static str, &'static str, &'static str) {
+    match decision {
+        "approved" => ("✅", "승인", "승인됨"),
+        "dismissed" => ("✖️", "취소", "취소됨"),
+        "rejected" | "denied" => ("✖️", "거절", "거절됨"),
+        _ => ("☑️", "처리", "처리됨"),
+    }
+}
+
+fn resolution_summary(decision: &str) -> &'static str {
+    resolution_parts(decision).2
+}
+
+pub(super) fn status_text(decision: &str, via: &str) -> String {
+    let (emoji, verb, _) = resolution_parts(decision);
+    let source = match via {
+        "slack" => format!("Slack에서 {verb}"),
+        "mac" => format!("맥에서 {verb}"),
+        "ctl" => format!("ctl에서 {verb}"),
+        "auto" if decision == "approved" => "자동 승인".to_string(),
+        "auto" => "자동 처리".to_string(),
+        _ => format!("{via}에서 {verb}"),
+    };
+    format!(
+        "{emoji} {source} · {}",
+        chrono::Local::now().format("%H:%M")
+    )
+}
+
+fn processed_message_blocks(original: Option<&[Value]>, decision: &str, via: &str) -> Value {
+    let (emoji, verb, _) = resolution_parts(decision);
+    let Some(original) = original else {
+        return json!([{ "type": "context", "elements": [
+            { "type": "mrkdwn", "text": status_text(decision, via) }
+        ] }]);
+    };
+    let mut blocks = original.to_vec();
+    let mut title_section_seen = false;
+    let mut status_position = None;
+    let mut preserved = Vec::with_capacity(blocks.len() + 1);
+    for block in blocks.drain(..) {
+        if block["type"] == "actions" {
+            status_position.get_or_insert(preserved.len());
+            continue;
+        }
+        let mut block = block;
+        if !title_section_seen && block["type"] == "section" {
+            title_section_seen = true;
+            if let Some(title) = block["text"]["text"].as_str() {
+                if let Some(title) = title
+                    .strip_prefix("⚠️ ")
+                    .and_then(|title| title.strip_suffix(" 승인이 필요합니다"))
+                {
+                    block["text"]["text"] = Value::String(format!("{emoji} {title} {verb}됨"));
+                }
+            }
+        }
+        preserved.push(block);
+    }
+    if preserved.len() < SLACK_BLOCK_LIMIT {
+        let status = json!({
+            "type": "context",
+            "elements": [{ "type": "mrkdwn", "text": status_text(decision, via) }]
+        });
+        let position = status_position
+            .unwrap_or(preserved.len())
+            .min(preserved.len());
+        preserved.insert(position, status);
+    }
+    Value::Array(preserved)
+}
+
 pub(super) fn reconnect_backoff(attempt: u32) -> Duration {
     Duration::from_secs(2_u64.pow(attempt.min(6)).min(MAX_BACKOFF_SECS))
 }
@@ -551,11 +623,17 @@ pub(super) struct Integration {
 
 #[derive(Clone)]
 enum MessageState {
-    Pending,
-    Posted(Vec<SlackMessageRef>),
+    Pending {
+        blocks: Vec<Value>,
+    },
+    Posted {
+        messages: Vec<SlackMessageRef>,
+        blocks: Vec<Value>,
+    },
     Processed {
         text: String,
         messages: Vec<SlackMessageRef>,
+        blocks: Value,
     },
 }
 
@@ -600,10 +678,11 @@ impl Integration {
         body: String,
         action_url: Option<String>,
     ) {
+        let (_, blocks) = build_message_blocks(&id, &title, &body, action_url.as_deref());
         self.messages
             .lock()
             .unwrap()
-            .insert(id.clone(), MessageState::Pending);
+            .insert(id.clone(), MessageState::Pending { blocks });
         let _ = self.sender.send(Work::Post {
             id,
             title,
@@ -624,37 +703,32 @@ impl Integration {
         let _ = self.sender.send(work);
     }
 
-    pub(super) fn mark_processed(&self, id: &str, text: String) {
-        let update = {
+    pub(super) fn mark_processed(&self, id: &str, decision: &str, via: &str) {
+        let (text, blocks, update) = {
             let mut messages = self.messages.lock().unwrap();
             let Some(state) = messages.get_mut(id) else {
                 return;
             };
-            match state {
-                MessageState::Pending => {
-                    *state = MessageState::Processed {
-                        text: text.clone(),
-                        messages: Vec::new(),
-                    };
-                    Vec::new()
-                }
-                MessageState::Posted(posted) => {
-                    let posted = posted.clone();
-                    *state = MessageState::Processed {
-                        text: text.clone(),
-                        messages: posted.clone(),
-                    };
-                    posted
-                }
-                MessageState::Processed { .. } => Vec::new(),
-            }
+            let (messages, original) = match state {
+                MessageState::Pending { blocks } => (Vec::new(), blocks.clone()),
+                MessageState::Posted { messages, blocks } => (messages.clone(), blocks.clone()),
+                MessageState::Processed { .. } => return,
+            };
+            let text = resolution_summary(decision).to_string();
+            let blocks = processed_message_blocks(Some(&original), decision, via);
+            *state = MessageState::Processed {
+                text: text.clone(),
+                messages: messages.clone(),
+                blocks: blocks.clone(),
+            };
+            (text, blocks, messages)
         };
         for message in update {
             let _ = self.sender.send(Work::Update {
                 id: id.to_string(),
                 text: text.clone(),
                 message,
-                blocks: None,
+                blocks: Some(blocks.clone()),
             });
         }
     }
@@ -662,7 +736,7 @@ impl Integration {
     fn should_post(&self, id: &str) -> bool {
         matches!(
             self.messages.lock().unwrap().get(id),
-            Some(MessageState::Pending)
+            Some(MessageState::Pending { .. })
         )
     }
 
@@ -674,30 +748,64 @@ impl Integration {
         pending
     }
 
-    fn resolve_action(&self, id: &str, payload: &Value, text: String) {
-        if let Some(update) = message_ref(payload).and_then(|message| self.posted(id, message)) {
-            self.enqueue(update);
+    fn resolve_action(&self, id: &str, payload: &Value, decision: &str) {
+        let message = message_ref(payload);
+        let payload_blocks = payload
+            .get("message")
+            .and_then(|message| message.get("blocks"))
+            .and_then(Value::as_array)
+            .cloned();
+        let tracked = self.messages.lock().unwrap().contains_key(id);
+        if tracked {
+            if let Some(message) = message {
+                if let Some(update) = self.posted(id, message, payload_blocks) {
+                    self.enqueue(update);
+                }
+            }
+            self.mark_processed(id, decision, "slack");
+        } else if let Some(message) = message {
+            self.enqueue(Work::Update {
+                id: String::new(),
+                text: resolution_summary(decision).to_string(),
+                message,
+                blocks: Some(processed_message_blocks(
+                    payload_blocks.as_deref(),
+                    decision,
+                    "slack",
+                )),
+            });
         }
-        self.mark_processed(id, text);
     }
 
-    fn posted(&self, id: &str, message: SlackMessageRef) -> Option<Work> {
+    fn posted(
+        &self,
+        id: &str,
+        message: SlackMessageRef,
+        actual_blocks: Option<Vec<Value>>,
+    ) -> Option<Work> {
         let mut messages = self.messages.lock().unwrap();
         let state = messages.get_mut(id)?;
         match state {
-            MessageState::Pending => {
-                *state = MessageState::Posted(vec![message]);
+            MessageState::Pending { blocks } => {
+                *state = MessageState::Posted {
+                    messages: vec![message],
+                    blocks: actual_blocks.unwrap_or_else(|| blocks.clone()),
+                };
                 None
             }
-            MessageState::Posted(posted) => {
-                if !posted.contains(&message) {
-                    posted.push(message);
+            MessageState::Posted { messages, blocks } => {
+                if let Some(actual_blocks) = actual_blocks {
+                    *blocks = actual_blocks;
+                }
+                if !messages.contains(&message) {
+                    messages.push(message);
                 }
                 None
             }
             MessageState::Processed {
                 text,
                 messages: posted,
+                blocks,
             } => {
                 if posted.contains(&message) {
                     return None;
@@ -707,7 +815,7 @@ impl Integration {
                     id: id.to_string(),
                     text: text.clone(),
                     message,
-                    blocks: None,
+                    blocks: Some(blocks.clone()),
                 })
             }
         }
@@ -1090,18 +1198,6 @@ pub(super) fn process_block_action(
     }
 }
 
-pub(super) fn status_text(decision: &str) -> String {
-    let verb = if decision == "approved" {
-        "승인"
-    } else {
-        "취소"
-    };
-    format!(
-        "✅ Slack에서 {verb} · {}",
-        chrono::Local::now().format("%H:%M")
-    )
-}
-
 fn stamp() -> (SlackConfig, Option<SystemTime>) {
     let path = crate::config_path();
     let config = config_from_value(&crate::read_config_at(&path));
@@ -1273,7 +1369,7 @@ fn handle_action(
     }
     match process_block_action(config.enabled, &config.owner_user_id, queue, &payload) {
         ActionResult::Applied { id, decision } => {
-            integration.resolve_action(&id, &payload, status_text(decision));
+            integration.resolve_action(&id, &payload, decision);
             notify_local_resolution(app, queue);
             None
         }
@@ -1310,7 +1406,7 @@ fn execute_http(
                 Some(version),
             ) {
                 Ok(message) => {
-                    if let Some(update) = integration.posted(id, message) {
+                    if let Some(update) = integration.posted(id, message, None) {
                         integration.enqueue(update);
                     }
                     Ok(())
@@ -1558,6 +1654,7 @@ mod tests {
             source: json!({}),
             created_at: 1,
             remote_slack,
+            decision_via: None,
             responder: crate::ipc::Responder::new(SharedWriter(bytes.clone())),
         }]));
         (bytes, queue)
@@ -1572,17 +1669,19 @@ mod tests {
     }
 
     fn action(user: &str, action_id: &str, id: &str) -> Value {
+        let (_, blocks) = build_message_blocks(
+            id,
+            "title",
+            "⏱ 요청시각: 12:30\n👤 요청자: Alice\n▶️ 승인 시 실행: cargo test\n\n## Summary\n**original body**\n\n## 🤖 AI 판단\nreviewed",
+            None,
+        );
         json!({
             "type": "block_actions",
             "user": { "id": user },
             "actions": [{ "type": "button", "action_id": action_id, "value": id }],
             "channel": { "id": "D123" },
             "container": { "message_ts": "1548261231.000200" },
-            "message": { "ts": "1548261231.000200", "blocks": [
-                { "type": "actions", "elements": [
-                    { "type": "button", "action_id": "knock_approve", "value": id }
-                ] }
-            ] }
+            "message": { "ts": "1548261231.000200", "blocks": blocks }
         })
     }
 
@@ -1707,6 +1806,106 @@ mod tests {
     }
 
     #[test]
+    fn processed_blocks_keep_original_content_and_replace_buttons_with_one_status_line() {
+        let title = "승인이 필요합니다.md";
+        let body = "⏱ 요청시각: 12:30\n👤 요청자: Alice\n▶️ 승인 시 실행: cargo test\n\n## 승인이 필요합니다\n**본문 유지**\n\n## 🤖 AI 판단\n위험 없음";
+        let (_, mut expected) = build_message_blocks("q-status", title, body, None);
+        expected.pop();
+        expected[0]["text"]["text"] = Value::String("✅ *승인이 필요합니다.md* 승인됨".into());
+
+        let (integration, receiver) = Integration::new();
+        integration.queue_request("q-status".into(), title.into(), body.into(), None);
+        assert!(matches!(receiver.try_recv(), Ok(Work::Post { .. })));
+        assert!(integration
+            .posted(
+                "q-status",
+                SlackMessageRef {
+                    channel: "D1".into(),
+                    ts: "1.2".into(),
+                },
+                None,
+            )
+            .is_none());
+        integration.mark_processed("q-status", "approved", "mac");
+        match receiver.try_recv() {
+            Ok(Work::Update {
+                text,
+                blocks: Some(blocks),
+                ..
+            }) => {
+                assert_eq!(text, "승인됨");
+                let blocks = blocks.as_array().unwrap();
+                assert_eq!(blocks.len(), expected.len() + 1);
+                assert_eq!(&blocks[..expected.len()], expected.as_slice());
+                assert_eq!(blocks.last().unwrap()["type"], "context");
+                assert_status_time(
+                    blocks.last().unwrap()["elements"][0]["text"]
+                        .as_str()
+                        .unwrap(),
+                    "✅ 맥에서 승인",
+                );
+            }
+            _ => panic!("local decision must update the cached original blocks"),
+        }
+    }
+
+    #[test]
+    fn processed_status_distinguishes_decisions_and_all_sources() {
+        for (decision, via, prefix, title) in [
+            (
+                "approved",
+                "slack",
+                "✅ Slack에서 승인",
+                "✅ *title* 승인됨",
+            ),
+            ("dismissed", "mac", "✖️ 맥에서 취소", "✖️ *title* 취소됨"),
+            ("approved", "ctl", "✅ ctl에서 승인", "✅ *title* 승인됨"),
+            ("approved", "auto", "✅ 자동 승인", "✅ *title* 승인됨"),
+            ("denied", "slack", "✖️ Slack에서 거절", "✖️ *title* 거절됨"),
+            ("annotated", "ctl", "☑️ ctl에서 처리", "☑️ *title* 처리됨"),
+        ] {
+            let (_, original) = build_message_blocks("q", "title", "본문", None);
+            let blocks = processed_message_blocks(Some(&original), decision, via);
+            let blocks = blocks.as_array().unwrap();
+            assert_eq!(blocks[0]["text"]["text"], title);
+            assert!(blocks.iter().all(|block| block["type"] != "actions"));
+            let status = blocks.last().unwrap()["elements"][0]["text"]
+                .as_str()
+                .unwrap();
+            assert_status_time(status, prefix);
+        }
+    }
+
+    #[test]
+    fn missing_original_blocks_fall_back_to_one_status_context() {
+        let (untracked, receiver) = Integration::new();
+        let mut payload = action("U_OWNER", "knock_dismiss", "q-old");
+        payload["message"].as_object_mut().unwrap().remove("blocks");
+        untracked.resolve_action("q-old", &payload, "dismissed");
+        match receiver.try_recv() {
+            Ok(Work::Update {
+                text,
+                blocks: Some(blocks),
+                ..
+            }) => {
+                assert_eq!(text, "취소됨");
+                assert_eq!(blocks.as_array().unwrap().len(), 1);
+                assert_status_time(
+                    blocks[0]["elements"][0]["text"].as_str().unwrap(),
+                    "✖️ Slack에서 취소",
+                );
+            }
+            _ => panic!("untracked action must still send a status-only update"),
+        }
+    }
+
+    fn assert_status_time(status: &str, prefix: &str) {
+        let (actual_prefix, time) = status.rsplit_once(" · ").unwrap();
+        assert_eq!(actual_prefix, prefix);
+        chrono::NaiveTime::parse_from_str(time, "%H:%M").unwrap();
+    }
+
+    #[test]
     fn markdown_converter_keeps_code_and_table_literals() {
         let output = markdown_to_mrkdwn(concat!(
             "# Heading\n**bold** __under__ [docs `literal`](https://example.test?a=1&b=2) `**[x](y)**`\n\n",
@@ -1799,16 +1998,19 @@ mod tests {
     #[test]
     fn block_action_rejects_other_user_without_resolving_queue() {
         let (bytes, queue) = queued(true);
+        let mut expected = action("U_OTHER", "knock_approve", "q-1")["message"]["blocks"]
+            .as_array()
+            .unwrap()
+            .clone();
+        expected.push(json!({ "type": "context", "elements": [
+            { "type": "mrkdwn", "text": "⛔ 이 요청은 Slack owner만 결정할 수 있습니다" }
+        ] }));
         let result = click(&queue, "U_OTHER", "knock_approve", "q-1");
         match result {
             ActionResult::Rejected {
                 message: Some(_),
                 blocks: Some(blocks),
-            } => {
-                assert_eq!(blocks[0]["type"], "actions");
-                assert_eq!(blocks[0]["elements"][0]["action_id"], "knock_approve");
-                assert_eq!(blocks[1]["type"], "context");
-            }
+            } => assert_eq!(blocks, Value::Array(expected)),
             _ => panic!("other-user action should be rejected with preserved buttons"),
         }
         assert!(bytes.lock().unwrap().is_empty());
@@ -1859,16 +2061,29 @@ mod tests {
     #[test]
     fn resolving_before_post_response_updates_the_later_message() {
         let (integration, _receiver) = Integration::new();
-        integration.queue_request("q-1".into(), "title".into(), "body".into(), None);
-        integration.mark_processed("q-1", "처리됨 (맥에서)".into());
+        integration.queue_request("q-1".into(), "title".into(), "**원문**".into(), None);
+        integration.mark_processed("q-1", "approved", "mac");
         let update = integration.posted(
             "q-1",
             SlackMessageRef {
                 channel: "D1".into(),
                 ts: "1.2".into(),
             },
+            None,
         );
-        assert!(matches!(update, Some(Work::Update { text, .. }) if text == "처리됨 (맥에서)"));
+        match update {
+            Some(Work::Update {
+                text,
+                blocks: Some(blocks),
+                ..
+            }) => {
+                assert_eq!(text, "승인됨");
+                assert!(blocks.to_string().contains("✅ 맥에서 승인"));
+                assert!(blocks.to_string().contains("*원문*"));
+                assert!(!blocks.to_string().contains("actions"));
+            }
+            _ => panic!("processed request must update the posted original blocks"),
+        }
 
         let (clicked, receiver) = Integration::new();
         clicked.queue_request("q-2".into(), "title".into(), "body".into(), None);
@@ -1876,17 +2091,31 @@ mod tests {
         clicked.resolve_action(
             "q-2",
             &action("U_OWNER", "knock_approve", "q-2"),
-            "approved".into(),
+            "approved",
         );
-        assert!(
-            matches!(receiver.try_recv(), Ok(Work::Update { message, text, .. })
-            if message.channel == "D123" && message.ts == "1548261231.000200" && text == "approved")
-        );
+        match receiver.try_recv() {
+            Ok(Work::Update {
+                message,
+                text,
+                blocks: Some(blocks),
+                ..
+            }) => {
+                assert_eq!(message.channel, "D123");
+                assert_eq!(message.ts, "1548261231.000200");
+                assert_eq!(text, "승인됨");
+                let serialized = blocks.to_string();
+                assert!(serialized.contains("✅ Slack에서 승인"));
+                assert!(serialized.contains("*original body*"));
+                assert!(serialized.contains("✅ *title* 승인됨"));
+                assert!(!serialized.contains("actions"));
+            }
+            _ => panic!("Slack action must send the processed original blocks"),
+        }
 
         let (unsent, receiver) = Integration::new();
         unsent.queue_request("q-3".into(), "title".into(), "body".into(), None);
         assert!(matches!(receiver.try_recv(), Ok(Work::Post { .. })));
-        unsent.mark_processed("q-3", "local".into());
+        unsent.mark_processed("q-3", "approved", "ctl");
         assert!(!unsent.should_post_or_forget("q-3"));
         assert!(!unsent.messages.lock().unwrap().contains_key("q-3"));
     }
