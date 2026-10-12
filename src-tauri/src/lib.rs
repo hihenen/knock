@@ -770,13 +770,27 @@ fn sanitize_gate_html(html: &str) -> String {
 }
 
 fn render_md(md: &str) -> String {
-    use pulldown_cmark::{html, Options, Parser};
+    use pulldown_cmark::{html, Event, Options, Parser};
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_TABLES);
     opts.insert(Options::ENABLE_STRIKETHROUGH);
     opts.insert(Options::ENABLE_TASKLISTS);
     opts.insert(Options::ENABLE_FOOTNOTES);
-    let parser = Parser::new_ext(md, opts);
+    let metadata_prefix_end = md
+        .split_inclusive('\n')
+        .take_while(|line| {
+            ["⏱ ", "👤 ", "▶️ "]
+                .iter()
+                .any(|prefix| line.starts_with(prefix))
+        })
+        .map(str::len)
+        .sum::<usize>();
+    let parser = Parser::new_ext(md, opts)
+        .into_offset_iter()
+        .map(|(event, range)| match event {
+            Event::SoftBreak if range.start < metadata_prefix_end => Event::HardBreak,
+            event => event,
+        });
     let mut out = String::new();
     html::push_html(&mut out, parser);
     sanitize_gate_html(&force_iframe_sandbox(&out))
@@ -2774,6 +2788,9 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEMP_CONFIG_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     struct TempConfigDir(PathBuf);
 
@@ -2790,8 +2807,9 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
+        let sequence = TEMP_CONFIG_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
-            "knock-auto-approve-merge-{}-{nonce}",
+            "knock-auto-approve-merge-{}-{nonce}-{sequence}",
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).unwrap();
@@ -3314,6 +3332,35 @@ mod tests {
     fn render_md_makes_table() {
         let h = render_md("| a | b |\n|---|---|\n| 1 | 2 |");
         assert!(h.contains("<table>"));
+    }
+
+    #[test]
+    fn render_md_hard_breaks_the_leading_gate_metadata_rows() {
+        let h = render_md("⏱ 요청시각: 10:30\n👤 요청자: Yun\n▶️ 승인 시 실행: cargo test\n\n본문");
+        assert_eq!(h.matches("<br").count(), 2, "got: {h}");
+        assert!(h.contains("⏱ 요청시각: 10:30<br"), "got: {h}");
+        assert!(h.contains("👤 요청자: Yun<br"), "got: {h}");
+        assert!(h.contains("▶️ 승인 시 실행: cargo test"), "got: {h}");
+        assert!(h.contains("<p>본문</p>"), "got: {h}");
+    }
+
+    #[test]
+    fn render_md_does_not_break_metadata_like_text_in_body_or_fences() {
+        let body = render_md("요청 내용\n⏱ 요청시각: 본문 중간\n👤 요청자: 문장");
+        assert!(!body.contains("<br"), "got: {body}");
+
+        let code = render_md("```text\n⏱ 요청시각: 예시\n👤 요청자: 예시\n```\n");
+        assert!(
+            code.contains("<pre><code>⏱ 요청시각: 예시\n👤 요청자: 예시\n</code></pre>"),
+            "got: {code}"
+        );
+        assert!(!code.contains("<br"), "got: {code}");
+    }
+
+    #[test]
+    fn render_md_preserves_a_metadata_free_soft_break() {
+        let h = render_md("일반 문단\n이어지는 줄");
+        assert_eq!(h, "<p>일반 문단\n이어지는 줄</p>\n");
     }
 
     #[test]

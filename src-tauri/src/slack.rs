@@ -147,6 +147,388 @@ fn truncate_body(text: &str, limit: usize) -> String {
     }
 }
 
+const SLACK_SECTION_TEXT_LIMIT: usize = 3000;
+const SLACK_BLOCK_LIMIT: usize = 50;
+const SLACK_BODY_LIMIT: usize = 1500;
+
+#[derive(Default)]
+struct ExtractedBody {
+    requester: Option<String>,
+    requested_at: Option<String>,
+    execution: Option<String>,
+    ai_judgment: Option<String>,
+    body: String,
+}
+
+fn metadata_value(line: &str, emoji: &str, label: &str) -> Option<String> {
+    let tail = line
+        .trim()
+        .strip_prefix(emoji)?
+        .trim()
+        .strip_prefix(label)?
+        .trim_start();
+    Some(tail.trim_start_matches([':', '：', '-']).trim().into())
+}
+
+fn markdown_heading(line: &str) -> Option<(usize, &str)> {
+    let line = line.trim_start();
+    let level = line.bytes().take_while(|byte| *byte == b'#').count();
+    let title = line.get(level..)?;
+    ((1..=6).contains(&level) && title.chars().next().is_some_and(char::is_whitespace))
+        .then_some((level, title.trim().trim_end_matches('#').trim()))
+}
+
+fn unwrap_code_fence(value: &str) -> String {
+    let mut lines = value.lines();
+    let Some(open) = lines.next().and_then(fence_marker) else {
+        return value.trim().into();
+    };
+    let mut rest: Vec<_> = lines.collect();
+    if rest.last().is_some_and(|line| is_fence_close(line, open)) {
+        rest.pop();
+    }
+    rest.join("\n").trim().into()
+}
+
+fn extract_body_sections(masked_body: &str) -> ExtractedBody {
+    let lines: Vec<&str> = masked_body.lines().collect();
+    let mut result = ExtractedBody::default();
+    let mut execution_lines = Vec::new();
+    let mut index = 0;
+    let mut pending_execution = false;
+    while index < lines.len() {
+        let line = lines[index];
+        if line.trim().is_empty() {
+            index += 1;
+            continue;
+        }
+        if let Some((emoji, value)) = [("👤", "요청자"), ("⏱", "요청시각"), ("▶️", "승인 시 실행")]
+            .into_iter()
+            .find_map(|(emoji, label)| {
+                metadata_value(line, emoji, label).map(|value| (emoji, value))
+            })
+        {
+            match emoji {
+                "👤" => result.requester = Some(value),
+                "⏱" => result.requested_at = Some(value),
+                _ => {
+                    pending_execution = value.is_empty();
+                    if !value.is_empty() {
+                        execution_lines.push(value);
+                    }
+                }
+            }
+            index += 1;
+            continue;
+        }
+        break;
+    }
+    if pending_execution && index < lines.len() && !lines[index].trim().is_empty() {
+        execution_lines.push(lines[index].to_string());
+        index += 1;
+        if let Some(fence) = fence_marker(&execution_lines[0]) {
+            while index < lines.len() {
+                let line = lines[index];
+                execution_lines.push(line.to_string());
+                index += 1;
+                if is_fence_close(line, fence) {
+                    break;
+                }
+            }
+        } else {
+            while index < lines.len() && !lines[index].trim().is_empty() {
+                execution_lines.push(lines[index].to_string());
+                index += 1;
+            }
+        }
+    }
+    if !execution_lines.is_empty() {
+        result.execution = Some(unwrap_code_fence(&execution_lines.join("\n")));
+    }
+
+    let mut remaining = Vec::new();
+    let mut ai_lines = Vec::new();
+    let mut ai_level = None;
+    let mut fence = None;
+    for line in &lines[index..] {
+        let marker = fence_marker(line);
+        if fence.is_none() {
+            if ai_level
+                .is_some_and(|level| markdown_heading(line).is_some_and(|(next, _)| next <= level))
+            {
+                ai_level = None;
+            }
+            if ai_level.is_none() {
+                ai_level = markdown_heading(line)
+                    .and_then(|(level, title)| (title == "🤖 AI 판단").then_some(level));
+                if ai_level.is_some() {
+                    continue;
+                }
+            }
+        }
+        let target = if ai_level.is_some() {
+            &mut ai_lines
+        } else {
+            &mut remaining
+        };
+        target.push(*line);
+        if let Some(open) = fence {
+            if marker.is_some_and(|current| is_fence_close(line, open) && current.0 == open.0) {
+                fence = None;
+            }
+        } else if let Some(marker) = marker {
+            fence = Some(marker);
+        }
+    }
+    if !ai_lines.is_empty() {
+        result.ai_judgment = Some(ai_lines.join("\n").trim().to_string());
+    }
+    result.body = remaining.join("\n").trim().to_string();
+    result
+}
+
+fn escape_mrkdwn_text(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+fn format_inline_mrkdwn(text: &str) -> String {
+    static CODE: OnceLock<Regex> = OnceLock::new();
+    static LINKS: OnceLock<Regex> = OnceLock::new();
+    static BOLD: OnceLock<Regex> = OnceLock::new();
+    static UNDERSCORE_BOLD: OnceLock<Regex> = OnceLock::new();
+    let code = CODE.get_or_init(|| Regex::new(r"`([^`]+)`").unwrap());
+    let links = LINKS.get_or_init(|| Regex::new(r#"\[([^\]]+)\]\(([^)]+)\)"#).unwrap());
+    let bold = BOLD.get_or_init(|| Regex::new(r"\*\*(.+?)\*\*").unwrap());
+    let underscore_bold = UNDERSCORE_BOLD.get_or_init(|| Regex::new(r"__(.+?)__").unwrap());
+    let mut replacements = Vec::new();
+    let protected = code.replace_all(text, |caps: &Captures<'_>| {
+        replacements.push(format!("`{}`", escape_mrkdwn_text(&caps[1])));
+        format!("\u{e000}{}\u{e001}", replacements.len() - 1)
+    });
+    let protected = links.replace_all(&protected, |caps: &Captures<'_>| {
+        let label = format_plain_inline(&caps[1], bold, underscore_bold);
+        replacements.push(format!("<{}|{}>", escape_mrkdwn_text(&caps[2]), label));
+        format!("\u{e000}{}\u{e001}", replacements.len() - 1)
+    });
+    let mut result = format_plain_inline(&protected, bold, underscore_bold);
+    for (index, replacement) in replacements.iter().enumerate().rev() {
+        result = result.replace(&format!("\u{e000}{index}\u{e001}"), replacement);
+    }
+    result
+}
+
+fn format_plain_inline(text: &str, bold: &Regex, underscore_bold: &Regex) -> String {
+    let escaped = escape_mrkdwn_text(text);
+    let text = bold.replace_all(&escaped, "*$1*");
+    underscore_bold.replace_all(&text, "_${1}_").into_owned()
+}
+
+fn is_table_separator(line: &str) -> bool {
+    let line = line.trim().trim_matches('|');
+    !line.is_empty()
+        && line.split('|').all(|cell| {
+            let cell = cell.trim().trim_matches(':');
+            cell.len() >= 3 && cell.chars().all(|ch| ch == '-')
+        })
+}
+
+fn fence_marker(line: &str) -> Option<(char, usize)> {
+    let line = line.trim_start();
+    let ch = line.chars().next()?;
+    let count = line.chars().take_while(|current| *current == ch).count();
+    (matches!(ch, '`' | '~') && count >= 3).then_some((ch, count))
+}
+
+fn is_fence_close(line: &str, open: (char, usize)) -> bool {
+    let line = line.trim_start();
+    fence_marker(line).is_some_and(|(ch, count)| {
+        ch == open.0 && count >= open.1 && line[count..].trim().is_empty()
+    })
+}
+
+fn markdown_to_mrkdwn(markdown: &str) -> String {
+    let lines: Vec<&str> = markdown.lines().collect();
+    let mut output = String::new();
+    let mut index = 0;
+    let mut fence = None;
+
+    while index < lines.len() {
+        let line = lines[index];
+        if let Some(marker) = fence_marker(line) {
+            if fence.is_some_and(|open| is_fence_close(line, open)) {
+                output.push_str("```\n");
+                fence = None;
+            } else if fence.is_none() {
+                output.push_str("```\n");
+                fence = Some(marker);
+            } else {
+                output.push_str(&format!("{}\n", escape_mrkdwn_text(line)));
+            }
+            index += 1;
+            continue;
+        }
+        if fence.is_some() {
+            output.push_str(&format!("{}\n", escape_mrkdwn_text(line)));
+            index += 1;
+            continue;
+        }
+        if index + 1 < lines.len() && line.contains('|') && is_table_separator(lines[index + 1]) {
+            output.push_str("```\n");
+            while index < lines.len()
+                && !lines[index].trim().is_empty()
+                && lines[index].contains('|')
+            {
+                output.push_str(&format!("{}\n", escape_mrkdwn_text(lines[index])));
+                index += 1;
+            }
+            output.push_str("```\n");
+            continue;
+        }
+
+        let converted = markdown_heading(line)
+            .map(|(_, title)| format!("*{}*", format_inline_mrkdwn(title)))
+            .unwrap_or_else(|| format_inline_mrkdwn(line));
+        output.push_str(&format!("{converted}\n"));
+        index += 1;
+    }
+    if fence.is_some() {
+        output.push_str("```\n");
+    }
+    output.trim_end().to_string()
+}
+
+fn utf16_len(text: &str) -> usize {
+    text.encode_utf16().count()
+}
+
+fn truncate_slack_text(text: &str, limit: usize) -> String {
+    if utf16_len(text) <= limit {
+        return text.to_string();
+    }
+    let suffix = "…(맥에서 전체 보기)";
+    let budget = limit.saturating_sub(utf16_len(suffix) + 4);
+    let mut output = String::new();
+    let mut used = 0;
+    for ch in text.chars() {
+        let units = ch.len_utf16();
+        if used + units > budget {
+            break;
+        }
+        output.push(ch);
+        used += units;
+    }
+    if let Some(index) = output
+        .rfind('&')
+        .filter(|&index| !output[index..].contains(';'))
+    {
+        output.truncate(index);
+    }
+    if output.matches("```").count() % 2 == 1 {
+        output.push_str("\n```");
+    }
+    output.push_str(suffix);
+    output
+}
+
+fn add_section_blocks(blocks: &mut Vec<Value>, text: &str) {
+    if blocks.len() < SLACK_BLOCK_LIMIT - 1 {
+        let text = truncate_slack_text(text, SLACK_SECTION_TEXT_LIMIT);
+        blocks.push(json!({ "type": "section", "text": { "type": "mrkdwn", "text": text } }));
+    }
+}
+
+fn build_message_blocks(
+    id: &str,
+    title: &str,
+    body: &str,
+    action_url: Option<&str>,
+) -> (String, Vec<Value>) {
+    let title: String = mask_secrets(title).chars().take(150).collect();
+    let title = if title.trim().is_empty() {
+        "Knock 승인 요청".to_string()
+    } else {
+        title
+    };
+    let extracted = extract_body_sections(&mask_secrets(body));
+    let empty = extracted.body.trim().is_empty()
+        && [
+            &extracted.execution,
+            &extracted.ai_judgment,
+            &extracted.requester,
+            &extracted.requested_at,
+        ]
+        .iter()
+        .all(|value| value.is_none());
+    let body = if empty {
+        "(본문 없음)".to_string()
+    } else {
+        truncate_body(&extracted.body, SLACK_BODY_LIMIT)
+    };
+    let bounded = |value: Option<&str>| truncate_body(value.unwrap_or_default(), SLACK_BODY_LIMIT);
+    let execution = bounded(extracted.execution.as_deref());
+    let ai_judgment = bounded(extracted.ai_judgment.as_deref());
+    let action_url = action_url.map(mask_secrets);
+
+    let mut blocks = vec![json!({
+        "type": "section",
+        "text": { "type": "mrkdwn", "text": format!("⚠️ *{}* 승인이 필요합니다", escape_mrkdwn_text(&title)) }
+    })];
+    let context = [
+        ("👤", extracted.requester.as_deref()),
+        ("⏱", extracted.requested_at.as_deref()),
+    ]
+    .into_iter()
+    .filter_map(|(label, value)| {
+        value
+            .filter(|value| !value.is_empty())
+            .map(|value| format!("{label} {}", escape_mrkdwn_text(value)))
+    })
+    .collect::<Vec<_>>()
+    .join(" · ");
+    let context = truncate_slack_text(&context, SLACK_SECTION_TEXT_LIMIT);
+    if !context.is_empty() {
+        blocks.push(json!({
+            "type": "context",
+            "elements": [{ "type": "mrkdwn", "text": context }]
+        }));
+    }
+
+    let execution_value = if execution.trim().is_empty() {
+        action_url
+            .as_deref()
+            .map(|url| {
+                let url =
+                    truncate_slack_text(&escape_mrkdwn_text(url), SLACK_SECTION_TEXT_LIMIT - 40);
+                format!("<{url}|작업 열기>")
+            })
+            .unwrap_or_default()
+    } else {
+        format!("```\n{}\n```", escape_mrkdwn_text(&execution))
+    };
+    let execution_section = format!("▶️ 승인 시 실행\n{execution_value}");
+    add_section_blocks(&mut blocks, execution_section.trim_end());
+    let formatted_body = markdown_to_mrkdwn(&body);
+    if !formatted_body.trim().is_empty() {
+        add_section_blocks(&mut blocks, &formatted_body);
+    }
+    let ai = if ai_judgment.trim().is_empty() {
+        String::new()
+    } else {
+        format!("🤖 *AI 판단*\n{}", markdown_to_mrkdwn(&ai_judgment))
+    };
+    if !ai.is_empty() {
+        add_section_blocks(&mut blocks, &ai);
+    }
+    blocks.push(json!({ "type": "actions", "elements": [
+        { "type": "button", "action_id": "knock_approve", "text": { "type": "plain_text", "text": "승인", "emoji": true }, "style": "primary", "value": id },
+        { "type": "button", "action_id": "knock_dismiss", "text": { "type": "plain_text", "text": "취소", "emoji": true }, "style": "danger", "value": id }
+    ] }));
+    let fallback = format!("{title}\n{context}\n{execution_section}\n{formatted_body}\n{ai}");
+    (fallback, blocks)
+}
+
 pub(super) fn reconnect_backoff(attempt: u32) -> Duration {
     Duration::from_secs(2_u64.pow(attempt.min(6)).min(MAX_BACKOFF_SECS))
 }
@@ -551,38 +933,7 @@ fn post_message(
     else {
         return Err("Slack post 작업이 올바르지 않습니다".into());
     };
-    let title: String = mask_secrets(title).chars().take(150).collect();
-    let title = if title.trim().is_empty() {
-        "Knock 승인 요청".to_string()
-    } else {
-        title
-    };
-    let body = truncate_body(body, 1500);
-    let body = if body.trim().is_empty() {
-        "(본문 없음)".to_string()
-    } else {
-        body
-    };
-    let action_url = action_url.as_deref().map(mask_secrets);
-    let execution = match action_url.as_deref() {
-        Some(url) => format!(
-            "▶️ 승인 시 실행\n<{}|작업 열기>",
-            url.replace('&', "&amp;")
-                .replace('<', "&lt;")
-                .replace('>', "&gt;")
-        ),
-        None => "▶️ 승인 시 실행".to_string(),
-    };
-    let fallback = format!("{title}\n{body}\n{}", mask_secrets(&execution));
-    let blocks = vec![
-        json!({ "type": "header", "text": { "type": "plain_text", "text": title, "emoji": true } }),
-        json!({ "type": "section", "text": { "type": "plain_text", "text": body, "emoji": true } }),
-        json!({ "type": "section", "text": { "type": "mrkdwn", "text": mask_secrets(&execution) } }),
-        json!({ "type": "actions", "elements": [
-            { "type": "button", "action_id": "knock_approve", "text": { "type": "plain_text", "text": "승인", "emoji": true }, "style": "primary", "value": id },
-            { "type": "button", "action_id": "knock_dismiss", "text": { "type": "plain_text", "text": "취소", "emoji": true }, "style": "danger", "value": id }
-        ] }),
-    ];
+    let (fallback, blocks) = build_message_blocks(id, title, body, action_url.as_deref());
     let result = api_call(
         client,
         bot_token,
@@ -694,9 +1045,18 @@ pub(super) fn process_block_action(
             .and_then(Value::as_array)
             .map(|blocks| {
                 let mut blocks = blocks.clone();
-                blocks.push(json!({ "type": "context", "elements": [
-                    { "type": "mrkdwn", "text": "⛔ 이 요청은 Slack owner만 결정할 수 있습니다" }
+                let warning = "⛔ 이 요청은 Slack owner만 결정할 수 있습니다";
+                let warned = blocks.iter().any(|block| {
+                    block["type"] == "context"
+                        && block["elements"].as_array().is_some_and(|elements| {
+                            elements.iter().any(|element| element["text"] == warning)
+                        })
+                });
+                if !warned && blocks.len() < SLACK_BLOCK_LIMIT {
+                    blocks.push(json!({ "type": "context", "elements": [
+                    { "type": "mrkdwn", "text": warning }
                 ] }));
+                }
                 Value::Array(blocks)
             });
         return ActionResult::Rejected {
@@ -1316,6 +1676,106 @@ mod tests {
             body.chars().count(),
             1500 + "…(맥에서 전체 보기)".chars().count()
         );
+    }
+
+    #[test]
+    fn post_blocks_extract_metadata_execution_and_only_the_ai_section() {
+        let body = concat!(
+            "⏱ 요청시각: 12:30\n👤 요청자: Alice\n▶️ 승인 시 실행: cargo test\n\n",
+            "## 설명\n**본문** [문서](https://example.test)\n\n```md\n## 🤖 AI 판단\n```\n\n",
+            "## 🤖 AI 판단\nsecret=hidden\n\n## 다음 단계\n계속"
+        );
+        let (fallback, blocks) = build_message_blocks("q-7", "deploy.md", body, None);
+        let title = blocks[0]["text"]["text"].as_str().unwrap();
+        let execution = blocks[2]["text"]["text"].as_str().unwrap();
+        let body = blocks[3]["text"]["text"].as_str().unwrap();
+        let ai = blocks[4]["text"]["text"].as_str().unwrap();
+        assert!(title.contains("⚠️ *deploy.md*"));
+        assert_eq!(blocks[1]["elements"][0]["text"], "👤 Alice · ⏱ 12:30");
+        assert!(execution.contains("```\ncargo test\n```"));
+        assert!(
+            body.contains("*본문* <https://example.test|문서>") && body.contains("*다음 단계*")
+        );
+        assert!(body.contains("```\n## 🤖 AI 판단\n```"));
+        assert!(ai.contains("🤖 *AI 판단*\nsecret=****"));
+        assert!(!ai.contains("## 🤖"));
+        assert!(fallback.contains("cargo test") && fallback.contains("secret=****"));
+        assert_eq!(blocks[5]["type"], "actions");
+        assert_eq!(blocks[5]["elements"][0]["action_id"], "knock_approve");
+        assert_eq!(blocks[5]["elements"][1]["action_id"], "knock_dismiss");
+        assert_eq!(blocks[5]["elements"][0]["value"], "q-7");
+    }
+
+    #[test]
+    fn markdown_converter_keeps_code_and_table_literals() {
+        let output = markdown_to_mrkdwn(concat!(
+            "# Heading\n**bold** __under__ [docs `literal`](https://example.test?a=1&b=2) `**[x](y)**`\n\n",
+            "```sh\n**[x](y)** <tag>\n```\n\n| A | B |\n|---|---|\n| **cell** | [link](url) |\n\n**after**"
+        ));
+        assert!((1..=6).all(|level| {
+            markdown_to_mrkdwn(&format!("{} Heading", "#".repeat(level))).contains("*Heading*")
+        }));
+        assert!(
+            output.contains("*bold* _under_ <https://example.test?a=1&amp;b=2|docs `literal`>"),
+            "{output}"
+        );
+        assert!(output.contains("`**[x](y)**`"));
+        assert!(output.contains("```\n**[x](y)** &lt;tag&gt;\n```"));
+        assert!(output.contains("```\n| A | B |\n|---|---|\n| **cell** | [link](url) |\n```"));
+        assert!(output.ends_with("*after*"));
+        let (fallback, blocks) =
+            build_message_blocks("q-plain", "title", "## Summary\n**body**", None);
+        assert!(blocks.iter().all(|block| block["type"] != "context"));
+        let plain_body = blocks[2]["text"]["text"].as_str().unwrap();
+        assert!(plain_body.contains("*Summary*\n*body*"));
+        assert!(fallback.contains("*body*"));
+    }
+
+    #[test]
+    fn long_body_ai_and_action_url_obey_slack_limits() {
+        let body = format!(
+            "secret=hidden\n```sh\n{}\n```\n\n## 🤖 AI 판단\ntoken=xoxb-1234567890-secret",
+            "<".repeat(1600)
+        );
+        let action_url = format!("https://example.test/{}", "x".repeat(5000));
+        let (_, blocks) = build_message_blocks("q-long", "title", &body, Some(&action_url));
+        let execution = blocks[2]["text"]["text"].as_str().unwrap();
+        let ai = blocks[3]["text"]["text"].as_str().unwrap();
+        assert!(execution.contains("secret=****"));
+        assert!(execution.contains("맥에서 전체 보기"));
+        assert_eq!(execution.matches("```").count() % 2, 0);
+        assert!(ai.contains("token=****"));
+        assert!(blocks.len() <= SLACK_BLOCK_LIMIT);
+        assert!(blocks.iter().all(|block| block["text"]["text"]
+            .as_str()
+            .is_none_or(|text| utf16_len(text) <= SLACK_SECTION_TEXT_LIMIT)));
+        let action = blocks[1]["text"]["text"].as_str().unwrap();
+        assert!(action.ends_with("|작업 열기>"));
+    }
+
+    #[test]
+    fn rejected_action_does_not_duplicate_warning_or_exceed_block_limit() {
+        let (_, queue) = queued(true);
+        let warning = "⛔ 이 요청은 Slack owner만 결정할 수 있습니다";
+        let rejected = |payload| match process_block_action(true, "U_OWNER", &queue, payload) {
+            ActionResult::Rejected {
+                blocks: Some(blocks),
+                ..
+            } => blocks,
+            _ => panic!("rejected"),
+        };
+        let mut duplicate = action("U_OTHER", "knock_approve", "q-1");
+        duplicate["message"]["blocks"] = json!([
+            { "type": "context", "elements": [{ "type": "mrkdwn", "text": warning }] }
+        ]);
+        let blocks = rejected(&duplicate);
+        assert_eq!(blocks.as_array().unwrap().len(), 1);
+        assert_eq!(blocks[0]["elements"][0]["text"], warning);
+
+        let mut full = action("U_OTHER", "knock_approve", "q-1");
+        full["message"]["blocks"] = json!(vec![json!({ "type": "section" }); SLACK_BLOCK_LIMIT]);
+        let blocks = rejected(&full);
+        assert_eq!(blocks.as_array().unwrap().len(), SLACK_BLOCK_LIMIT);
     }
 
     #[test]
