@@ -106,6 +106,40 @@
         </label>
         <div class="toggle-desc">기간 선택은 다음에 켤 때 적용됩니다. 현재 켜진 승인의 만료 시각은 바뀌지 않습니다.</div>
       </div>
+      <section class="slack-settings" aria-labelledby="slack-settings-title">
+        <h2 id="slack-settings-title">Slack 승인</h2>
+        <label class="toggle-row">
+          <input type="checkbox" id="slack-enabled" />
+          <div class="toggle-text">
+            <div class="toggle-label">Slack Socket Mode 사용</div>
+            <div class="toggle-desc">기본은 꺼져 있습니다. 승인 대상은 PR 머지 또는 허용한 Scalr 주소뿐입니다.</div>
+          </div>
+        </label>
+        <div class="slack-fields">
+          <label class="tts-opt-row tts-opt-col">
+            <span class="tts-opt-label">owner Slack 사용자 ID</span>
+            <input id="slack-owner-user-id" type="text" placeholder="U0123456789" autocomplete="off" />
+          </label>
+          <label class="tts-opt-row tts-opt-col">
+            <span class="tts-opt-label">원격 승인 허용 호스트 (쉼표 또는 줄바꿈)</span>
+            <textarea id="slack-remote-action-hosts" rows="2" spellcheck="false"></textarea>
+          </label>
+          <label class="tts-opt-row tts-opt-col">
+            <span class="tts-opt-label">App-Level Token (xapp-)</span>
+            <input id="slack-app-token" class="slack-secret" type="password" autocomplete="new-password" />
+          </label>
+          <label class="tts-opt-row tts-opt-col">
+            <span class="tts-opt-label">Bot Token (xoxb-)</span>
+            <input id="slack-bot-token" class="slack-secret" type="password" autocomplete="new-password" />
+          </label>
+          <div class="slack-actions">
+            <button id="slack-save" class="btn primary" type="button">Slack 설정 저장</button>
+            <button id="slack-test" class="btn ghost" type="button">연결 시험</button>
+            <span id="slack-status" role="status" aria-live="polite"></span>
+          </div>
+        </div>
+      </section>
+
       <label class="toggle-row">
         <input type="checkbox" id="tts-toggle" />
         <div class="toggle-text">

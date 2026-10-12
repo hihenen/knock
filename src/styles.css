@@ -308,6 +308,23 @@ body {
   line-height: 1.5;
   margin-top: 4px;
 }
+.slack-settings { margin: 18px 0; }
+.slack-settings h2 { margin: 0 0 8px; font-size: 15px; }
+.slack-fields {
+  display: flex; flex-direction: column; gap: 10px;
+  margin-top: 8px; padding: 12px 16px;
+  border: 1px solid var(--border); border-radius: 10px;
+}
+.slack-fields input,
+.slack-fields textarea {
+  width: 100%; font: inherit; padding: 7px 9px;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg); color: var(--fg);
+}
+.slack-fields textarea { resize: vertical; }
+.slack-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.slack-actions .btn { padding: 8px 12px; font-size: 13px; }
+#slack-status { color: var(--muted); font-size: 12px; }
 
 /* ---- Ask mode ---- */
 .ask {

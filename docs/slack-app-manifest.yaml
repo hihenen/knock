@@ -1,0 +1,22 @@
+display_information:
+  name: knock
+  description: Approve PR merge and Scalr apply gates from Slack
+  background_color: "#2c4b7c"
+features:
+  bot_user:
+    display_name: knock
+    always_online: false
+oauth_config:
+  scopes:
+    bot:
+      - chat:write
+      - im:write
+settings:
+  event_subscriptions:
+    bot_events: []
+  interactivity:
+    is_enabled: true
+  org_deploy_enabled: false
+  socket_mode_enabled: true
+
+# Create an App-Level Token separately and grant it the connections:write scope.

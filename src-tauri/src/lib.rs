@@ -23,6 +23,7 @@ use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut,
 use tauri_plugin_notification::NotificationExt;
 
 mod ipc;
+mod slack;
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -73,6 +74,9 @@ enum Command {
         file: PathBuf,
         #[arg(long)]
         gate: bool,
+        /// Send eligible merge-approval gates to the configured Slack owner.
+        #[arg(long, requires = "gate")]
+        remote_approve: bool,
         #[arg(long)]
         json: bool,
         #[arg(long)]
@@ -876,8 +880,36 @@ fn annotate_contract(decision: &str, feedback: Option<&str>, json: bool) -> Opti
     }
 }
 
+fn annotate_contract_with_via(
+    decision: &str,
+    feedback: Option<&str>,
+    json: bool,
+    via: Option<&str>,
+) -> Option<String> {
+    let result = annotate_contract(decision, feedback, json)?;
+    if json && via == Some("slack") {
+        let mut value: Value = serde_json::from_str(&result).ok()?;
+        value["via"] = Value::String("slack".into());
+        Some(value.to_string())
+    } else {
+        Some(result)
+    }
+}
+
 fn output_annotate(decision: &str, feedback: Option<&str>, json: bool) -> ! {
     match annotate_contract(decision, feedback, json) {
+        Some(line) => print_and_exit(line),
+        None => print_nothing_and_exit(),
+    }
+}
+
+fn output_annotate_with_via(
+    decision: &str,
+    feedback: Option<&str>,
+    json: bool,
+    via: Option<&str>,
+) -> ! {
+    match annotate_contract_with_via(decision, feedback, json, via) {
         Some(line) => print_and_exit(line),
         None => print_nothing_and_exit(),
     }
@@ -963,6 +995,7 @@ fn get_payload(state: tauri::State<AppState>) -> Value {
             "ttsRepeat": config_tts_repeat(),
             "ttsPhrase": config_tts_phrase(),
             "version": env!("CARGO_PKG_VERSION"),
+            "slack": slack::config_payload(&read_config()),
         }),
     }
 }
@@ -1362,12 +1395,44 @@ struct QueueEntry {
     payload: Value,
     source: Value,
     created_at: u64,
+    remote_slack: bool,
     responder: ipc::Responder,
 }
 
 struct DaemonState {
     queue: Arc<Mutex<Vec<QueueEntry>>>,
     grants: Grants,
+    slack: slack::Integration,
+}
+
+struct QueueResolution {
+    remote_slack: bool,
+}
+
+/// Atomically remove one eligible request and send its only client reply.
+fn reply_queue_entry<F>(
+    queue: &Arc<Mutex<Vec<QueueEntry>>>,
+    id: &str,
+    response: &Value,
+    mut eligible: F,
+    before_reply: impl FnOnce(&QueueEntry),
+) -> Option<QueueResolution>
+where
+    F: FnMut(&QueueEntry) -> bool,
+{
+    let entry = {
+        let mut queue = queue.lock().unwrap();
+        let index = queue
+            .iter()
+            .position(|entry| entry.id == id && eligible(entry))?;
+        queue.remove(index)
+    };
+    let result = QueueResolution {
+        remote_slack: entry.remote_slack,
+    };
+    before_reply(&entry);
+    entry.responder.reply(response);
+    Some(result)
 }
 
 /// The pending queue, shaped for the frontend list (no responders).
@@ -1454,32 +1519,34 @@ fn daemon_resolve(
     completed: Option<bool>,
     state: tauri::State<DaemonState>,
 ) {
-    // The owner ticked "send as execution approval" on an ask: record a
-    // single-use pre-authorization the next gate can consume. The TTL policy is
-    // owned here (not the webview) — the frontend only sends the boolean intent.
-    if grant == Some(true) {
-        state
-            .grants
-            .lock()
-            .unwrap()
-            .push(Instant::now() + Duration::from_secs(GRANT_TTL_SECS));
+    let mut response = serde_json::json!({ "decision": decision });
+    if let Some(f) = feedback {
+        response["feedback"] = Value::String(f);
     }
-    let entry = {
-        let mut q = state.queue.lock().unwrap();
-        q.iter().position(|e| e.id == id).map(|pos| q.remove(pos))
-    };
-    if let Some(entry) = entry {
-        let mut resp = serde_json::json!({ "decision": decision });
-        if let Some(f) = feedback {
-            resp["feedback"] = Value::String(f);
+    if let Some(a) = answers {
+        response["answers"] = a;
+    }
+    if let Some(c) = completed {
+        response["completed"] = Value::Bool(c);
+    }
+    let grants = state.grants.clone();
+    if let Some(resolved) = reply_queue_entry(
+        &state.queue,
+        &id,
+        &response,
+        |_| true,
+        |entry| {
+            if grant == Some(true) && entry.kind == "ask" {
+                grants
+                    .lock()
+                    .unwrap()
+                    .push(Instant::now() + Duration::from_secs(GRANT_TTL_SECS));
+            }
+        },
+    ) {
+        if resolved.remote_slack {
+            state.slack.mark_processed(&id, "처리됨 (맥에서)".into());
         }
-        if let Some(a) = answers {
-            resp["answers"] = a;
-        }
-        if let Some(c) = completed {
-            resp["completed"] = Value::Bool(c);
-        }
-        entry.responder.reply(&resp);
     }
     let len = state.queue.lock().unwrap().len();
     let _ = app.emit("queue-changed", ());
@@ -1494,6 +1561,7 @@ fn daemon_resolve(
 fn run_daemon() {
     let queue: Arc<Mutex<Vec<QueueEntry>>> = Arc::new(Mutex::new(Vec::new()));
     let grants: Grants = Arc::new(Mutex::new(Vec::new()));
+    let (slack, slack_rx) = slack::Integration::new();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
@@ -1501,6 +1569,7 @@ fn run_daemon() {
         .manage(DaemonState {
             queue: queue.clone(),
             grants: grants.clone(),
+            slack: slack.clone(),
         })
         .invoke_handler(tauri::generate_handler![
             daemon_queue,
@@ -1514,6 +1583,8 @@ fn run_daemon() {
             save_open_url,
             save_tts,
             save_tts_opt,
+            slack::save_slack,
+            slack::test_slack,
             open_url,
             app_version
         ])
@@ -1526,6 +1597,13 @@ fn run_daemon() {
             }
         })
         .setup(move |app| {
+            let slack_worker = slack.clone();
+            let slack_queue = queue.clone();
+            let slack_app = app.handle().clone();
+            std::thread::spawn(move || {
+                slack::run_worker(slack_worker, slack_rx, slack_app, slack_queue)
+            });
+
             let sc = Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyK);
             let _ = app
                 .global_shortcut()
@@ -1549,6 +1627,7 @@ fn run_daemon() {
             let handle = app.handle().clone();
             let q = queue.clone();
             let g = grants.clone();
+            let slack_requests = slack.clone();
             std::thread::spawn(move || {
                 let h = handle.clone();
                 let served = ipc::serve(move |incoming| {
@@ -1671,14 +1750,17 @@ fn run_daemon() {
                         // dismiss 는 창을 거치지 않고 바로 해제한다. 취소는 되돌릴
                         // 것이 없어 확인 단계가 필요 없고, 승인과 달리 위험하지도 않다.
                         if kind == "dismiss" {
-                            if known {
-                                let entry = {
-                                    let mut qq = q.lock().unwrap();
-                                    qq.iter().position(|e| e.id == target).map(|i| qq.remove(i))
-                                };
-                                if let Some(e) = entry {
-                                    e.responder
-                                        .reply(&serde_json::json!({ "decision": "dismissed" }));
+                            let resolved = reply_queue_entry(
+                                &q,
+                                &target,
+                                &serde_json::json!({ "decision": "dismissed" }),
+                                |_| true,
+                                |_| {},
+                            );
+                            let dismissed = resolved.is_some();
+                            if let Some(entry) = resolved {
+                                if entry.remote_slack {
+                                    slack_requests.mark_processed(&target, "처리됨 (맥에서)".into());
                                 }
                                 let len = q.lock().unwrap().len();
                                 let hh = h.clone();
@@ -1693,7 +1775,7 @@ fn run_daemon() {
                                 });
                             }
                             incoming.responder.reply(&serde_json::json!({
-                                "decision": if known { "dismissed" } else { "unknown" }
+                                "decision": if dismissed { "dismissed" } else { "unknown" }
                             }));
                             return;
                         }
@@ -1773,6 +1855,18 @@ fn run_daemon() {
                         .get("payload")
                         .cloned()
                         .unwrap_or_else(|| serde_json::json!({}));
+                    let slack_config = slack::config_from_value(&read_config());
+                    let remote_slack = !payload.get("hook").and_then(Value::as_bool).unwrap_or(false)
+                        && !slack_config.owner_user_id.is_empty()
+                        && slack::is_remote_target(
+                            slack_config.enabled,
+                            inner.get("gate").and_then(Value::as_bool).unwrap_or(false),
+                            inner.get("remoteApprove").and_then(Value::as_bool).unwrap_or(false),
+                            inner.get("touchId").and_then(Value::as_bool).unwrap_or(false),
+                            kind == "ask" || inner.get("mode").and_then(Value::as_str) == Some("ask"),
+                            inner.get("actionUrl").and_then(Value::as_str),
+                            &slack_config.remote_action_hosts,
+                        );
                     // Pull title/body for the spoken announcement before `inner`
                     // is moved into the queue below.
                     let spoken_title = inner
@@ -1791,8 +1885,20 @@ fn run_daemon() {
                             payload: inner,
                             source,
                             created_at,
+                            remote_slack,
                             responder: incoming.responder,
                         });
+                        if remote_slack {
+                            let entry = qq.last().unwrap();
+                            slack_requests.queue_request(
+                                entry.id.clone(),
+                                entry.payload.get("title").and_then(Value::as_str).unwrap_or("Knock").to_string(),
+                                entry.payload.get("slackBody").and_then(Value::as_str)
+                                    .or_else(|| entry.payload.get("html").and_then(Value::as_str))
+                                    .unwrap_or("").to_string(),
+                                entry.payload.get("actionUrl").and_then(Value::as_str).map(str::to_string),
+                            );
+                        }
                         qq.len()
                     };
                     // Window show + badge are UI ops — macOS requires the main
@@ -1945,6 +2051,8 @@ fn launch(state: AppState) {
             save_open_url,
             save_tts,
             save_tts_opt,
+            slack::save_slack,
+            slack::test_slack,
             dismiss,
             open_url,
             app_version,
@@ -2172,7 +2280,12 @@ fn try_daemon(kind: &str, inner: Value, json: bool, hook: bool, source: Option<V
         if hook {
             output_hook(decision, feedback);
         }
-        output_annotate(decision, feedback, json);
+        output_annotate_with_via(
+            decision,
+            feedback,
+            json,
+            resp.get("via").and_then(Value::as_str),
+        );
     }
     // daemon unreachable → caller falls back to the single-shot window
 }
@@ -2402,6 +2515,7 @@ fn run_hook() {
         "html": html.clone(),
         "title": "Plan 검토",
         "gate": true,
+        "remoteApprove": false,
         "touchId": false,
         "configTouchId": config_touch_id(),
         "mergeToggle": false,
@@ -2456,6 +2570,7 @@ pub fn run() {
         Command::Annotate {
             file,
             gate,
+            remote_approve,
             json,
             title,
             touch_id,
@@ -2525,6 +2640,8 @@ pub fn run() {
                 "html": html.clone(),
                 "title": title.clone(),
                 "gate": gate,
+                "remoteApprove": remote_approve,
+                "slackBody": md.clone(),
                 "touchId": touch_id,
                 "configTouchId": config_touch_id(),
                 "configOpenUrl": config_open_url(),
@@ -2683,28 +2800,40 @@ mod tests {
     }
 
     #[test]
-    fn annotate_merge_toggle_flag_is_parsed_and_documented() {
+    fn annotate_gate_flags_are_parsed_and_documented() {
         let enabled = Cli::try_parse_from([
             "knock",
             "annotate",
             "request.md",
             "--gate",
             "--merge-toggle",
+            "--remote-approve",
         ])
         .unwrap();
-        match enabled.command {
-            Command::Annotate { merge_toggle, .. } => assert!(merge_toggle),
-            _ => panic!("expected annotate command"),
-        }
-
+        assert!(matches!(
+            enabled.command,
+            Command::Annotate {
+                merge_toggle: true,
+                remote_approve: true,
+                ..
+            }
+        ));
         let absent = Cli::try_parse_from(["knock", "annotate", "request.md", "--gate"]).unwrap();
-        match absent.command {
-            Command::Annotate { merge_toggle, .. } => assert!(!merge_toggle),
-            _ => panic!("expected annotate command"),
-        }
-
+        assert!(matches!(
+            absent.command,
+            Command::Annotate {
+                merge_toggle: false,
+                remote_approve: false,
+                ..
+            }
+        ));
+        assert!(
+            Cli::try_parse_from(["knock", "annotate", "request.md", "--remote-approve"]).is_err()
+        );
         let help = Cli::try_parse_from(["knock", "annotate", "--help"]).unwrap_err();
-        assert!(help.to_string().contains("--merge-toggle"));
+        for flag in ["--merge-toggle", "--remote-approve"] {
+            assert!(help.to_string().contains(flag));
+        }
     }
 
     #[test]
@@ -3121,6 +3250,24 @@ mod tests {
     }
 
     #[test]
+    fn annotate_via_is_only_added_to_slack_json_results() {
+        for decision in ["approved", "dismissed"] {
+            let output = annotate_contract_with_via(decision, None, true, Some("slack")).unwrap();
+            let value: Value = serde_json::from_str(&output).unwrap();
+            assert_eq!(value["decision"], decision);
+            assert_eq!(value["via"], "slack");
+            assert_eq!(
+                annotate_contract_with_via(decision, None, true, None),
+                annotate_contract(decision, None, true)
+            );
+            assert_eq!(
+                annotate_contract_with_via(decision, None, false, Some("slack")),
+                annotate_contract(decision, None, false)
+            );
+        }
+    }
+
+    #[test]
     fn render_md_forces_iframe_sandbox_without_same_origin() {
         let h = render_md("<iframe src=\"https://example.com/d.html\"></iframe>");
         assert!(h.contains("sandbox=\"allow-scripts\""), "got: {h}");
@@ -3171,10 +3318,14 @@ mod tests {
 
     #[test]
     fn project_source_uses_git_root() {
-        let nested = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let (_temp, config) = temporary_config_path();
+        let root = config.parent().unwrap();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        let nested = root.join("src");
+        std::fs::create_dir(&nested).unwrap();
         assert_eq!(
             project_name_from_cwd(&nested.to_string_lossy()).as_deref(),
-            Some("knock")
+            root.file_name().and_then(|name| name.to_str())
         );
     }
 }

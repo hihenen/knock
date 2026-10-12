@@ -60,6 +60,11 @@ interface SettingsPayload {
   touchId: boolean;
   autoApproveMerge: boolean;
   autoApproveMergeExpiresAt?: number | null;
+  slack?: {
+    enabled: boolean;
+    owner_user_id: string;
+    remote_action_hosts: string[];
+  };
   tts?: boolean;
   ttsStyle?: string;
   ttsScope?: string;
@@ -1464,6 +1469,69 @@ function setupSettings(p: SettingsPayload) {
   $("settings-root").classList.remove("hidden");
   $("settings-footer").classList.remove("hidden");
 
+  const slack = p.slack ?? {
+    enabled: false,
+    owner_user_id: "",
+    remote_action_hosts: ["fnfcorp.scalr.io"],
+  };
+  const slackEnabled = $<HTMLInputElement>("slack-enabled");
+  const slackOwner = $<HTMLInputElement>("slack-owner-user-id");
+  const slackHosts = $<HTMLTextAreaElement>("slack-remote-action-hosts");
+  const appToken = $<HTMLInputElement>("slack-app-token");
+  const botToken = $<HTMLInputElement>("slack-bot-token");
+  const saveSlack = $<HTMLButtonElement>("slack-save");
+  const testSlack = $<HTMLButtonElement>("slack-test");
+  const slackStatus = $("slack-status");
+  slackEnabled.checked = slack.enabled;
+  slackOwner.value = slack.owner_user_id;
+  slackHosts.value = slack.remote_action_hosts.join(", ");
+
+  const setSlackBusy = (busy: boolean, action: "save" | "test" = "save") => {
+    saveSlack.disabled = busy;
+    testSlack.disabled = busy;
+    saveSlack.textContent = busy && action === "save" ? "저장 중…" : "Slack 설정 저장";
+    testSlack.textContent = busy && action === "test" ? "시험 중…" : "연결 시험";
+  };
+  saveSlack.addEventListener("click", async () => {
+    setSlackBusy(true, "save");
+    slackStatus.textContent = "저장 중…";
+    try {
+      await invoke("save_slack", {
+        enabled: slackEnabled.checked,
+        ownerUserId: slackOwner.value.trim(),
+        remoteActionHosts: slackHosts.value
+          .split(/[\n,]/)
+          .map((host) => host.trim())
+          .filter(Boolean),
+        appToken: appToken.value.trim() || null,
+        botToken: botToken.value.trim() || null,
+      });
+      appToken.value = "";
+      botToken.value = "";
+      slackStatus.textContent = "Slack 설정을 저장했습니다.";
+    } catch (error) {
+      console.error("Slack 설정 저장 실패:", error);
+      slackStatus.textContent = "저장 실패: " + String(error);
+    } finally {
+      setSlackBusy(false);
+    }
+  });
+  testSlack.addEventListener("click", async () => {
+    setSlackBusy(true, "test");
+    slackStatus.textContent = "Slack 연결 시험 중…";
+    try {
+      const result = await invoke<unknown>("test_slack");
+      slackStatus.textContent = typeof result === "string"
+        ? result
+        : "Slack 연결 시험을 마쳤습니다.";
+    } catch (error) {
+      console.error("Slack 연결 시험 실패:", error);
+      slackStatus.textContent = "연결 시험 실패: " + String(error);
+    } finally {
+      setSlackBusy(false);
+    }
+  });
+
   const toggle = $<HTMLInputElement>("touch-id-toggle");
   toggle.checked = p.touchId;
   toggle.addEventListener("change", () => {
@@ -1598,6 +1666,7 @@ function setupSettings(p: SettingsPayload) {
 // =====================================================================
 // True while a detail (annotate/ask) is open, so re-renders don't wipe input.
 let daemonBusy = false;
+let activeDetailId: string | null = null;
 
 function daemonSink(id: string): Sink {
   const resolve = (
@@ -1609,6 +1678,7 @@ function daemonSink(id: string): Sink {
   ) => {
     invoke("daemon_resolve", { id, decision, feedback, answers, grant, completed });
     daemonBusy = false;
+    activeDetailId = null;
     submitted = false;
     // Re-render in place (no page reload) to show the next item / the list.
     setTimeout(() => void renderDaemon(), 80);
@@ -1622,6 +1692,7 @@ function daemonSink(id: string): Sink {
     startAction: () => {
       invoke("daemon_start_action", { id });
       daemonBusy = false;
+      activeDetailId = null;
       submitted = false;
       invoke("hide_window");
       setTimeout(() => void renderDaemon(), 80);
@@ -1631,6 +1702,7 @@ function daemonSink(id: string): Sink {
 
 function openDetail(item: QueueItem) {
   daemonBusy = true;
+  activeDetailId = item.id;
   resetView();
   sink = daemonSink(item.id);
   if (item.kind === "ask") setupAsk(item.payload as AskPayload);
@@ -1642,6 +1714,8 @@ function openDetail(item: QueueItem) {
 }
 
 function renderList(items: QueueItem[]) {
+  activeDetailId = null;
+  daemonBusy = false;
   resetView();
   void applyWindowLayout("queue", items.length);
   $("badge").textContent =
@@ -1709,10 +1783,9 @@ function renderList(items: QueueItem[]) {
   });
 }
 
-// Pull the current queue and render in place. Skipped while a detail is open
-// so it doesn't blow away what the user is typing.
+// Pull the current queue and render in place. Keep an open detail untouched
+// while its item remains queued, but close it when another resolver removes it.
 async function renderDaemon() {
-  if (daemonBusy) return;
   let q: QueuePayload;
   try {
     q = await invoke<QueuePayload>("daemon_queue");
@@ -1720,6 +1793,15 @@ async function renderDaemon() {
     return;
   }
   if (!q || q.mode !== "queue") return;
+  if (daemonBusy && activeDetailId && q.items.some((item) => item.id === activeDetailId)) {
+    return; // keep typed feedback intact while this request is still pending
+  }
+  if (daemonBusy && activeDetailId) {
+    // Slack or another external resolver removed the open request from the queue.
+    daemonBusy = false;
+    activeDetailId = null;
+    submitted = false;
+  }
   if (q.items.length === 1) {
     try {
       openDetail(q.items[0]);
