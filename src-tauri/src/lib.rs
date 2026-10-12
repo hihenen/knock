@@ -1410,6 +1410,7 @@ struct QueueEntry {
     source: Value,
     created_at: u64,
     remote_slack: bool,
+    decision_via: Option<&'static str>,
     responder: ipc::Responder,
 }
 
@@ -1421,6 +1422,7 @@ struct DaemonState {
 
 struct QueueResolution {
     remote_slack: bool,
+    via: &'static str,
 }
 
 /// Atomically remove one eligible request and send its only client reply.
@@ -1443,6 +1445,7 @@ where
     };
     let result = QueueResolution {
         remote_slack: entry.remote_slack,
+        via: entry.decision_via.unwrap_or("mac"),
     };
     before_reply(&entry);
     entry.responder.reply(response);
@@ -1533,6 +1536,7 @@ fn daemon_resolve(
     completed: Option<bool>,
     state: tauri::State<DaemonState>,
 ) {
+    let status_decision = decision.clone();
     let mut response = serde_json::json!({ "decision": decision });
     if let Some(f) = feedback {
         response["feedback"] = Value::String(f);
@@ -1559,7 +1563,12 @@ fn daemon_resolve(
         },
     ) {
         if resolved.remote_slack {
-            state.slack.mark_processed(&id, "처리됨 (맥에서)".into());
+            let via = if status_decision == "approved" {
+                resolved.via
+            } else {
+                "mac"
+            };
+            state.slack.mark_processed(&id, &status_decision, via);
         }
     }
     let len = state.queue.lock().unwrap().len();
@@ -1761,6 +1770,13 @@ fn run_daemon() {
                             let qq = q.lock().unwrap();
                             !target.is_empty() && qq.iter().any(|e| e.id == target)
                         };
+                        if kind == "approve" && known {
+                            if let Some(entry) =
+                                q.lock().unwrap().iter_mut().find(|entry| entry.id == target)
+                            {
+                                entry.decision_via = Some("ctl");
+                            }
+                        }
                         // dismiss 는 창을 거치지 않고 바로 해제한다. 취소는 되돌릴
                         // 것이 없어 확인 단계가 필요 없고, 승인과 달리 위험하지도 않다.
                         if kind == "dismiss" {
@@ -1774,7 +1790,7 @@ fn run_daemon() {
                             let dismissed = resolved.is_some();
                             if let Some(entry) = resolved {
                                 if entry.remote_slack {
-                                    slack_requests.mark_processed(&target, "처리됨 (맥에서)".into());
+                                    slack_requests.mark_processed(&target, "dismissed", "ctl");
                                 }
                                 let len = q.lock().unwrap().len();
                                 let hh = h.clone();
@@ -1900,6 +1916,7 @@ fn run_daemon() {
                             source,
                             created_at,
                             remote_slack,
+                            decision_via: None,
                             responder: incoming.responder,
                         });
                         if remote_slack {
