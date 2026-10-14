@@ -4,6 +4,9 @@ All notable changes to knock are documented here. Versions follow [SemVer](https
 
 ## [Unreleased]
 
+### Added
+- `knock ctl dismiss all` / `knock ctl dismiss older:<분>`: 응답할 클라이언트가 죽어 쌓인 대기 건을 한 번에 취소한다. Slack DM 은 처리됨으로 갱신된다. all 은 아직 기다리는 요청도 거부로 끝낸다
+
 ## [0.7.3] - 2026-10-12
 
 ### Fixed

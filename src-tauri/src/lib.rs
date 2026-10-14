@@ -1426,6 +1426,18 @@ struct QueueResolution {
 }
 
 /// Atomically remove one eligible request and send its only client reply.
+/// `ctl dismiss` 의 일괄 대상. `all` → 0초 이상(전부), `older:<분>` → 그 분 이상 지난 건.
+/// 둘 다 아니면 None (단건 id / @N 경로로 넘긴다).
+fn bulk_dismiss_min_age_secs(target: &str) -> Option<u64> {
+    if target == "all" {
+        return Some(0);
+    }
+    target
+        .strip_prefix("older:")
+        .and_then(|m| m.parse::<u64>().ok())
+        .map(|m| m.saturating_mul(60))
+}
+
 fn reply_queue_entry<F>(
     queue: &Arc<Mutex<Vec<QueueEntry>>>,
     id: &str,
@@ -1743,6 +1755,54 @@ fn run_daemon() {
                             "tts": config_tts(),
                         }));
                         return;
+                    }
+                    // 일괄 취소: `ctl dismiss all` 은 대기 건 전부, `ctl dismiss older:<분>` 은
+                    // 그보다 오래된 건만 취소한다. 클라이언트(훅)가 이미 죽어 응답할 곳 없이
+                    // 쌓인 항목을 비우는 용도다. 취소는 되돌릴 것이 없고 승인과 달리 위험하지
+                    // 않지만, 아직 기다리는 요청도 거부로 끝나므로 all 은 신중히 쓴다.
+                    if kind == "dismiss" {
+                        let raw = payload.get("target").and_then(|v| v.as_str()).unwrap_or("");
+                        if let Some(min_age) = bulk_dismiss_min_age_secs(raw) {
+                            let now = epoch_seconds();
+                            let ids: Vec<String> = q
+                                .lock()
+                                .unwrap()
+                                .iter()
+                                .filter(|e| now.saturating_sub(e.created_at) >= min_age)
+                                .map(|e| e.id.clone())
+                                .collect();
+                            let mut count = 0_u64;
+                            for id in &ids {
+                                if let Some(entry) = reply_queue_entry(
+                                    &q,
+                                    id,
+                                    &serde_json::json!({ "decision": "dismissed" }),
+                                    |_| true,
+                                    |_| {},
+                                ) {
+                                    count += 1;
+                                    if entry.remote_slack {
+                                        slack_requests.mark_processed(id, "dismissed", "ctl");
+                                    }
+                                }
+                            }
+                            let len = q.lock().unwrap().len();
+                            let hh = h.clone();
+                            let _ = h.run_on_main_thread(move || {
+                                let _ = hh.emit("queue-changed", ());
+                                update_badge(&hh, len);
+                                if len == 0 {
+                                    if let Some(w) = hh.get_webview_window("main") {
+                                        let _ = w.hide();
+                                    }
+                                }
+                            });
+                            incoming.responder.reply(&serde_json::json!({
+                                "decision": "dismissed",
+                                "count": count
+                            }));
+                            return;
+                        }
                     }
                     if kind == "focus" || kind == "approve" || kind == "dismiss" {
                         let raw = payload
@@ -2753,7 +2813,7 @@ pub fn run() {
                 "dismiss" => "dismiss",
                 "tts" => "tts-toggle",
                 other => {
-                    eprintln!("알 수 없는 동작: {other} (list | focus | approve | dismiss | tts)");
+                    eprintln!("알 수 없는 동작: {other} (list | focus | approve | dismiss | tts) — dismiss 는 all / older:<분> 도 받는다");
                     std::process::exit(2);
                 }
             };
@@ -2804,6 +2864,20 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn bulk_dismiss_target_parsing() {
+        assert_eq!(super::bulk_dismiss_min_age_secs("all"), Some(0));
+        assert_eq!(super::bulk_dismiss_min_age_secs("older:30"), Some(1800));
+        assert_eq!(super::bulk_dismiss_min_age_secs("older:0"), Some(0));
+        assert_eq!(super::bulk_dismiss_min_age_secs("older:x"), None);
+        assert_eq!(super::bulk_dismiss_min_age_secs("@2"), None);
+        assert_eq!(super::bulk_dismiss_min_age_secs(""), None);
+        assert_eq!(
+            super::bulk_dismiss_min_age_secs("91444-1791969844531250000"),
+            None
+        );
+    }
+
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
 
