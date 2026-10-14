@@ -632,7 +632,10 @@ fn build_post_blocks(
     if options.is_empty() {
         return (fallback, blocks);
     }
-    if blocks.last().is_some_and(|block| block["type"] == "actions") {
+    if blocks
+        .last()
+        .is_some_and(|block| block["type"] == "actions")
+    {
         blocks.pop();
     }
     let mut elements: Vec<Value> = options
@@ -658,7 +661,11 @@ pub(super) fn ask_remote_spec(inner: &Value) -> Option<(String, Vec<String>)> {
     let [question] = questions.as_slice() else {
         return None;
     };
-    if question.get("multiSelect").and_then(Value::as_bool).unwrap_or(false) {
+    if question
+        .get("multiSelect")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
         return None;
     }
     let options = question.get("options")?.as_array()?;
@@ -679,8 +686,15 @@ pub(super) fn ask_remote_spec(inner: &Value) -> Option<(String, Vec<String>)> {
         body.push_str("\n\n");
     }
     for option in options {
-        let label = option.get("label").and_then(Value::as_str).unwrap_or_default();
-        match option.get("description").and_then(Value::as_str).filter(|d| !d.is_empty()) {
+        let label = option
+            .get("label")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        match option
+            .get("description")
+            .and_then(Value::as_str)
+            .filter(|d| !d.is_empty())
+        {
             Some(description) => body.push_str(&format!("- **{label}** — {description}\n")),
             None => body.push_str(&format!("- **{label}**\n")),
         }
@@ -1443,10 +1457,16 @@ fn process_ask_option(
         .get("header")
         .and_then(Value::as_str)
         .filter(|header| !header.is_empty())
-        .or_else(|| question.get("question").and_then(Value::as_str).filter(|q| !q.is_empty()))
+        .or_else(|| {
+            question
+                .get("question")
+                .and_then(Value::as_str)
+                .filter(|q| !q.is_empty())
+        })
         .unwrap_or("q0");
     let response = json!({ "answers": { key: [label] }, "decision": "approved", "via": "slack" });
-    if crate::reply_queue_entry(queue, id, &response, |entry| entry.remote_slack, |_| {}).is_none() {
+    if crate::reply_queue_entry(queue, id, &response, |entry| entry.remote_slack, |_| {}).is_none()
+    {
         eprintln!("knock: Slack action ignored (no pending remote entry for id={id})");
         return ActionResult::Ignored;
     }
@@ -2046,7 +2066,10 @@ mod tests {
             "eyJhbGciOiJIUzI1NiJ9",
             "S3cr3tPass",
         ] {
-            assert!(!masked.contains(secret), "secret remains: {secret} in {masked}");
+            assert!(
+                !masked.contains(secret),
+                "secret remains: {secret} in {masked}"
+            );
         }
         assert!(masked.contains("postgres://admin:****@db.internal"));
         assert!(masked.contains("Bearer ****"));
@@ -2082,8 +2105,19 @@ mod tests {
             q[0].kind = "ask".into();
             q[0].payload = ask_payload(false, 3);
         }
-        let result = process_block_action(true, "U_OWNER", &queue, &action("U_OWNER", "knock_ask_opt_1", "q-1|1"));
-        assert!(matches!(result, ActionResult::Applied { decision: "approved", .. }));
+        let result = process_block_action(
+            true,
+            "U_OWNER",
+            &queue,
+            &action("U_OWNER", "knock_ask_opt_1", "q-1|1"),
+        );
+        assert!(matches!(
+            result,
+            ActionResult::Applied {
+                decision: "approved",
+                ..
+            }
+        ));
         let response = reply(&bytes);
         assert_eq!(response["answers"]["배포"], json!(["옵션1"]));
         assert_eq!(response["via"], "slack");
@@ -2092,21 +2126,34 @@ mod tests {
     #[test]
     fn ask_option_click_rejects_index_mismatch_and_non_ask_entries() {
         let (_, queue) = queued(true);
-        let result = process_block_action(true, "U_OWNER", &queue, &action("U_OWNER", "knock_ask_opt_0", "q-1|0"));
+        let result = process_block_action(
+            true,
+            "U_OWNER",
+            &queue,
+            &action("U_OWNER", "knock_ask_opt_0", "q-1|0"),
+        );
         assert!(matches!(result, ActionResult::Ignored));
         {
             let mut q = queue.lock().unwrap();
             q[0].kind = "ask".into();
             q[0].payload = ask_payload(false, 2);
         }
-        let result = process_block_action(true, "U_OWNER", &queue, &action("U_OWNER", "knock_ask_opt_1", "q-1|0"));
+        let result = process_block_action(
+            true,
+            "U_OWNER",
+            &queue,
+            &action("U_OWNER", "knock_ask_opt_1", "q-1|0"),
+        );
         assert!(matches!(result, ActionResult::Ignored));
     }
 
     #[test]
     fn ask_post_blocks_have_option_buttons_and_cancel() {
         let (_, blocks) = build_post_blocks("q-1", "배포", "본문", None, &["a".into(), "b".into()]);
-        let elements = blocks.last().unwrap()["elements"].as_array().unwrap().clone();
+        let elements = blocks.last().unwrap()["elements"]
+            .as_array()
+            .unwrap()
+            .clone();
         assert_eq!(elements.len(), 3);
         assert_eq!(elements[0]["action_id"], "knock_ask_opt_0");
         assert_eq!(elements[0]["value"], "q-1|0");
