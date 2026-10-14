@@ -1946,9 +1946,15 @@ fn run_daemon() {
                         .cloned()
                         .unwrap_or_else(|| serde_json::json!({}));
                     let slack_config = slack::config_from_value(&read_config());
+                    // ask: 질문 1개·단일 선택이면 선택지 버튼으로 Slack 병행. Touch ID 를 켠 경우는 맥 전용.
+                    let ask_remote = kind == "ask"
+                        && slack_config.enabled
+                        && !config_touch_id()
+                        && !inner.get("touchId").and_then(Value::as_bool).unwrap_or(false)
+                        && slack::ask_remote_spec(&inner).is_some();
                     let remote_slack = !payload.get("hook").and_then(Value::as_bool).unwrap_or(false)
                         && !slack_config.owner_user_id.is_empty()
-                        && slack::is_remote_target(
+                        && (ask_remote || slack::is_remote_target(
                             slack_config.enabled,
                             inner.get("gate").and_then(Value::as_bool).unwrap_or(false),
                             inner.get("remoteApprove").and_then(Value::as_bool).unwrap_or(false),
@@ -1956,7 +1962,7 @@ fn run_daemon() {
                             kind == "ask" || inner.get("mode").and_then(Value::as_str) == Some("ask"),
                             inner.get("actionUrl").and_then(Value::as_str),
                             &slack_config.remote_action_hosts,
-                        );
+                        ));
                     // Pull title/body for the spoken announcement before `inner`
                     // is moved into the queue below.
                     let spoken_title = inner
@@ -1981,6 +1987,14 @@ fn run_daemon() {
                         });
                         if remote_slack {
                             let entry = qq.last().unwrap();
+                            if let Some((ask_body, labels)) = slack::ask_remote_spec(&entry.payload).filter(|_| entry.kind == "ask") {
+                                slack_requests.queue_ask_request(
+                                    entry.id.clone(),
+                                    entry.payload.get("title").and_then(Value::as_str).unwrap_or("Knock").to_string(),
+                                    ask_body,
+                                    labels,
+                                );
+                            } else {
                             slack_requests.queue_request(
                                 entry.id.clone(),
                                 entry.payload.get("title").and_then(Value::as_str).unwrap_or("Knock").to_string(),
@@ -1989,6 +2003,7 @@ fn run_daemon() {
                                     .unwrap_or("").to_string(),
                                 entry.payload.get("actionUrl").and_then(Value::as_str).map(str::to_string),
                             );
+                            }
                         }
                         qq.len()
                     };

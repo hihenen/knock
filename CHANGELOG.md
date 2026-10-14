@@ -4,6 +4,14 @@ All notable changes to knock are documented here. Versions follow [SemVer](https
 
 ## [Unreleased]
 
+## [0.7.5] - 2026-10-15
+
+### Added
+- `ask`(AskUserQuestion) 질문이 1개·단일 선택·선택지 24개 이하면 Slack DM 에 선택지 버튼으로도 올라간다. 눌린 라벨이 맥 창과 같은 형식의 answers 로 돌아간다. 다중 질문·복수 선택·Touch ID 를 켠 경우는 맥 전용
+
+### Changed
+- Slack 본문 비밀값 가리기 보강: `AWS_SECRET_ACCESS_KEY=`류 변수, `--secret-access-key` 같은 플래그 값, Bearer/Basic 헤더, `sk-`·`sk-ant-`, `gho_`·`ghs_`·`ghu_`·`ghr_`, JWT, `scheme://user:비밀번호@host` 의 비밀번호
+
 ## [0.7.4] - 2026-10-14
 
 ### Added
