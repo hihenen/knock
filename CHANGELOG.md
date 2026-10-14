@@ -4,6 +4,9 @@ All notable changes to knock are documented here. Versions follow [SemVer](https
 
 ## [Unreleased]
 
+### Added
+- Slack 버튼 이벤트 수신과 무시 사유(비활성·owner 불일치·대기 항목 없음 등)를 stderr(`knock.log`)에 남긴다. 모바일 클릭이 반영되지 않을 때 원인 구분용
+
 ## [0.7.3] - 2026-10-12
 
 ### Fixed

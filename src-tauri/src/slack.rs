@@ -1200,6 +1200,7 @@ pub(super) fn process_block_action(
     payload: &Value,
 ) -> ActionResult {
     if !enabled {
+        eprintln!("knock: Slack action ignored (slack disabled)");
         return ActionResult::Ignored;
     }
     if payload
@@ -1208,6 +1209,7 @@ pub(super) fn process_block_action(
         .and_then(Value::as_str)
         != Some(owner_user_id)
     {
+        eprintln!("knock: Slack action rejected (user is not the configured owner)");
         let blocks = payload
             .get("message")
             .and_then(|message| message.get("blocks"))
@@ -1238,19 +1240,25 @@ pub(super) fn process_block_action(
         .and_then(Value::as_array)
         .and_then(|actions| actions.first())
     else {
+        eprintln!("knock: Slack action ignored (no actions in payload)");
         return ActionResult::Ignored;
     };
     let decision = match action.get("action_id").and_then(Value::as_str) {
         Some("knock_approve") => "approved",
         Some("knock_dismiss") => "dismissed",
-        _ => return ActionResult::Ignored,
+        other => {
+            eprintln!("knock: Slack action ignored (unknown action_id={other:?})");
+            return ActionResult::Ignored;
+        }
     };
     let Some(id) = action.get("value").and_then(Value::as_str) else {
+        eprintln!("knock: Slack action ignored (no value on button)");
         return ActionResult::Ignored;
     };
     let response = json!({ "decision": decision, "via": "slack" });
     if crate::reply_queue_entry(queue, id, &response, |entry| entry.remote_slack, |_| {}).is_none()
     {
+        eprintln!("knock: Slack action ignored (no pending remote entry for id={id})");
         return ActionResult::Ignored;
     }
     ActionResult::Applied {
@@ -1369,6 +1377,10 @@ fn run_socket_reader(
                     Some(Value::String(raw)) => serde_json::from_str(raw).unwrap_or(Value::Null),
                     _ => Value::Null,
                 };
+                eprintln!(
+                    "knock: Slack interactive payload received (type={})",
+                    payload.get("type").and_then(Value::as_str).unwrap_or("?")
+                );
                 if payload.get("type").and_then(Value::as_str) == Some("block_actions") {
                     integration.deliver_action(payload, config.clone());
                 }
