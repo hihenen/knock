@@ -4,6 +4,13 @@ All notable changes to knock are documented here. Versions follow [SemVer](https
 
 ## [Unreleased]
 
+### Changed
+- `knock-ask` 스킬을 `knock-annotate` 처럼 얇은 진입점으로: 모델이 선택지 결정이 필요할 때 스스로 부를 수 있게 하고(`disable-model-invocation` 제거), 로드되면 `knock guide` 출력을 읽어 따르게 한다
+- `knock guide` 의 ask 절 보강: 기본 단일 선택·`multiSelect`·"기타"·답 배열 형식, Slack 선택지 버튼이 올라가는 조건(질문 1개·단일 선택·선택지 1~24개·항상 지문 꺼짐)
+
+### Fixed
+- README·설정 창 문구가 "ask 질문은 Slack 으로 보내지 않는다"고 적고 있던 것을 0.7.5 동작에 맞게 고침
+
 ## [0.7.6] - 2026-10-16
 
 ### Added

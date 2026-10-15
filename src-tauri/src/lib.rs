@@ -3031,6 +3031,8 @@ mod tests {
         }
         for needle in [
             "knock ask",
+            "multiSelect",
+            "\"answers\"",
             "run_in_background",
             "--remote-approve",
             "--local-only",
