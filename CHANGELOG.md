@@ -15,6 +15,7 @@ All notable changes to knock are documented here. Versions follow [SemVer](https
 
 ### Fixed
 - README·설정 창 문구가 "ask 질문은 Slack 으로 보내지 않는다"고 적고 있던 것을 0.7.5 동작에 맞게 고침
+- Slack 토큰을 프로세스 메모리에 캐시해 재연결 때 키체인을 반복해서 읽지 않는다
 
 ## [0.7.6] - 2026-10-16
 

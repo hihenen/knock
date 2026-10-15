@@ -1032,13 +1032,16 @@ impl Integration {
 
 #[cfg(target_os = "macos")]
 fn store_token(account: &str, token: &str) -> Result<(), String> {
-    security_framework::passwords::set_generic_password(SERVICE, account, token.as_bytes())
-        .map_err(|error| format!("macOS 키체인 저장 실패 ({})", error.code()))
+    token_cache().update(|| {
+        security_framework::passwords::set_generic_password(SERVICE, account, token.as_bytes())
+            .map_err(|error| format!("macOS 키체인 저장 실패 ({})", error.code()))?;
+        bump_token_generation()
+    })
 }
 
 #[cfg(not(target_os = "macos"))]
 fn store_token(_account: &str, _token: &str) -> Result<(), String> {
-    Err("Slack 원격 승인은 macOS에서만 사용할 수 있습니다".into())
+    token_cache().update(|| Err("Slack 원격 승인은 macOS에서만 사용할 수 있습니다".into()))
 }
 
 #[cfg(target_os = "macos")]
@@ -1087,11 +1090,79 @@ fn save_tokens(app_token: Option<String>, bot_token: Option<String>) -> Result<(
     Ok(())
 }
 
-fn read_tokens() -> Result<(String, String), String> {
+#[derive(Default)]
+struct TokenCache {
+    tokens: Mutex<Option<(u64, TokenResult)>>,
+}
+
+type TokenResult = Result<(String, String), String>;
+
+impl TokenCache {
+    fn read(
+        &self,
+        generation: u64,
+        load: impl FnOnce() -> Result<(String, String), String>,
+    ) -> Result<(String, String), String> {
+        let mut cached = self
+            .tokens
+            .lock()
+            .map_err(|_| "Slack 토큰 캐시를 사용할 수 없습니다".to_string())?;
+        if let Some((cached_generation, tokens)) = cached.as_ref() {
+            if *cached_generation == generation {
+                return tokens.clone();
+            }
+        }
+        let tokens = load();
+        *cached = Some((generation, tokens.clone()));
+        tokens
+    }
+
+    fn update(&self, save: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+        let mut cached = self
+            .tokens
+            .lock()
+            .map_err(|_| "Slack 토큰 캐시를 사용할 수 없습니다".to_string())?;
+        let result = save();
+        *cached = None;
+        result
+    }
+}
+
+static TOKEN_CACHE: OnceLock<TokenCache> = OnceLock::new();
+
+fn token_cache() -> &'static TokenCache {
+    TOKEN_CACHE.get_or_init(TokenCache::default)
+}
+
+#[cfg(target_os = "macos")]
+// 설정 창은 별도 프로세스이므로 데몬에도 토큰 변경을 알린다.
+fn bump_token_generation() -> Result<(), String> {
+    crate::update_config_at(&crate::config_path(), |config| {
+        let generation = config
+            .get("slack_token_generation")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        config.insert(
+            "slack_token_generation".into(),
+            json!(generation.saturating_add(1)),
+        );
+        Ok(())
+    })
+    .map_err(|_| "Slack 토큰 변경을 설정에 기록하지 못했습니다".into())
+}
+
+fn load_tokens() -> Result<(String, String), String> {
     let app = read_token("app_token")?;
     let bot = read_token("bot_token")?;
     validate_tokens(&app, &bot)?;
     Ok((app, bot))
+}
+
+fn read_tokens() -> Result<(String, String), String> {
+    let generation = crate::read_config()["slack_token_generation"]
+        .as_u64()
+        .unwrap_or(0);
+    token_cache().read(generation, load_tokens)
 }
 
 #[tauri::command]
@@ -1971,6 +2042,66 @@ mod tests {
             "container": { "message_ts": "1548261231.000200" },
             "message": { "ts": "1548261231.000200", "blocks": blocks }
         })
+    }
+
+    #[test]
+    fn token_cache_reads_once_and_caches_read_errors() {
+        let cache = TokenCache::default();
+        let reads = std::sync::atomic::AtomicUsize::new(0);
+        let load = || {
+            reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err("keychain unavailable".to_string())
+        };
+
+        assert_eq!(cache.read(0, load), Err("keychain unavailable".into()));
+        assert_eq!(
+            cache.read(0, || {
+                reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(("xapp-new".into(), "xoxb-new".into()))
+            }),
+            Err("keychain unavailable".into())
+        );
+        assert_eq!(
+            cache.read(1, || {
+                reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(("xapp-new".into(), "xoxb-new".into()))
+            }),
+            Ok(("xapp-new".into(), "xoxb-new".into()))
+        );
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn token_cache_update_reloads_after_a_token_write() {
+        let cache = TokenCache::default();
+        let reads = std::sync::atomic::AtomicUsize::new(0);
+        let load = || {
+            let version = reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok((format!("xapp-{version}"), format!("xoxb-{version}")))
+        };
+
+        assert_eq!(
+            cache.read(0, load).unwrap(),
+            ("xapp-0".into(), "xoxb-0".into())
+        );
+        assert_eq!(
+            cache
+                .read(0, || panic!(
+                    "cached token pair should avoid another keychain read"
+                ))
+                .unwrap(),
+            ("xapp-0".into(), "xoxb-0".into())
+        );
+        assert_eq!(
+            cache.read(1, load).unwrap(),
+            ("xapp-1".into(), "xoxb-1".into())
+        );
+        cache.update(|| Ok(())).unwrap();
+        assert_eq!(
+            cache.read(1, load).unwrap(),
+            ("xapp-2".into(), "xoxb-2".into())
+        );
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 3);
     }
 
     #[test]
