@@ -25,6 +25,8 @@ pub(super) struct SlackConfig {
     pub enabled: bool,
     pub owner_user_id: String,
     pub remote_action_hosts: Vec<String>,
+    /// true 면 `--gate` 게이트가 `--remote-approve` 없이도 Slack 대상이 된다 (`--local-only` 로 제외).
+    pub remote_default: bool,
 }
 
 impl Default for SlackConfig {
@@ -33,6 +35,7 @@ impl Default for SlackConfig {
             enabled: false,
             owner_user_id: String::new(),
             remote_action_hosts: DEFAULT_HOSTS.iter().map(|host| (*host).into()).collect(),
+            remote_default: false,
         }
     }
 }
@@ -74,18 +77,19 @@ pub(super) fn normalize_hosts(hosts: Vec<String>) -> Result<Vec<String>, String>
 }
 
 pub(super) fn is_remote_target(
-    enabled: bool,
+    config: &SlackConfig,
     gate: bool,
     explicit: bool,
+    local_only: bool,
     touch_id: bool,
     ask: bool,
     action_url: Option<&str>,
-    hosts: &[String],
 ) -> bool {
-    if !enabled || !gate || touch_id || ask {
+    // --local-only 는 --remote-approve·remote_default·허용 호스트 어느 것보다 우선한다.
+    if !config.enabled || !gate || touch_id || ask || local_only {
         return false;
     }
-    if explicit {
+    if explicit || config.remote_default {
         return true;
     }
     let Some(host) = action_url
@@ -94,7 +98,7 @@ pub(super) fn is_remote_target(
     else {
         return false;
     };
-    hosts.iter().any(|pattern| {
+    config.remote_action_hosts.iter().any(|pattern| {
         if let Some(suffix) = pattern.strip_prefix("*.") {
             host.ends_with(&format!(".{suffix}"))
         } else {
@@ -1095,6 +1099,7 @@ pub(super) async fn save_slack(
     enabled: bool,
     owner_user_id: String,
     remote_action_hosts: Vec<String>,
+    remote_default: bool,
     app_token: Option<String>,
     bot_token: Option<String>,
 ) -> Result<(), String> {
@@ -1114,6 +1119,7 @@ pub(super) async fn save_slack(
                     "enabled": enabled,
                     "owner_user_id": owner_user_id,
                     "remote_action_hosts": remote_action_hosts,
+                    "remote_default": remote_default,
                 }),
             );
             Ok(())
@@ -1971,29 +1977,56 @@ mod tests {
     fn slack_config_defaults_disabled_and_fails_closed() {
         let config = config_from_value(&json!({}));
         assert!(!config.enabled);
+        assert!(!config.remote_default, "기존 동작 보존: 기본은 꺼짐");
         assert_eq!(config.remote_action_hosts, ["fnfcorp.scalr.io"]);
         assert_eq!(
             config_from_value(&json!({ "slack": { "enabled": "yes" } })),
             SlackConfig::default()
         );
         assert_eq!(config_payload(&json!({}))["enabled"], false);
+        assert_eq!(config_payload(&json!({}))["remote_default"], false);
+        assert!(config_from_value(&json!({ "slack": { "remote_default": true } })).remote_default);
+        assert_eq!(
+            config_from_value(&json!({ "slack": { "remote_default": "yes" } })),
+            SlackConfig::default(),
+            "잘못된 타입은 전체를 기본값으로 되돌린다"
+        );
+    }
+
+    fn remote_config(enabled: bool, remote_default: bool, hosts: &[&str]) -> SlackConfig {
+        SlackConfig {
+            enabled,
+            owner_user_id: "U_OWNER".into(),
+            remote_action_hosts: hosts.iter().map(|host| (*host).into()).collect(),
+            remote_default,
+        }
     }
 
     #[test]
     fn remote_target_cases_have_no_shadowing_match() {
-        let exact = ["fnfcorp.scalr.io".into()];
-        let wildcard = ["*.scalr.io".into()];
-        let target = |flag, url, hosts: &[String]| {
-            is_remote_target(true, true, flag, false, false, url, hosts)
+        let exact = remote_config(true, false, &["fnfcorp.scalr.io"]);
+        let wildcard = remote_config(true, false, &["*.scalr.io"]);
+        let none = remote_config(true, false, &[]);
+        let target = |flag, url, config: &SlackConfig| {
+            is_remote_target(config, true, flag, false, false, false, url)
         };
         let excluded = |enabled, gate, touch, ask| {
-            is_remote_target(enabled, gate, true, touch, ask, None, &[])
+            is_remote_target(
+                &remote_config(enabled, false, &[]),
+                gate,
+                true,
+                false,
+                touch,
+                ask,
+                None,
+            )
         };
-        assert!(target(true, None, &[]), "explicit flag alone");
+        assert!(target(true, None, &none), "explicit flag alone");
         assert!(target(false, Some("https://fnfcorp.scalr.io/run"), &exact));
         assert!(target(false, Some("https://eu.scalr.io/run"), &wildcard));
         assert!(!target(false, Some("https://scalr.io/run"), &wildcard));
         assert!(!target(false, Some("https://example.com"), &exact));
+        assert!(!target(false, None, &none), "flag 도 호스트도 없으면 제외");
         assert!(
             !excluded(true, true, true, false),
             "touch id overrides flag"
@@ -2001,6 +2034,55 @@ mod tests {
         assert!(!excluded(true, true, false, true), "ask overrides flag");
         assert!(!excluded(false, true, false, false));
         assert!(!excluded(true, false, false, false));
+    }
+
+    #[test]
+    fn remote_default_makes_plain_gates_remote_unless_local_only_or_excluded() {
+        let on = remote_config(true, true, &[]);
+        let off = remote_config(true, false, &[]);
+        // (config, gate, explicit, local_only, touch_id, ask, 기대)
+        let cases = [
+            // remote_default off: 기존 동작 — 플래그·호스트 없는 게이트는 Slack 안 감
+            (&off, true, false, false, false, false, false),
+            (&off, true, true, false, false, false, true),
+            (&off, true, false, true, false, false, false),
+            // remote_default on: 플래그 없이도 Slack
+            (&on, true, false, false, false, false, true),
+            (&on, true, true, false, false, false, true),
+            // --local-only 는 remote_default·명시 플래그보다 우선
+            (&on, true, false, true, false, false, false),
+            (&on, true, true, true, false, false, false),
+            // touch id · ask · 비게이트는 remote_default 로도 못 뚫는다
+            (&on, true, false, false, true, false, false),
+            (&on, true, false, false, false, true, false),
+            (&on, false, false, false, false, false, false),
+        ];
+        for (index, (config, gate, explicit, local_only, touch_id, ask, expected)) in
+            cases.into_iter().enumerate()
+        {
+            assert_eq!(
+                is_remote_target(config, gate, explicit, local_only, touch_id, ask, None),
+                expected,
+                "case {index}"
+            );
+        }
+        let disabled = remote_config(false, true, &[]);
+        assert!(
+            !is_remote_target(&disabled, true, false, false, false, false, None),
+            "Slack 이 꺼져 있으면 remote_default 도 무효"
+        );
+    }
+
+    #[test]
+    fn local_only_also_overrides_allowed_action_url_hosts() {
+        let config = remote_config(true, false, &["fnfcorp.scalr.io"]);
+        let url = Some("https://fnfcorp.scalr.io/run");
+        assert!(is_remote_target(
+            &config, true, false, false, false, false, url
+        ));
+        assert!(!is_remote_target(
+            &config, true, false, true, false, false, url
+        ));
     }
 
     #[test]
@@ -2627,6 +2709,7 @@ mod tests {
             enabled: false,
             owner_user_id: "U_OWNER".into(),
             remote_action_hosts: vec![],
+            remote_default: false,
         };
         let calls = std::cell::Cell::new(0);
         let result = connect_if_enabled(

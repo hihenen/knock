@@ -4,6 +4,16 @@ All notable changes to knock are documented here. Versions follow [SemVer](https
 
 ## [Unreleased]
 
+## [0.7.6] - 2026-10-16
+
+### Added
+- 설정 `slack.remote_default`(기본 꺼짐, 설정 창의 "모든 게이트를 Slack 으로도 보내기"): 켜면 `--gate` 게이트가 `--remote-approve` 없이도 Slack 대상이 된다. Touch ID 게이트·plan 승인 훅 게이트·ask 는 그대로 제외
+- `knock annotate --local-only`: 그 게이트만 Slack 에서 제외한다. `--remote-approve` 와 동시에 쓸 수 없고, remote_default·허용 호스트보다 우선한다
+- `knock guide`: 에이전트용 현재 사용법(결정 JSON, 옵션, Slack 규칙, `run_in_background`, 본문 비밀값 금지)을 출력한다
+
+### Changed
+- `knock-annotate` 스킬을 얇은 진입점으로: 모델이 필요할 때 스스로 부를 수 있게 하고(`disable-model-invocation` 제거), 로드되면 `knock guide` 출력을 읽어 따르게 한다. 슬래시 호출(`/knock-annotate <인자>`)은 모델이 `knock annotate <인자>` 를 백그라운드로 실행한다
+
 ## [0.7.5] - 2026-10-15
 
 ### Added

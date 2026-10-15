@@ -112,7 +112,14 @@
           <input type="checkbox" id="slack-enabled" />
           <div class="toggle-text">
             <div class="toggle-label">Slack Socket Mode 사용</div>
-            <div class="toggle-desc">기본은 꺼져 있습니다. 승인 대상은 PR 머지 또는 허용한 Scalr 주소뿐입니다.</div>
+            <div class="toggle-desc">기본은 꺼져 있습니다. 승인 대상은 <code>--remote-approve</code> 를 붙인 게이트와 허용한 Scalr 주소뿐입니다 (아래 옵션을 켜면 모든 게이트).</div>
+          </div>
+        </label>
+        <label class="toggle-row">
+          <input type="checkbox" id="slack-remote-default" />
+          <div class="toggle-text">
+            <div class="toggle-label">모든 게이트를 Slack 으로도 보내기</div>
+            <div class="toggle-desc">꺼져 있으면 호출자가 <code>--remote-approve</code> 를 붙인 게이트와 허용 호스트의 <code>--action-url</code> 게이트만 보냅니다. 켜면 <code>--gate</code> 게이트 전부가 대상이 되고, 맥 창에서만 받을 게이트는 호출자가 <code>--local-only</code> 로 뺍니다. Touch ID 게이트는 항상 제외됩니다.</div>
           </div>
         </label>
         <div class="slack-fields">
