@@ -123,6 +123,8 @@ enum Command {
     ///   knock ctl list              대기 목록을 JSON 으로
     ///   knock ctl focus [id]        해당 요청을 화면에 띄운다 (id 생략 = 맨 앞)
     ///   knock ctl approve [id]      띄운 뒤 승인까지 시도한다
+    ///   knock ctl approve all       대기 중인 --gate 요청을 창 없이 한꺼번에 승인한다
+    ///                               (Touch ID·질문형·검토용·진행 중인 건은 큐에 남긴다)
     ///   knock ctl dismiss [id]      해당 요청을 취소한다 (창을 거치지 않는다)
     ///   knock ctl tts               음성 알림 on/off 토글
     ///
@@ -1447,6 +1449,115 @@ fn bulk_dismiss_min_age_secs(target: &str) -> Option<u64> {
         .map(|m| m.saturating_mul(60))
 }
 
+/// `ctl approve all` 에서 이 요청을 승인하지 않고 큐에 남기는 이유. None 이면 일괄 승인 대상이다.
+/// Touch ID 정책(요청별 `--touch-id` 또는 전역 설정)은 프론트의 승인 경로에만 있어서
+/// 여기서 우회하면 안 된다. 생체 인증이 필요한 건은 사람이 하나씩 승인하도록 남긴다.
+fn bulk_approve_skip_reason(
+    kind: &str,
+    payload: &Value,
+    in_progress: bool,
+    config_touch_id: bool,
+) -> Option<&'static str> {
+    // ask 는 승인할 답이 없다 (다지선다는 답을 골라야 끝난다).
+    if kind == "ask" {
+        return Some("ask");
+    }
+    let flag = |key: &str| payload.get(key).and_then(Value::as_bool).unwrap_or(false);
+    if kind != "annotate" || !flag("gate") {
+        return Some("not_gate");
+    }
+    // --checklist 진행 중 건은 "완료" 를 눌러야 끝난다. 승인으로 끝내면 절차를 건너뛴다.
+    if in_progress {
+        return Some("in_progress");
+    }
+    if flag("touchId") || config_touch_id {
+        return Some("touch_id_required");
+    }
+    None
+}
+
+/// 큐의 대기 건을 한꺼번에 승인한다. 승인된 건은 큐에서 빠지고 응답을 받는다.
+/// 반환은 (승인한 건, 남긴 건의 사유 JSON). 남긴 건은 큐에 그대로 있다.
+fn bulk_approve(
+    queue: &Arc<Mutex<Vec<QueueEntry>>>,
+    config_touch_id: bool,
+) -> (Vec<(String, QueueResolution)>, Vec<Value>) {
+    let plan: Vec<(String, Option<&'static str>)> = queue
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            let reason =
+                bulk_approve_skip_reason(&e.kind, &e.payload, e.in_progress, config_touch_id);
+            (e.id.clone(), reason)
+        })
+        .collect();
+    let mut approved = Vec::new();
+    let mut skipped = Vec::new();
+    for (id, reason) in plan {
+        if let Some(reason) = reason {
+            skipped.push(serde_json::json!({ "id": id, "reason": reason }));
+            continue;
+        }
+        // 단건 approve 와 같은 표식: 승인 경로가 ctl 이라고 Slack 갱신에 남긴다.
+        if let Some(entry) = queue.lock().unwrap().iter_mut().find(|e| e.id == id) {
+            entry.decision_via = Some("ctl");
+        }
+        // 확인과 제거를 한 번의 잠금 안에서 한다. 그 사이 다른 요청이 같은 건을
+        // 바꿨다면 이 조건이 다시 걸러낸다.
+        let resolved = reply_queue_entry(
+            queue,
+            &id,
+            &serde_json::json!({ "decision": "approved" }),
+            |e| {
+                bulk_approve_skip_reason(&e.kind, &e.payload, e.in_progress, config_touch_id)
+                    .is_none()
+            },
+            |_| {},
+        );
+        if let Some(resolved) = resolved {
+            approved.push((id, resolved));
+        }
+    }
+    (approved, skipped)
+}
+
+/// `ctl approve all` 결과를 사람이 읽는 한 줄로 만든다. CLI 가 stderr 에 찍는다.
+fn bulk_approve_summary(resp: &Value) -> String {
+    let approved = resp
+        .get("approved")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let skipped = resp
+        .get("skipped")
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice);
+    let mut parts = Vec::new();
+    for (reason, label) in [
+        ("touch_id_required", "Touch ID 필요"),
+        ("ask", "질문형"),
+        ("not_gate", "검토용"),
+        ("in_progress", "진행 중"),
+    ] {
+        let n = skipped
+            .iter()
+            .filter(|s| s.get("reason").and_then(Value::as_str) == Some(reason))
+            .count();
+        if n > 0 {
+            parts.push(format!("{label} {n}"));
+        }
+    }
+    if parts.is_empty() {
+        format!("승인 {approved}건, 제외 0건")
+    } else {
+        format!(
+            "승인 {approved}건, 제외 {}건({})",
+            skipped.len(),
+            parts.join(", ")
+        )
+    }
+}
+
 fn reply_queue_entry<F>(
     queue: &Arc<Mutex<Vec<QueueEntry>>>,
     id: &str,
@@ -1471,6 +1582,21 @@ where
     before_reply(&entry);
     entry.responder.reply(response);
     Some(result)
+}
+
+/// 큐가 바뀌었음을 창에 알리고 배지를 맞춘다. 큐가 비면 창을 숨긴다 (일괄 취소와 같은 동작).
+fn notify_queue_changed(h: &tauri::AppHandle, q: &Arc<Mutex<Vec<QueueEntry>>>) {
+    let len = q.lock().unwrap().len();
+    let hh = h.clone();
+    let _ = h.run_on_main_thread(move || {
+        let _ = hh.emit("queue-changed", ());
+        update_badge(&hh, len);
+        if len == 0 {
+            if let Some(w) = hh.get_webview_window("main") {
+                let _ = w.hide();
+            }
+        }
+    });
 }
 
 /// The pending queue, shaped for the frontend list (no responders).
@@ -1812,6 +1938,28 @@ fn run_daemon() {
                             }));
                             return;
                         }
+                    }
+                    // 일괄 승인: `ctl approve all`. 대기 중인 --gate 요청만 승인하고 나머지는
+                    // 큐에 남긴다. 기준은 bulk_approve_skip_reason 에 있다.
+                    if kind == "approve"
+                        && payload.get("target").and_then(|v| v.as_str()) == Some("all")
+                    {
+                        let (approved, skipped) =
+                            bulk_approve(&q, config_touch_id());
+                        for (id, resolved) in &approved {
+                            if resolved.remote_slack {
+                                slack_requests.mark_processed(id, "approved", resolved.via);
+                            }
+                        }
+                        if !approved.is_empty() {
+                            notify_queue_changed(&h, &q);
+                        }
+                        let ids: Vec<&String> = approved.iter().map(|(id, _)| id).collect();
+                        incoming.responder.reply(&serde_json::json!({
+                            "approved": ids,
+                            "skipped": skipped,
+                        }));
+                        return;
                     }
                     if kind == "focus" || kind == "approve" || kind == "dismiss" {
                         let raw = payload
@@ -2862,6 +3010,10 @@ pub fn run() {
                         std::process::exit(3);
                     }
                     println!("{resp}");
+                    if kind == "approve" && req.get("target").and_then(Value::as_str) == Some("all")
+                    {
+                        eprintln!("{}", bulk_approve_summary(&resp));
+                    }
                 }
                 None => {
                     println!("{}", serde_json::json!({ "error": "daemon not running" }));
@@ -2902,6 +3054,157 @@ mod tests {
         assert_eq!(
             super::bulk_dismiss_min_age_secs("91444-1791969844531250000"),
             None
+        );
+    }
+
+    struct CaptureWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for CaptureWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// 큐 항목 하나와, 그 항목이 받은 응답을 모아 두는 버퍼.
+    fn queue_entry(
+        id: &str,
+        kind: &str,
+        payload: serde_json::Value,
+        in_progress: bool,
+    ) -> (super::QueueEntry, std::sync::Arc<std::sync::Mutex<Vec<u8>>>) {
+        let bytes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let entry = super::QueueEntry {
+            in_progress,
+            id: id.into(),
+            kind: kind.into(),
+            payload,
+            source: serde_json::json!({}),
+            created_at: 1,
+            remote_slack: false,
+            decision_via: None,
+            responder: super::ipc::Responder::new(CaptureWriter(bytes.clone())),
+        };
+        (entry, bytes)
+    }
+
+    #[test]
+    fn bulk_approve_skip_reasons() {
+        use serde_json::json;
+        let gate = json!({ "gate": true });
+        assert_eq!(
+            super::bulk_approve_skip_reason("annotate", &gate, false, false),
+            None
+        );
+        assert_eq!(
+            super::bulk_approve_skip_reason("ask", &json!({}), false, false),
+            Some("ask")
+        );
+        assert_eq!(
+            super::bulk_approve_skip_reason("annotate", &json!({ "gate": false }), false, false),
+            Some("not_gate")
+        );
+        assert_eq!(
+            super::bulk_approve_skip_reason("annotate", &json!({}), false, false),
+            Some("not_gate")
+        );
+        assert_eq!(
+            super::bulk_approve_skip_reason(
+                "annotate",
+                &json!({ "gate": true, "touchId": true }),
+                false,
+                false
+            ),
+            Some("touch_id_required")
+        );
+        // 전역 Touch ID 가 켜져 있으면 모든 gate 가 생체 인증 대상이다.
+        assert_eq!(
+            super::bulk_approve_skip_reason("annotate", &gate, false, true),
+            Some("touch_id_required")
+        );
+        assert_eq!(
+            super::bulk_approve_skip_reason("annotate", &gate, true, false),
+            Some("in_progress")
+        );
+    }
+
+    #[test]
+    fn bulk_approve_approves_plain_gates_and_keeps_the_rest() {
+        use serde_json::json;
+        let (ok_1, ok_1_reply) = queue_entry("ok-1", "annotate", json!({ "gate": true }), false);
+        let (touch, touch_reply) = queue_entry(
+            "touch",
+            "annotate",
+            json!({ "gate": true, "touchId": true }),
+            false,
+        );
+        let (ask, ask_reply) = queue_entry("ask", "ask", json!({ "questions": [] }), false);
+        let (view, view_reply) = queue_entry("view", "annotate", json!({ "gate": false }), false);
+        let (ok_2, ok_2_reply) = queue_entry("ok-2", "annotate", json!({ "gate": true }), false);
+        let queue = std::sync::Arc::new(std::sync::Mutex::new(vec![ok_1, touch, ask, view, ok_2]));
+
+        let (approved, skipped) = super::bulk_approve(&queue, false);
+
+        let approved_ids: Vec<&str> = approved.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(approved_ids, ["ok-1", "ok-2"]);
+        assert_eq!(approved[0].1.via, "ctl");
+        let skipped_ids: Vec<(&str, &str)> = skipped
+            .iter()
+            .map(|s| (s["id"].as_str().unwrap(), s["reason"].as_str().unwrap()))
+            .collect();
+        assert_eq!(
+            skipped_ids,
+            [
+                ("touch", "touch_id_required"),
+                ("ask", "ask"),
+                ("view", "not_gate"),
+            ]
+        );
+        let remaining: Vec<String> = queue.lock().unwrap().iter().map(|e| e.id.clone()).collect();
+        assert_eq!(remaining, ["touch", "ask", "view"]);
+        // 승인된 건만 응답을 받는다. 남긴 건은 응답 없이 대기를 계속한다.
+        let reply: serde_json::Value = serde_json::from_slice(&ok_1_reply.lock().unwrap()).unwrap();
+        assert_eq!(reply, json!({ "decision": "approved" }));
+        assert!(!ok_2_reply.lock().unwrap().is_empty());
+        assert!(touch_reply.lock().unwrap().is_empty());
+        assert!(ask_reply.lock().unwrap().is_empty());
+        assert!(view_reply.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn bulk_approve_with_global_touch_id_approves_nothing() {
+        use serde_json::json;
+        let (gate, reply) = queue_entry("gate", "annotate", json!({ "gate": true }), false);
+        let queue = std::sync::Arc::new(std::sync::Mutex::new(vec![gate]));
+
+        let (approved, skipped) = super::bulk_approve(&queue, true);
+
+        assert!(approved.is_empty());
+        assert_eq!(skipped[0]["reason"], "touch_id_required");
+        assert!(reply.lock().unwrap().is_empty());
+        assert_eq!(queue.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn bulk_approve_summary_counts_skips_by_reason() {
+        use serde_json::json;
+        let resp = json!({
+            "approved": ["a"],
+            "skipped": [
+                { "id": "b", "reason": "touch_id_required" },
+                { "id": "c", "reason": "ask" },
+                { "id": "d", "reason": "touch_id_required" },
+            ],
+        });
+        assert_eq!(
+            super::bulk_approve_summary(&resp),
+            "승인 1건, 제외 3건(Touch ID 필요 2, 질문형 1)"
+        );
+        assert_eq!(
+            super::bulk_approve_summary(&json!({ "approved": [], "skipped": [] })),
+            "승인 0건, 제외 0건"
         );
     }
 
