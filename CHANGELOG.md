@@ -7,6 +7,8 @@ All notable changes to knock are documented here. Versions follow [SemVer](https
 ### Added
 - `knock ctl approve all`: 대기 중인 `--gate` 요청을 한 번에 승인한다. Touch ID 필요·질문형(ask)·검토용(`--gate` 아님)·진행 중(checklist)인 건은 큐에 남기고 `skipped` 로 돌려준다. Slack DM 은 처리됨으로 갱신된다
 
+- 큐 화면(2건 이상)에 "모두 승인 (M)" / "큐 비우기 (N)" 버튼. 누르면 같은 화면에서 한 번 확인을 받고, 승인은 `ctl approve all` 과 같은 기준(Touch ID 필요·질문형·검토용·진행 중은 남김)을 쓴다. 트레이에 "대기 N건 모두 취소" 항목 추가(누르면 큐 창의 확인 단계로 이동)
+
 ### Changed
 - `knock-ask` 스킬을 `knock-annotate` 처럼 얇은 진입점으로: 모델이 선택지 결정이 필요할 때 스스로 부를 수 있게 하고(`disable-model-invocation` 제거), 로드되면 `knock guide` 출력을 읽어 따르게 한다
 - `knock guide` 의 ask 절 보강: 기본 단일 선택·`multiSelect`·"기타"·답 배열 형식, Slack 선택지 버튼이 올라가는 조건(질문 1개·단일 선택·선택지 1~24개·항상 지문 꺼짐)

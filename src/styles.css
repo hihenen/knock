@@ -563,6 +563,17 @@ body {
 }
 .queue-title { font-size: 14px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .queue-meta { font-size: 12px; color: var(--muted, #6b7280); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.queue-bulk { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 2px 0 6px; }
+.queue-bulk-msg { flex: 1 1 auto; font-size: 13px; color: var(--muted, #6b7280); }
+.queue-bulk-btn {
+  font: inherit; font-size: 13px; font-weight: 600; padding: 5px 12px;
+  border: 1px solid var(--border, #e3e3e6); border-radius: 8px; cursor: pointer;
+  background: var(--card, #fff); color: inherit;
+}
+.queue-bulk-btn:disabled { opacity: .45; cursor: default; }
+.queue-bulk-primary:not(:disabled) { border-color: var(--accent, #3b82f6); color: var(--accent, #3b82f6); }
+.queue-bulk-danger:not(:disabled) { border-color: #dc2626; color: #dc2626; }
+.queue-bulk-ghost { color: var(--muted, #6b7280); }
 .queue-empty { color: var(--muted, #9aa0a6); font-size: 14px; padding: 8px 2px; }
 
 /* ── header Touch ID toggle ────────────────────────────────────── */
