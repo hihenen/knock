@@ -53,7 +53,7 @@ knock daemon install
 
 **4. 에이전트에게 알려주기**
 
-여기까지 하면 **계획(plan) 승인은 자동**으로 knock 창에 뜹니다. 그 외 상황까지 맡기려면 `CLAUDE.md` 에 아래를 붙여넣으세요.
+여기까지 하면 **계획(plan) 승인은 자동**으로 knock 창에 뜹니다. 그 외 상황까지 맡기려면 `CLAUDE.md` 에 아래를 붙여넣으세요. 에이전트는 `knock guide` 로 현재 사용법(옵션, 결정 JSON, Slack 규칙)을 직접 읽을 수 있고, 플러그인의 `knock-annotate` 스킬도 이 안내를 불러옵니다.
 
 <details>
 <summary><b>CLAUDE.md 에 붙여넣을 내용</b> (펼치기)</summary>
@@ -105,6 +105,8 @@ knock annotate plan.md --gate --json
 | `--json` | 결과를 JSON 으로 받습니다 (없으면 사람이 읽는 문장) |
 | `--title T` | 창 제목. 기본은 파일 이름 |
 | `--touch-id` | 지문으로 승인받습니다. 지문이 없으면 암호나 버튼으로 넘어갑니다 |
+| `--remote-approve` | 이 게이트를 Slack DM 으로도 보냅니다 ([아래](#slack에서-prscalr-승인하기)) |
+| `--local-only` | 이 게이트는 Slack 으로 보내지 않고 맥 창에서만 받습니다. `--remote-approve` 와 같이 쓸 수 없어요 |
 | `--action-url <URL>` | 승인하면 그 주소를 브라우저로 엽니다 |
 | `--checklist` | 승인 뒤에도 목록에 남겨둡니다. 브라우저에서 여러 단계를 밟는 동안 절차를 다시 볼 수 있어요 |
 | `--view <FILE>` | HTML 파일을 요청 옆 패널에 띄웁니다. 가운데 바로 폭을 조절해요 |
@@ -223,6 +225,8 @@ Slack 앱을 만들 때 [Slack 앱 설정](https://api.slack.com/apps)에서 **C
 knock settings의 Slack 승인에서 owner의 Slack 사용자 ID(**U…**)와 **xapp-** App-Level Token, 설치 후 발급된 **xoxb-** Bot Token을 입력하고 **Slack 사용**을 켠 뒤 설정을 저장하고 연결을 시험합니다. 토큰은 저장 후 다시 표시되지 않고 macOS 키체인(**knock-slack**)에 보관됩니다. Slack 연동은 기본으로 꺼져 있습니다.
 
 PR 머지 게이트에는 반드시 **--gate --remote-approve**를 함께 붙이세요 (예: **knock annotate pr.md --gate --remote-approve --json**). **--action-url** 호스트가 허용 목록과 정확히 일치하거나 **\*.example.com** 접미 wildcard에 맞으면 대상이 되며, 기본 목록은 **fnfcorp.scalr.io**이고 설정에서 쉼표나 줄바꿈으로 추가할 수 있습니다. Slack과 맥 창의 결정은 먼저 도착한 한 번만 처리되며, Scalr Apply는 Scalr UI에서 한 번 더 승인해야 합니다. **--touch-id**가 필요한 승인과 **ask** 질문은 Slack으로 보내지 않습니다. 다른 게이트도 맥 창에서 처리되지만, 호출자가 플래그를 잘못 붙이거나 호스트 범위를 넓히면 대상이 커질 수 있으므로 그 범위 지정은 호출자 책임입니다.
+
+**모든 게이트를 Slack 으로 받고 싶다면** settings 의 Slack 승인에서 **모든 게이트를 Slack 으로도 보내기**를 켭니다(`~/.config/knock/config.json` 의 `slack.remote_default: true`, 기본은 꺼짐). 켜면 **--gate** 게이트는 **--remote-approve** 없이도 Slack 대상이 됩니다. 맥 창에서만 받을 게이트에는 **--local-only**를 붙이세요. **--touch-id** 게이트와 plan 승인 훅은 이 설정과 무관하게 Slack 으로 가지 않습니다. 폰에서 누른 승인도 같은 승인이므로, 운영 변경·삭제 같은 critical 게이트는 **--touch-id** 나 **--local-only** 로 맥 앞에서만 받게 하는 쪽이 안전합니다.
 
 Slack 승인 버튼은 설정된 owner 사용자만 처리할 수 있습니다. Slack 연결이나 API가 실패해도 로컬 승인 창은 계속 동작하며 자동 승인되지 않습니다. Slack에는 본문을 마스킹해 최대 1,500자까지만 보냅니다. 전체 내용은 맥 창에서 확인하세요. 승인용 로컬 소켓 명령은 추가되지 않습니다.
 

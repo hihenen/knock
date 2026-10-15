@@ -56,6 +56,9 @@ fn build_context() -> tauri::Context {
     tauri::generate_context!()
 }
 
+/// `knock guide` output. Kept in a markdown file so the skill entry point can stay thin.
+const AGENT_GUIDE: &str = include_str!("../guide.md");
+
 #[derive(Parser, Debug)]
 #[command(
     name = "knock",
@@ -77,6 +80,10 @@ enum Command {
         /// Send eligible merge-approval gates to the configured Slack owner.
         #[arg(long, requires = "gate")]
         remote_approve: bool,
+        /// Keep this gate on the Mac window only, even when Slack is the default
+        /// (`slack.remote_default`). Cannot be combined with --remote-approve.
+        #[arg(long, conflicts_with = "remote_approve")]
+        local_only: bool,
         #[arg(long)]
         json: bool,
         #[arg(long)]
@@ -131,6 +138,8 @@ enum Command {
         /// list/tts 는 무시한다.
         target: Option<String>,
     },
+    /// Print the current usage guide for AI agents (when and how to call knock).
+    Guide,
     /// Open the settings window (toggle Touch ID requirement, etc.).
     Settings,
     /// Manage the background queue daemon (macOS LaunchAgent).
@@ -1955,13 +1964,13 @@ fn run_daemon() {
                     let remote_slack = !payload.get("hook").and_then(Value::as_bool).unwrap_or(false)
                         && !slack_config.owner_user_id.is_empty()
                         && (ask_remote || slack::is_remote_target(
-                            slack_config.enabled,
+                            &slack_config,
                             inner.get("gate").and_then(Value::as_bool).unwrap_or(false),
                             inner.get("remoteApprove").and_then(Value::as_bool).unwrap_or(false),
+                            inner.get("localOnly").and_then(Value::as_bool).unwrap_or(false),
                             inner.get("touchId").and_then(Value::as_bool).unwrap_or(false),
                             kind == "ask" || inner.get("mode").and_then(Value::as_str) == Some("ask"),
                             inner.get("actionUrl").and_then(Value::as_str),
-                            &slack_config.remote_action_hosts,
                         ));
                     // Pull title/body for the spoken announcement before `inner`
                     // is moved into the queue below.
@@ -2677,6 +2686,7 @@ pub fn run() {
             file,
             gate,
             remote_approve,
+            local_only,
             json,
             title,
             touch_id,
@@ -2747,6 +2757,7 @@ pub fn run() {
                 "title": title.clone(),
                 "gate": gate,
                 "remoteApprove": remote_approve,
+                "localOnly": local_only,
                 "slackBody": md.clone(),
                 "touchId": touch_id,
                 "configTouchId": config_touch_id(),
@@ -2858,6 +2869,7 @@ pub fn run() {
                 }
             }
         }
+        Command::Guide => print!("{AGENT_GUIDE}"),
         Command::Settings => launch(AppState {
             mode: Mode::Settings,
             json: false,
@@ -2957,6 +2969,79 @@ mod tests {
         let help = Cli::try_parse_from(["knock", "annotate", "--help"]).unwrap_err();
         for flag in ["--merge-toggle", "--remote-approve"] {
             assert!(help.to_string().contains(flag));
+        }
+    }
+
+    #[test]
+    fn local_only_flag_is_parsed_and_excludes_remote_approve() {
+        let local =
+            Cli::try_parse_from(["knock", "annotate", "request.md", "--gate", "--local-only"])
+                .unwrap();
+        assert!(matches!(
+            local.command,
+            Command::Annotate {
+                local_only: true,
+                remote_approve: false,
+                ..
+            }
+        ));
+        let absent = Cli::try_parse_from(["knock", "annotate", "request.md", "--gate"]).unwrap();
+        assert!(matches!(
+            absent.command,
+            Command::Annotate {
+                local_only: false,
+                ..
+            }
+        ));
+        assert!(
+            Cli::try_parse_from([
+                "knock",
+                "annotate",
+                "request.md",
+                "--gate",
+                "--remote-approve",
+                "--local-only",
+            ])
+            .is_err(),
+            "--remote-approve 와 --local-only 는 동시에 쓸 수 없다"
+        );
+        let help = Cli::try_parse_from(["knock", "annotate", "--help"]).unwrap_err();
+        assert!(help.to_string().contains("--local-only"));
+    }
+
+    #[test]
+    fn guide_subcommand_is_parsed_without_arguments() {
+        let guide = Cli::try_parse_from(["knock", "guide"]).unwrap();
+        assert!(matches!(guide.command, Command::Guide));
+    }
+
+    #[test]
+    fn agent_guide_documents_every_annotate_flag_and_the_run_rules() {
+        use clap::CommandFactory;
+        let annotate = Cli::command().find_subcommand("annotate").unwrap().clone();
+        for arg in annotate.get_arguments() {
+            let Some(long) = arg.get_long() else { continue };
+            if matches!(long, "help" | "version") {
+                continue;
+            }
+            assert!(
+                AGENT_GUIDE.contains(&format!("`--{long}")),
+                "knock guide 에 --{long} 설명이 없다 (guide.md 를 같이 고칠 것)"
+            );
+        }
+        for needle in [
+            "knock ask",
+            "run_in_background",
+            "--remote-approve",
+            "--local-only",
+            "slack.remote_default",
+            "\"decision\":\"approved\"",
+            "비밀값",
+        ] {
+            assert!(
+                AGENT_GUIDE.contains(needle),
+                "guide.md 에 `{needle}` 가 없다"
+            );
         }
     }
 

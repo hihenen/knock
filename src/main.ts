@@ -64,6 +64,7 @@ interface SettingsPayload {
     enabled: boolean;
     owner_user_id: string;
     remote_action_hosts: string[];
+    remote_default: boolean;
   };
   tts?: boolean;
   ttsStyle?: string;
@@ -1473,8 +1474,10 @@ function setupSettings(p: SettingsPayload) {
     enabled: false,
     owner_user_id: "",
     remote_action_hosts: ["fnfcorp.scalr.io"],
+    remote_default: false,
   };
   const slackEnabled = $<HTMLInputElement>("slack-enabled");
+  const slackRemoteDefault = $<HTMLInputElement>("slack-remote-default");
   const slackOwner = $<HTMLInputElement>("slack-owner-user-id");
   const slackHosts = $<HTMLTextAreaElement>("slack-remote-action-hosts");
   const appToken = $<HTMLInputElement>("slack-app-token");
@@ -1483,6 +1486,7 @@ function setupSettings(p: SettingsPayload) {
   const testSlack = $<HTMLButtonElement>("slack-test");
   const slackStatus = $("slack-status");
   slackEnabled.checked = slack.enabled;
+  slackRemoteDefault.checked = slack.remote_default === true;
   slackOwner.value = slack.owner_user_id;
   slackHosts.value = slack.remote_action_hosts.join(", ");
 
@@ -1503,6 +1507,7 @@ function setupSettings(p: SettingsPayload) {
           .split(/[\n,]/)
           .map((host) => host.trim())
           .filter(Boolean),
+        remoteDefault: slackRemoteDefault.checked,
         appToken: appToken.value.trim() || null,
         botToken: botToken.value.trim() || null,
       });

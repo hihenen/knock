@@ -1,27 +1,20 @@
 ---
 name: knock-annotate
-description: Open knock's desktop approval/annotation window for a markdown file and respond to the returned decision. Native window with OS notification + Dock attention. Optional --action-url jumps to a URL (Scalr Apply / PR / dashboard) on approval.
+description: Use when you need the user's approval or decision before an irreversible or outward-facing action (PR merge, deploy, delete, production change, permission expansion), when you want to show a plan or proposal for review, or when you need the user to pick between options. Opens knock's desktop window (and a Slack DM when enabled) instead of asking in chat, where the question gets missed. Read `knock guide` first.
 allowed-tools: Bash(knock:*)
-disable-model-invocation: true
 ---
 
-# Knock Annotate
+# Knock
 
-## Markdown approval / annotation
+This file is only an entry point. The actual instructions are the output of `knock guide` below — read it and follow it before using knock. If the block is empty or missing, run `knock guide` yourself.
 
-!`knock annotate $ARGUMENTS`
+!`knock guide`
 
 ## Your task
 
-The output above will be one of:
+Arguments the user passed to this skill (may be empty): $ARGUMENTS
 
-1. The exact text `The user approved.`, OR a JSON object with `"decision": "approved"`. The user approved. Acknowledge with a single sentence ("Approved.") and stop. Do not begin any work beyond what was approved.
-2. Empty, OR a JSON object with `"decision": "dismissed"`. The user closed the window without a decision. Acknowledge with a single sentence ("Closed.") and stop. Do not begin any work.
-3. Plaintext annotation feedback, OR a JSON object with `"decision": "annotated"` and a `"feedback"` field. Address the feedback the user provided.
+- If arguments were given (the user typed `/knock-annotate <args>`), run `knock annotate <args>` with Bash `run_in_background: true`, then act on the decision as the guide describes.
+- If not, use knock when the situation calls for it, per the guide.
 
-## Usage notes
-
-- `knock annotate <file.md> --gate --json` — `--gate` shows an explicit Approve button, `--json` returns structured output.
-- **`--action-url <URL>` (action inbox)** — the "next action" tied to this approval (a Scalr Apply page, GitHub PR, ArgoCD Application, Jira ticket, dashboard, etc.). On approval, the browser jumps straight to that URL. Use this whenever the user has to click/approve something **in a web UI** — instead of dropping a "go here and click" link in chat that drowns in notifications, knock becomes an action inbox: one approval → jump to the action. Also accepts a **local document** via an absolute `file:///abs/path/mockup.html` (HTML mockup / PDF / image — documents only, executables refused).
-- **`--touch-id`** — require Touch ID / Windows Hello for critical gates (prd change / IAM expansion / destructive). Falls back to system password if no biometric hardware.
-- The window is always-on-top, fires an OS notification, and bounces the Dock so the user notices even when not looking at the chat. http(s) links inside the markdown body (PR diff, dashboard, ticket) open in the external browser when clicked.
+If `knock guide` reports an unknown command, the CLI is outdated: run `brew upgrade hihenen/tap/knock`, then run `knock guide` again. If `knock` is not installed, ask the user before installing it (`brew install hihenen/tap/knock`). If installing or updating fails, report the error instead of guessing the CLI usage.
