@@ -1940,6 +1940,7 @@ fn run_daemon() {
                         "dismiss",
                         "tts-toggle",
                         "scroll",
+                        "status",
                     ];
                     if !KNOWN_KINDS.contains(&kind.as_str()) {
                         incoming.responder.reply(&serde_json::json!({
@@ -1958,6 +1959,13 @@ fn run_daemon() {
                     // 승인을 시도하라" 는 신호일 뿐이고, Touch ID 정책이 켜져 있으면
                     // 프론트가 생체 인증을 요구한다. 소켓에 붙은 프로세스가 인증을
                     // 건너뛸 수 없다 — 물리 키를 잘못 눌러도 마찬가지다.
+                    if kind == "status" {
+                        incoming.responder.reply(&serde_json::json!({
+                            "slack": slack::status_json(),
+                            "queued": q.lock().unwrap().len(),
+                        }));
+                        return;
+                    }
                     if kind == "list" {
                         let items: Vec<Value> = {
                             let qq = q.lock().unwrap();
@@ -1980,6 +1988,7 @@ fn run_daemon() {
                         incoming.responder.reply(&serde_json::json!({
                             "items": items,
                             "tts": config_tts(),
+                            "slack": slack::status_json(),
                         }));
                         return;
                     }
@@ -2277,6 +2286,23 @@ fn run_daemon() {
             )
             .enabled(false)
             .build(app)?;
+            let slack_status = MenuItemBuilder::with_id("slack_status", slack::menu_text())
+                .enabled(false)
+                .build(app)?;
+            {
+                let slack_status = slack_status.clone();
+                std::thread::spawn(move || {
+                    let mut shown = "";
+                    loop {
+                        let text = slack::menu_text();
+                        if text != shown {
+                            let _ = slack_status.set_text(text);
+                            shown = text;
+                        }
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                    }
+                });
+            }
             let sep = PredefinedMenuItem::separator(app)?;
             let touch_toggle = CheckMenuItemBuilder::with_id("touch_id", "Use Touch ID by default")
                 .checked(config_touch_id())
@@ -2302,6 +2328,7 @@ fn run_daemon() {
             let menu = MenuBuilder::new(app)
                 .items(&[
                     &info,
+                    &slack_status,
                     &sep,
                     &touch_toggle,
                     &auto_approve_merge_toggle,
@@ -3076,8 +3103,9 @@ pub fn run() {
                 "approve" => "approve",
                 "dismiss" => "dismiss",
                 "tts" => "tts-toggle",
+                "status" => "status",
                 other => {
-                    eprintln!("알 수 없는 동작: {other} (list | focus | approve | dismiss | tts) — dismiss 는 all / older:<분> 도 받는다");
+                    eprintln!("알 수 없는 동작: {other} (list | status | focus | approve | dismiss | tts) — dismiss 는 all / older:<분> 도 받는다");
                     std::process::exit(2);
                 }
             };

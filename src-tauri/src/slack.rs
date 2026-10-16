@@ -9,6 +9,7 @@ use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 use std::{io, thread};
 use tauri::{Emitter, Manager};
+use tauri_plugin_notification::NotificationExt;
 use tungstenite::{stream::MaybeTlsStream, Message, WebSocket};
 use url::Url;
 
@@ -18,6 +19,15 @@ const MAX_BACKOFF_SECS: u64 = 60;
 const SOCKET_POLL: Duration = Duration::from_secs(1);
 const API_TIMEOUT: Duration = Duration::from_secs(15);
 const SOCKET_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// 클라이언트가 WebSocket ping 을 보내는 간격.
+const PING_INTERVAL: Duration = Duration::from_secs(30);
+/// 이 시간 동안 어떤 프레임도 없으면 끊긴 소켓(half-open)으로 본다.
+const LIVENESS_TIMEOUT: Duration = Duration::from_secs(90);
+/// 토큰 읽기 실패 뒤 다시 읽기까지의 최소 간격 (1분 → 최대 15분). 키체인 창 연타 방지.
+const TOKEN_RETRY_BASE_SECS: u64 = 60;
+const TOKEN_RETRY_MAX_SECS: u64 = 900;
+/// 끊김이 이만큼 이어지면 macOS 알림을 한 번 보낸다.
+const DISCONNECT_ALERT_AFTER: Duration = Duration::from_secs(300);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -788,6 +798,170 @@ fn processed_message_blocks(original: Option<&[Value]>, decision: &str, via: &st
     Value::Array(preserved)
 }
 
+/// 소켓 수신 생존 감시. 시간은 호출자가 넣는다 (테스트에서 sleep 없이 검증).
+#[derive(Debug)]
+struct Liveness {
+    last_rx: Instant,
+    last_ping: Instant,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Probe {
+    Idle,
+    Ping,
+    Dead,
+}
+
+impl Liveness {
+    fn new(now: Instant) -> Self {
+        Self {
+            last_rx: now,
+            last_ping: now,
+        }
+    }
+
+    /// pong·ping·envelope 등 어떤 프레임이든 받았을 때 호출한다.
+    fn on_frame(&mut self, now: Instant) {
+        self.last_rx = now;
+    }
+
+    fn probe(&mut self, now: Instant) -> Probe {
+        if now.saturating_duration_since(self.last_rx) >= LIVENESS_TIMEOUT {
+            Probe::Dead
+        } else if now.saturating_duration_since(self.last_ping) >= PING_INTERVAL {
+            self.last_ping = now;
+            Probe::Ping
+        } else {
+            Probe::Idle
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ConnState {
+    Disabled,
+    Connected,
+    Reconnecting,
+    NoToken,
+}
+
+impl ConnState {
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Disabled => "off",
+            Self::Connected => "connected",
+            Self::Reconnecting => "reconnecting",
+            Self::NoToken => "no_token",
+        }
+    }
+
+    fn menu_text(self) -> &'static str {
+        match self {
+            Self::Disabled => "Slack: 꺼짐",
+            Self::Connected => "Slack: 연결됨",
+            Self::Reconnecting => "Slack: ⚠️ 재연결 중",
+            Self::NoToken => "Slack: ⚠️ 토큰 없음",
+        }
+    }
+}
+
+/// 연결 상태와 끊김 지속 시간. 끊김 알림은 같은 끊김 동안 한 번만 허용한다.
+#[derive(Debug)]
+struct Health {
+    state: ConnState,
+    down_since: Option<Instant>,
+    alerted: bool,
+}
+
+impl Health {
+    const fn new() -> Self {
+        Self {
+            state: ConnState::Disabled,
+            down_since: None,
+            alerted: false,
+        }
+    }
+
+    fn set(&mut self, state: ConnState, now: Instant) {
+        match state {
+            ConnState::Disabled | ConnState::Connected => {
+                self.down_since = None;
+                self.alerted = false;
+            }
+            ConnState::Reconnecting | ConnState::NoToken => {
+                self.down_since.get_or_insert(now);
+            }
+        }
+        self.state = state;
+    }
+
+    /// 끊김이 임계를 넘겼고 아직 알리지 않았으면 true (한 번만).
+    fn take_alert(&mut self, now: Instant) -> bool {
+        match self.down_since {
+            Some(since)
+                if !self.alerted
+                    && now.saturating_duration_since(since) >= DISCONNECT_ALERT_AFTER =>
+            {
+                self.alerted = true;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn down_secs(&self, now: Instant) -> Option<u64> {
+        self.down_since
+            .map(|since| now.saturating_duration_since(since).as_secs())
+    }
+}
+
+static HEALTH: Mutex<Health> = Mutex::new(Health::new());
+
+fn set_conn_state(state: ConnState) {
+    if let Ok(mut health) = HEALTH.lock() {
+        health.set(state, Instant::now());
+    }
+}
+
+/// 꺼짐 상태에서 연결을 시도하기 시작하면 재연결 중으로 올린다 (끊김 시계 시작).
+fn mark_connecting() {
+    if let Ok(mut health) = HEALTH.lock() {
+        if health.state == ConnState::Disabled {
+            health.set(ConnState::Reconnecting, Instant::now());
+        }
+    }
+}
+
+fn take_disconnect_alert() -> bool {
+    HEALTH
+        .lock()
+        .map(|mut health| health.take_alert(Instant::now()))
+        .unwrap_or(false)
+}
+
+pub(super) fn menu_text() -> &'static str {
+    HEALTH
+        .lock()
+        .map(|health| health.state.menu_text())
+        .unwrap_or(ConnState::Disabled.menu_text())
+}
+
+/// `knock ctl status` / `ctl list` 용 상태 JSON.
+pub(super) fn status_json() -> Value {
+    let Ok(health) = HEALTH.lock() else {
+        return json!({ "state": "unknown" });
+    };
+    json!({
+        "state": health.state.label(),
+        "downSeconds": health.down_secs(Instant::now()),
+    })
+}
+
+fn token_retry_delay(failures: u32) -> Duration {
+    let exponent = failures.saturating_sub(1).min(6);
+    Duration::from_secs((TOKEN_RETRY_BASE_SECS << exponent).min(TOKEN_RETRY_MAX_SECS))
+}
+
 pub(super) fn reconnect_backoff(attempt: u32) -> Duration {
     Duration::from_secs(2_u64.pow(attempt.min(6)).min(MAX_BACKOFF_SECS))
 }
@@ -1092,10 +1266,19 @@ fn save_tokens(app_token: Option<String>, bot_token: Option<String>) -> Result<(
 
 #[derive(Default)]
 struct TokenCache {
-    tokens: Mutex<Option<(u64, TokenResult)>>,
+    tokens: Mutex<Option<CacheEntry>>,
 }
 
 type TokenResult = Result<(String, String), String>;
+
+struct CacheEntry {
+    generation: u64,
+    result: TokenResult,
+    /// 연속 실패 횟수. 성공하면 0.
+    failures: u32,
+    /// 실패 결과를 이 시각까지 재사용한다 (그 전엔 키체인을 다시 읽지 않는다).
+    retry_at: Option<Instant>,
+}
 
 impl TokenCache {
     fn read(
@@ -1103,18 +1286,44 @@ impl TokenCache {
         generation: u64,
         load: impl FnOnce() -> Result<(String, String), String>,
     ) -> Result<(String, String), String> {
+        self.read_at(generation, Instant::now(), load)
+    }
+
+    /// 성공은 세대가 바뀔 때까지 캐시한다. 실패는 backoff 동안만 캐시하고 이후엔 다시 읽는다.
+    fn read_at(
+        &self,
+        generation: u64,
+        now: Instant,
+        load: impl FnOnce() -> Result<(String, String), String>,
+    ) -> Result<(String, String), String> {
         let mut cached = self
             .tokens
             .lock()
             .map_err(|_| "Slack 토큰 캐시를 사용할 수 없습니다".to_string())?;
-        if let Some((cached_generation, tokens)) = cached.as_ref() {
-            if *cached_generation == generation {
-                return tokens.clone();
+        let mut failures = 0;
+        if let Some(entry) = cached.as_ref() {
+            if entry.generation == generation {
+                if entry.result.is_ok() || entry.retry_at.is_some_and(|at| now < at) {
+                    return entry.result.clone();
+                }
+                failures = entry.failures;
             }
         }
-        let tokens = load();
-        *cached = Some((generation, tokens.clone()));
-        tokens
+        let result = load();
+        let (failures, retry_at) = match &result {
+            Ok(_) => (0, None),
+            Err(_) => {
+                let failures = failures.saturating_add(1);
+                (failures, Some(now + token_retry_delay(failures)))
+            }
+        };
+        *cached = Some(CacheEntry {
+            generation,
+            result: result.clone(),
+            failures,
+            retry_at,
+        });
+        result
     }
 
     fn update(&self, save: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
@@ -1628,6 +1837,13 @@ fn set_socket_timeouts(
     }
 }
 
+fn is_idle_io(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+    )
+}
+
 fn run_socket_reader(
     mut socket: WebSocket<MaybeTlsStream<TcpStream>>,
     integration: Integration,
@@ -1635,11 +1851,32 @@ fn run_socket_reader(
     generation: u64,
     stop: Arc<AtomicBool>,
 ) {
+    let mut liveness = Liveness::new(Instant::now());
     loop {
         if stop.load(Ordering::Relaxed) {
             break;
         }
-        match socket.read() {
+        match liveness.probe(Instant::now()) {
+            Probe::Dead => {
+                eprintln!(
+                    "knock: Slack socket silent for {}s; reconnecting",
+                    LIVENESS_TIMEOUT.as_secs()
+                );
+                break;
+            }
+            Probe::Ping => match socket.send(Message::Ping(Vec::new().into())) {
+                Ok(()) => {}
+                // 쓰기가 막혀도 프레임은 큐에 남는다. 진짜 끊김은 수신 무소식으로 잡는다.
+                Err(tungstenite::Error::Io(error)) if is_idle_io(&error) => {}
+                Err(_) => break,
+            },
+            Probe::Idle => {}
+        }
+        let frame = socket.read();
+        if frame.is_ok() {
+            liveness.on_frame(Instant::now());
+        }
+        match frame {
             Ok(Message::Text(text)) => {
                 let Ok(envelope) = serde_json::from_str::<Value>(&text) else {
                     continue;
@@ -1652,8 +1889,19 @@ fn run_socket_reader(
                         break;
                     }
                 }
-                if envelope.get("type").and_then(Value::as_str) == Some("disconnect") {
-                    break;
+                match envelope.get("type").and_then(Value::as_str) {
+                    Some("hello") => eprintln!("knock: Slack hello received"),
+                    Some("disconnect") => {
+                        eprintln!(
+                            "knock: Slack disconnect requested (reason={})",
+                            envelope
+                                .get("reason")
+                                .and_then(Value::as_str)
+                                .unwrap_or("?")
+                        );
+                        break;
+                    }
+                    _ => {}
                 }
                 if envelope.get("type").and_then(Value::as_str) != Some("interactive") {
                     continue;
@@ -1671,14 +1919,16 @@ fn run_socket_reader(
                     integration.deliver_action(payload, config.clone());
                 }
             }
-            Ok(Message::Close(_)) => break,
+            Ok(Message::Close(_)) => {
+                eprintln!("knock: Slack socket closed by peer");
+                break;
+            }
             Ok(_) => {}
-            Err(tungstenite::Error::Io(error))
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                ) => {}
-            Err(_) => break,
+            Err(tungstenite::Error::Io(error)) if is_idle_io(&error) => {}
+            Err(_) => {
+                eprintln!("knock: Slack socket read failed");
+                break;
+            }
         }
     }
     integration.socket_ended(generation);
@@ -1843,6 +2093,17 @@ pub(super) fn run_worker(
             retry_at = Instant::now();
             missing_tokens_logged = false;
         }
+        if !version.0.enabled || version.0.owner_user_id.is_empty() {
+            set_conn_state(ConnState::Disabled);
+        }
+        if take_disconnect_alert() {
+            let _ = app
+                .notification()
+                .builder()
+                .title("Knock — Slack 연결 끊김")
+                .body("Slack 연결이 5분 넘게 끊겨 있습니다. 폰 승인 버튼이 도착하지 않을 수 있습니다.")
+                .show();
+        }
         if !version.0.enabled {
             close_session(session.take());
             if let Ok(work) = receiver.recv_timeout(SOCKET_POLL) {
@@ -1854,6 +2115,8 @@ pub(super) fn run_worker(
             if stamp() != version {
                 continue;
             }
+            mark_connecting();
+            eprintln!("knock: Slack connecting (attempt {})", attempt + 1);
             let connected = connect_if_enabled(
                 &version.0,
                 || {
@@ -1895,11 +2158,13 @@ pub(super) fn run_worker(
                         eprintln!("knock: Slack enabled but Keychain tokens are unavailable");
                         missing_tokens_logged = true;
                     }
+                    set_conn_state(ConnState::NoToken);
                     retry_at = Instant::now() + reconnect_backoff(attempt);
                     attempt = attempt.saturating_add(1);
                 }
                 Err(StartError::Connection) => {
                     eprintln!("knock: Slack Socket Mode disconnected; reconnecting");
+                    set_conn_state(ConnState::Reconnecting);
                     retry_at = Instant::now() + reconnect_backoff(attempt);
                     attempt = attempt.saturating_add(1);
                 }
@@ -1924,6 +2189,8 @@ pub(super) fn run_worker(
                     });
                     attempt = 0;
                     missing_tokens_logged = false;
+                    set_conn_state(ConnState::Connected);
+                    eprintln!("knock: Slack connected (generation {generation})");
                 }
             }
         }
@@ -1957,6 +2224,8 @@ pub(super) fn run_worker(
                 let current_generation = session.as_ref().map(|s| s.generation);
                 if current_generation == Some(ended_generation) {
                     close_session(session.take());
+                    set_conn_state(ConnState::Reconnecting);
+                    eprintln!("knock: Slack socket ended; reconnecting");
                     retry_at = Instant::now() + reconnect_backoff(attempt);
                     attempt = attempt.saturating_add(1);
                 }
@@ -1974,6 +2243,7 @@ pub(super) fn run_worker(
                 if failed {
                     eprintln!("knock: Slack message request failed; retrying");
                     close_session(session.take());
+                    set_conn_state(ConnState::Reconnecting);
                     retry_at = Instant::now() + reconnect_backoff(attempt);
                     attempt = attempt.saturating_add(1);
                 }
@@ -2045,30 +2315,82 @@ mod tests {
     }
 
     #[test]
-    fn token_cache_reads_once_and_caches_read_errors() {
+    fn token_cache_failure_expires_with_backoff_and_success_is_kept() {
         let cache = TokenCache::default();
+        let t0 = Instant::now();
         let reads = std::sync::atomic::AtomicUsize::new(0);
-        let load = || {
+        let fail = || {
             reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Err("keychain unavailable".to_string())
+            Err::<(String, String), _>("keychain unavailable".to_string())
+        };
+        let ok = || {
+            reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(("xapp-new".to_string(), "xoxb-new".to_string()))
         };
 
-        assert_eq!(cache.read(0, load), Err("keychain unavailable".into()));
-        assert_eq!(
-            cache.read(0, || {
-                reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Ok(("xapp-new".into(), "xoxb-new".into()))
-            }),
-            Err("keychain unavailable".into())
-        );
-        assert_eq!(
-            cache.read(1, || {
-                reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Ok(("xapp-new".into(), "xoxb-new".into()))
-            }),
-            Ok(("xapp-new".into(), "xoxb-new".into()))
-        );
+        assert!(cache.read_at(0, t0, fail).is_err());
+        // 1분 안에는 키체인을 다시 읽지 않는다
+        assert!(cache.read_at(0, t0 + Duration::from_secs(59), ok).is_err());
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // 1분이 지나면 다시 읽고, 두 번째 실패는 2분 간격
+        let t1 = t0 + Duration::from_secs(60);
+        assert!(cache.read_at(0, t1, fail).is_err());
+        assert!(cache.read_at(0, t1 + Duration::from_secs(119), ok).is_err());
         assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 2);
+        // 복구되면 성공을 캐시한다
+        let t2 = t1 + Duration::from_secs(120);
+        assert!(cache.read_at(0, t2, ok).is_ok());
+        assert!(cache
+            .read_at(0, t2 + Duration::from_secs(10_000), || panic!("cached"))
+            .is_ok());
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 3);
+        // 세대가 바뀌면 즉시 다시 읽는다
+        assert!(cache.read_at(1, t2, fail).is_err());
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 4);
+    }
+
+    #[test]
+    fn token_retry_delay_doubles_from_one_minute_to_fifteen() {
+        let secs: Vec<u64> = (1..=7).map(|n| token_retry_delay(n).as_secs()).collect();
+        assert_eq!(secs, [60, 120, 240, 480, 900, 900, 900]);
+    }
+
+    #[test]
+    fn liveness_pings_every_interval_and_dies_after_silence() {
+        let t0 = Instant::now();
+        let mut live = Liveness::new(t0);
+        assert_eq!(live.probe(t0 + Duration::from_secs(29)), Probe::Idle);
+        assert_eq!(live.probe(t0 + Duration::from_secs(30)), Probe::Ping);
+        assert_eq!(live.probe(t0 + Duration::from_secs(31)), Probe::Idle);
+        assert_eq!(live.probe(t0 + Duration::from_secs(60)), Probe::Ping);
+        assert_eq!(live.probe(t0 + Duration::from_secs(89)), Probe::Idle);
+        assert_eq!(live.probe(t0 + Duration::from_secs(90)), Probe::Dead);
+    }
+
+    #[test]
+    fn any_frame_resets_the_silence_clock() {
+        let t0 = Instant::now();
+        let mut live = Liveness::new(t0);
+        live.on_frame(t0 + Duration::from_secs(80));
+        assert_ne!(live.probe(t0 + Duration::from_secs(120)), Probe::Dead);
+        assert_eq!(live.probe(t0 + Duration::from_secs(170)), Probe::Dead);
+    }
+
+    #[test]
+    fn disconnect_alert_fires_once_per_outage_after_five_minutes() {
+        let t0 = Instant::now();
+        let mut health = Health::new();
+        health.set(ConnState::Reconnecting, t0);
+        assert!(!health.take_alert(t0 + Duration::from_secs(299)));
+        // 토큰 없음으로 바뀌어도 같은 끊김으로 센다
+        health.set(ConnState::NoToken, t0 + Duration::from_secs(200));
+        assert!(health.take_alert(t0 + Duration::from_secs(300)));
+        assert!(!health.take_alert(t0 + Duration::from_secs(900)));
+        // 복구 뒤 새 끊김은 다시 알린다
+        health.set(ConnState::Connected, t0 + Duration::from_secs(1000));
+        assert!(!health.take_alert(t0 + Duration::from_secs(5000)));
+        health.set(ConnState::Reconnecting, t0 + Duration::from_secs(2000));
+        assert!(health.take_alert(t0 + Duration::from_secs(2300)));
     }
 
     #[test]
