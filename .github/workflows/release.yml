@@ -39,6 +39,45 @@ jobs:
       - name: Build (CLI binary)
         run: bun run tauri build --no-bundle
 
+      # Sign the macOS binary with a fixed self-signed identity so the
+      # designated requirement stays `identifier + certificate leaf` across
+      # releases. The ad-hoc signature's DR is a cdhash that changes every
+      # build, so the Keychain "Always Allow" grant on the Slack token was
+      # lost on every `brew upgrade` (I-20261016100807-3731).
+      # Secrets: MACOS_SIGN_P12_BASE64, MACOS_SIGN_P12_PASSWORD. Missing ->
+      # stays ad-hoc with a warning. Rotating the cert costs one more prompt.
+      - name: Sign (macOS, stable self-signed identity)
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          P12_BASE64: ${{ secrets.MACOS_SIGN_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.MACOS_SIGN_P12_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${P12_BASE64:-}" ]; then
+            echo "::warning::MACOS_SIGN_P12_BASE64 미설정 - ad-hoc 서명 그대로 (업데이트마다 키체인 허용 창이 다시 뜬다)"
+            exit 0
+          fi
+          KC="$RUNNER_TEMP/sign.keychain-db"
+          KCPW="$(openssl rand -hex 16)"
+          P12="$RUNNER_TEMP/sign.p12"
+          echo -n "$P12_BASE64" | base64 --decode -o "$P12"
+          security create-keychain -p "$KCPW" "$KC"
+          security set-keychain-settings -lut 21600 "$KC"
+          security unlock-keychain -p "$KCPW" "$KC"
+          security import "$P12" -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$KC" >/dev/null
+          rm -f "$P12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KCPW" "$KC" >/dev/null
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
+          # Self-signed is not trusted, so find-identity -v hides it; sign by SHA-1.
+          HASH="$(security find-identity -p codesigning "$KC" | awk '/\)/ {print $2; exit}')"
+          codesign --force --keychain "$KC" --sign "$HASH" \
+            --identifier io.github.hihenen.knock "${{ matrix.binpath }}"
+          codesign -d -r- "${{ matrix.binpath }}" 2>&1 | tail -1
+          codesign -d -r- "${{ matrix.binpath }}" 2>&1 | grep -q 'certificate leaf' \
+            || { echo "::error::DR 에 certificate leaf 가 없다 - 서명 실패"; exit 1; }
+          security delete-keychain "$KC"
+
       - name: Package
         shell: bash
         run: cp "${{ matrix.binpath }}" "${{ matrix.asset }}"
