@@ -4,6 +4,8 @@ All notable changes to knock are documented here. Versions follow [SemVer](https
 
 ## [Unreleased]
 
+## [0.7.7] - 2026-10-16
+
 ### Added
 - `knock ctl approve all`: 대기 중인 `--gate` 요청을 한 번에 승인한다. Touch ID 필요·질문형(ask)·검토용(`--gate` 아님)·진행 중(checklist)인 건은 큐에 남기고 `skipped` 로 돌려준다. Slack DM 은 처리됨으로 갱신된다
 - 큐 화면(2건 이상)에 "모두 승인 (M)" / "큐 비우기 (N)" 버튼. 누르면 같은 화면에서 한 번 확인을 받고, 승인은 `ctl approve all` 과 같은 기준(Touch ID 필요·질문형·검토용·진행 중은 남김)을 쓴다. 트레이에 "대기 N건 모두 취소" 항목 추가(누르면 큐 창의 확인 단계로 이동)
