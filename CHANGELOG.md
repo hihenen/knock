@@ -6,8 +6,10 @@ All notable changes to knock are documented here. Versions follow [SemVer](https
 
 ### Added
 - `knock ctl approve all`: 대기 중인 `--gate` 요청을 한 번에 승인한다. Touch ID 필요·질문형(ask)·검토용(`--gate` 아님)·진행 중(checklist)인 건은 큐에 남기고 `skipped` 로 돌려준다. Slack DM 은 처리됨으로 갱신된다
-
 - 큐 화면(2건 이상)에 "모두 승인 (M)" / "큐 비우기 (N)" 버튼. 누르면 같은 화면에서 한 번 확인을 받고, 승인은 `ctl approve all` 과 같은 기준(Touch ID 필요·질문형·검토용·진행 중은 남김)을 쓴다. 트레이에 "대기 N건 모두 취소" 항목 추가(누르면 큐 창의 확인 단계로 이동)
+- Slack 연결 상태 감시: 30초마다 WebSocket ping 을 보내고 90초 동안 어떤 프레임도 없으면 끊긴 소켓으로 보고 재연결한다 (half-open 소켓으로 폰 승인 버튼이 도착하지 않던 문제)
+- 연결 상태(연결됨 / 재연결 중 / 토큰 없음)를 트레이 메뉴 한 줄에 표시하고, `knock ctl status`(및 `ctl list` 의 `slack` 필드)로 조회한다. 끊김이 5분 넘게 이어지면 macOS 알림을 끊김당 한 번 보낸다
+- 연결·재연결·hello·생존 타임아웃을 `knock.log` 에 한 줄씩 남긴다 (토큰 값 제외)
 
 ### Changed
 - `knock-ask` 스킬을 `knock-annotate` 처럼 얇은 진입점으로: 모델이 선택지 결정이 필요할 때 스스로 부를 수 있게 하고(`disable-model-invocation` 제거), 로드되면 `knock guide` 출력을 읽어 따르게 한다
@@ -16,6 +18,7 @@ All notable changes to knock are documented here. Versions follow [SemVer](https
 ### Fixed
 - README·설정 창 문구가 "ask 질문은 Slack 으로 보내지 않는다"고 적고 있던 것을 0.7.5 동작에 맞게 고침
 - Slack 토큰을 프로세스 메모리에 캐시해 재연결 때 키체인을 반복해서 읽지 않는다
+- 토큰 읽기 실패(키체인 창 거부 등)를 영구 캐시하던 것을 1분 → 최대 15분 backoff 로 다시 읽게 고침. knock 재시작 없이 복구된다
 
 ## [0.7.6] - 2026-10-16
 
