@@ -4,6 +4,11 @@ All notable changes to knock are documented here. Versions follow [SemVer](https
 
 ## [Unreleased]
 
+## [0.7.9] - 2026-10-16
+
+### Fixed
+- 릴리스 서명 검사가 macos-14 러너의 DR 표기(`certificate root`)를 실패로 판정해 0.7.8 macOS 빌드가 나가지 못했다. `certificate leaf|root` 둘 다 인정한다. 0.7.8 의 macOS 바이너리는 없으니 이 버전을 쓴다
+
 ## [0.7.8] - 2026-10-16
 
 ### Changed
