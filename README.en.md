@@ -205,6 +205,8 @@ knock daemon status      # current state
 knock daemon uninstall   # remove
 ```
 
+**To approve every pending gate at once**, run `knock ctl approve all`. Only `--gate` requests are approved; Touch ID requests, questions and review-only items stay in the queue. With the global Touch ID setting on, every gate stays.
+
 **To gate hard-to-undo commands automatically** — there's an example hook that opens an approval window right before things like `terraform destroy`, `gh pr merge` or a secret deletion: [`hooks/examples/knock-critical-gate.sh`](hooks/examples/knock-critical-gate.sh)
 
 ---

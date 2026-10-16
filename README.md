@@ -246,6 +246,8 @@ knock daemon status      # 지금 상태
 knock daemon uninstall   # 해제
 ```
 
+**대기 중인 게이트를 한꺼번에 승인하려면** `knock ctl approve all` 을 씁니다. `--gate` 요청만 승인하고, Touch ID 가 필요한 건·질문형·검토용은 큐에 남깁니다. 전역 Touch ID 설정이 켜져 있으면 모든 게이트가 남습니다.
+
 **되돌리기 어려운 명령을 자동으로 막고 싶다면** — `terraform destroy`, `gh pr merge`, 시크릿 삭제 같은 명령을 실행 직전에 승인 창으로 띄우는 예제가 있습니다: [`hooks/examples/knock-critical-gate.sh`](hooks/examples/knock-critical-gate.sh)
 
 ---
