@@ -40,12 +40,14 @@ jobs:
         run: bun run tauri build --no-bundle
 
       # Sign the macOS binary with a fixed self-signed identity so the
-      # designated requirement stays `identifier + certificate leaf` across
+      # designated requirement stays `identifier + certificate` across
       # releases. The ad-hoc signature's DR is a cdhash that changes every
       # build, so the Keychain "Always Allow" grant on the Slack token was
       # lost on every `brew upgrade` (I-20261016100807-3731).
       # Secrets: MACOS_SIGN_P12_BASE64, MACOS_SIGN_P12_PASSWORD. Missing ->
       # stays ad-hoc with a warning. Rotating the cert costs one more prompt.
+      # codesign writes the self-signed anchor as `certificate leaf` locally but
+      # `certificate root` on the macos-14 runner (same cert when self-signed).
       - name: Sign (macOS, stable self-signed identity)
         if: runner.os == 'macOS'
         shell: bash
@@ -74,8 +76,8 @@ jobs:
           codesign --force --keychain "$KC" --sign "$HASH" \
             --identifier io.github.hihenen.knock "${{ matrix.binpath }}"
           codesign -d -r- "${{ matrix.binpath }}" 2>&1 | tail -1
-          codesign -d -r- "${{ matrix.binpath }}" 2>&1 | grep -q 'certificate leaf' \
-            || { echo "::error::DR 에 certificate leaf 가 없다 - 서명 실패"; exit 1; }
+          codesign -d -r- "${{ matrix.binpath }}" 2>&1 | grep -qE 'certificate (leaf|root)' \
+            || { echo "::error::DR 이 인증서 기반이 아니다 - 서명 실패"; exit 1; }
           security delete-keychain "$KC"
 
       - name: Package
