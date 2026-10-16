@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use clap::{Parser, Subcommand};
 use serde_json::Value;
 use tauri::menu::{
-    CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder, PredefinedMenuItem,
+    CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItem, MenuItemBuilder, PredefinedMenuItem,
 };
 use tauri::tray::{TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, Manager, UserAttentionType, WindowEvent};
@@ -708,6 +708,9 @@ struct AppState {
 }
 
 struct AutoApproveMergeMenu(CheckMenuItem<tauri::Wry>);
+
+/// 트레이의 "대기 N건 모두 취소" 항목. 건수에 맞춰 문구와 활성 상태를 바꾼다.
+struct ClearQueueMenu(MenuItem<tauri::Wry>);
 
 /// Sandbox flags forced onto every `<iframe>` in gate content.
 ///
@@ -1558,6 +1561,47 @@ fn bulk_approve_summary(resp: &Value) -> String {
     }
 }
 
+/// 큐에서 `min_age` 초 이상 지난 건을 전부 취소한다. 취소된 건은 큐에서 빠지고
+/// `dismissed` 응답을 받는다. `ctl dismiss all|older:<분>` 과 큐 화면의 "큐 비우기"가 같이 쓴다.
+fn bulk_dismiss(
+    queue: &Arc<Mutex<Vec<QueueEntry>>>,
+    min_age: u64,
+    now: u64,
+) -> Vec<(String, QueueResolution)> {
+    let ids: Vec<String> = queue
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| now.saturating_sub(e.created_at) >= min_age)
+        .map(|e| e.id.clone())
+        .collect();
+    ids.into_iter()
+        .filter_map(|id| {
+            reply_queue_entry(
+                queue,
+                &id,
+                &serde_json::json!({ "decision": "dismissed" }),
+                |_| true,
+                |_| {},
+            )
+            .map(|resolved| (id, resolved))
+        })
+        .collect()
+}
+
+/// 지금 "모두 승인"을 누르면 승인될 건수. 제외 판정은 bulk_approve 와 같은
+/// bulk_approve_skip_reason 하나만 쓴다.
+fn bulk_approvable_count(queue: &Arc<Mutex<Vec<QueueEntry>>>, config_touch_id: bool) -> usize {
+    queue
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| {
+            bulk_approve_skip_reason(&e.kind, &e.payload, e.in_progress, config_touch_id).is_none()
+        })
+        .count()
+}
+
 fn reply_queue_entry<F>(
     queue: &Arc<Mutex<Vec<QueueEntry>>>,
     id: &str,
@@ -1602,6 +1646,8 @@ fn notify_queue_changed(h: &tauri::AppHandle, q: &Arc<Mutex<Vec<QueueEntry>>>) {
 /// The pending queue, shaped for the frontend list (no responders).
 #[tauri::command]
 fn daemon_queue(state: tauri::State<DaemonState>) -> Value {
+    let touch_id = config_touch_id();
+    let approvable = bulk_approvable_count(&state.queue, touch_id);
     let q = state.queue.lock().unwrap();
     let auto_approve_merge = config_auto_approve_merge_state();
     let items: Vec<Value> = q
@@ -1630,7 +1676,12 @@ fn daemon_queue(state: tauri::State<DaemonState>) -> Value {
             })
         })
         .collect();
-    serde_json::json!({ "mode": "queue", "items": items, "touchId": config_touch_id() })
+    serde_json::json!({
+        "mode": "queue",
+        "items": items,
+        "touchId": touch_id,
+        "approvable": approvable,
+    })
 }
 
 #[tauri::command]
@@ -1647,6 +1698,18 @@ fn update_badge(app: &tauri::AppHandle, n: usize) {
     }
     if let Some(tray) = app.tray_by_id("knock") {
         let _ = tray.set_title(if n > 0 { Some(n.to_string()) } else { None });
+    }
+    if let Some(menu) = app.try_state::<ClearQueueMenu>() {
+        let _ = menu.0.set_text(clear_queue_label(n));
+        let _ = menu.0.set_enabled(n > 0);
+    }
+}
+
+fn clear_queue_label(n: usize) -> String {
+    if n > 0 {
+        format!("대기 {n}건 모두 취소")
+    } else {
+        "대기 없음".to_string()
     }
 }
 
@@ -1728,6 +1791,33 @@ fn daemon_resolve(
     }
 }
 
+/// 큐 화면의 "큐 비우기". 대기 건을 전부 취소하고 취소한 건수를 돌려준다.
+#[tauri::command]
+fn daemon_bulk_dismiss(app: tauri::AppHandle, state: tauri::State<DaemonState>) -> usize {
+    let dismissed = bulk_dismiss(&state.queue, 0, epoch_seconds());
+    for (id, resolved) in &dismissed {
+        if resolved.remote_slack {
+            state.slack.mark_processed(id, "dismissed", "mac");
+        }
+    }
+    notify_queue_changed(&app, &state.queue);
+    dismissed.len()
+}
+
+/// 큐 화면의 "모두 승인". `ctl approve all` 과 같은 bulk_approve 를 쓴다.
+/// 승인한 건수와 큐에 남긴 건(사유 포함)을 돌려준다.
+#[tauri::command]
+fn daemon_bulk_approve(app: tauri::AppHandle, state: tauri::State<DaemonState>) -> Value {
+    let (approved, skipped) = bulk_approve(&state.queue, config_touch_id());
+    for (id, resolved) in &approved {
+        if resolved.remote_slack {
+            state.slack.mark_processed(id, "approved", resolved.via);
+        }
+    }
+    notify_queue_changed(&app, &state.queue);
+    serde_json::json!({ "approved": approved.len(), "skipped": skipped })
+}
+
 fn run_daemon() {
     let queue: Arc<Mutex<Vec<QueueEntry>>> = Arc::new(Mutex::new(Vec::new()));
     let grants: Grants = Arc::new(Mutex::new(Vec::new()));
@@ -1745,6 +1835,8 @@ fn run_daemon() {
             daemon_queue,
             daemon_resolve,
             daemon_start_action,
+            daemon_bulk_dismiss,
+            daemon_bulk_approve,
             hide_window,
             save_pasted_image,
             touch_id_approve,
@@ -1898,27 +1990,11 @@ fn run_daemon() {
                     if kind == "dismiss" {
                         let raw = payload.get("target").and_then(|v| v.as_str()).unwrap_or("");
                         if let Some(min_age) = bulk_dismiss_min_age_secs(raw) {
-                            let now = epoch_seconds();
-                            let ids: Vec<String> = q
-                                .lock()
-                                .unwrap()
-                                .iter()
-                                .filter(|e| now.saturating_sub(e.created_at) >= min_age)
-                                .map(|e| e.id.clone())
-                                .collect();
-                            let mut count = 0_u64;
-                            for id in &ids {
-                                if let Some(entry) = reply_queue_entry(
-                                    &q,
-                                    id,
-                                    &serde_json::json!({ "decision": "dismissed" }),
-                                    |_| true,
-                                    |_| {},
-                                ) {
-                                    count += 1;
-                                    if entry.remote_slack {
-                                        slack_requests.mark_processed(id, "dismissed", "ctl");
-                                    }
+                            let dismissed = bulk_dismiss(&q, min_age, epoch_seconds());
+                            let count = dismissed.len() as u64;
+                            for (id, resolved) in &dismissed {
+                                if resolved.remote_slack {
+                                    slack_requests.mark_processed(id, "dismissed", "ctl");
                                 }
                             }
                             let len = q.lock().unwrap().len();
@@ -2218,6 +2294,10 @@ fn run_daemon() {
                 .checked(config_tts())
                 .build(app)?;
             let sep2 = PredefinedMenuItem::separator(app)?;
+            let clear_queue = MenuItemBuilder::with_id("clear_queue", clear_queue_label(0))
+                .enabled(false)
+                .build(app)?;
+            let _ = app.manage(ClearQueueMenu(clear_queue.clone()));
             let quit = MenuItemBuilder::with_id("quit", "종료 (Quit daemon)").build(app)?;
             let menu = MenuBuilder::new(app)
                 .items(&[
@@ -2228,6 +2308,7 @@ fn run_daemon() {
                     &open_url_toggle,
                     &tts_toggle,
                     &sep2,
+                    &clear_queue,
                     &quit,
                 ])
                 .build()?;
@@ -2274,6 +2355,15 @@ fn run_daemon() {
                             let next = !config_open_url();
                             let _ = set_config_open_url(next);
                             let _ = open_url_handle.set_checked(next);
+                        }
+                        // 트레이에서 바로 지우지 않는다. 큐 창을 띄워 확인 단계로 보낸다.
+                        "clear_queue" => {
+                            if let Some(win) = app.get_webview_window("main") {
+                                let _ = win.unminimize();
+                                let _ = win.show();
+                                let _ = win.set_focus();
+                            }
+                            let _ = app.emit("confirm-clear-queue", ());
                         }
                         "tts" => {
                             let next = !config_tts();
@@ -3171,6 +3261,58 @@ mod tests {
         assert!(touch_reply.lock().unwrap().is_empty());
         assert!(ask_reply.lock().unwrap().is_empty());
         assert!(view_reply.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn bulk_dismiss_cancels_by_age_and_replies() {
+        use serde_json::json;
+        let (old, old_reply) = queue_entry("old", "annotate", json!({}), false);
+        let (ask, ask_reply) = queue_entry("ask", "ask", json!({}), true);
+        let queue = std::sync::Arc::new(std::sync::Mutex::new(vec![old, ask]));
+
+        // created_at 은 1. 지난 시간이 min_age 보다 짧으면 남는다.
+        assert!(super::bulk_dismiss(&queue, 100, 50).is_empty());
+        assert_eq!(queue.lock().unwrap().len(), 2);
+
+        let dismissed = super::bulk_dismiss(&queue, 0, 50);
+        let ids: Vec<&str> = dismissed.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, ["old", "ask"]);
+        assert!(queue.lock().unwrap().is_empty());
+        let reply: serde_json::Value = serde_json::from_slice(&old_reply.lock().unwrap()).unwrap();
+        assert_eq!(reply, json!({ "decision": "dismissed" }));
+        assert!(!ask_reply.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn bulk_approvable_count_matches_bulk_approve() {
+        use serde_json::json;
+        let entries = vec![
+            queue_entry("a", "annotate", json!({ "gate": true }), false).0,
+            queue_entry(
+                "b",
+                "annotate",
+                json!({ "gate": true, "touchId": true }),
+                false,
+            )
+            .0,
+            queue_entry("c", "ask", json!({}), false).0,
+            queue_entry("d", "annotate", json!({ "gate": true }), true).0,
+            queue_entry("e", "annotate", json!({ "gate": true }), false).0,
+        ];
+        let queue = std::sync::Arc::new(std::sync::Mutex::new(entries));
+        assert_eq!(super::bulk_approvable_count(&queue, false), 2);
+        assert_eq!(super::bulk_approvable_count(&queue, true), 0);
+        // 미리 센 건수와 실제 승인 건수가 같다 (제외 판정이 한 곳이다).
+        let (approved, skipped) = super::bulk_approve(&queue, false);
+        assert_eq!(approved.len(), 2);
+        assert_eq!(skipped.len(), 3);
+        assert_eq!(super::bulk_approvable_count(&queue, false), 0);
+    }
+
+    #[test]
+    fn clear_queue_label_follows_count() {
+        assert_eq!(super::clear_queue_label(3), "대기 3건 모두 취소");
+        assert_eq!(super::clear_queue_label(0), "대기 없음");
     }
 
     #[test]

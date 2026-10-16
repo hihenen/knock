@@ -93,6 +93,8 @@ interface QueuePayload {
   mode: "queue";
   items: QueueItem[];
   touchId: boolean;
+  /** "모두 승인"으로 승인될 건수. 제외 판정은 백엔드(bulk_approve_skip_reason)에만 있다. */
+  approvable?: number;
 }
 
 // Where a finished decision goes. Default = single-shot (process exits on submit).
@@ -1718,7 +1720,83 @@ function openDetail(item: QueueItem) {
     });
 }
 
-function renderList(items: QueueItem[]) {
+// 큐 화면의 일괄 버튼. 누르면 같은 자리에서 한 번 더 확인을 받고 실행한다.
+type BulkAction = "dismiss" | "approve";
+let bulkConfirm: BulkAction | null = null;
+// 트레이의 "모두 취소"는 항목이 1건이어도 확인 단계가 있는 목록을 보여야 한다.
+let forceList = false;
+
+function renderBulkBar(
+  bar: HTMLElement,
+  total: number,
+  approvable: number,
+  rerender: () => void,
+) {
+  bar.innerHTML = "";
+  if (bulkConfirm === "approve" && approvable === 0) bulkConfirm = null;
+  const button = (label: string, cls: string, onClick: () => void, off = false) => {
+    const b = el("button", `queue-bulk-btn ${cls}`, label) as HTMLButtonElement;
+    b.disabled = off;
+    b.addEventListener("click", onClick);
+    return b;
+  };
+  const run = async (action: BulkAction) => {
+    bulkConfirm = null;
+    forceList = false;
+    bar.querySelectorAll("button").forEach((b) => ((b as HTMLButtonElement).disabled = true));
+    try {
+      await invoke(action === "dismiss" ? "daemon_bulk_dismiss" : "daemon_bulk_approve");
+    } catch (e) {
+      console.error(e);
+    }
+    void renderDaemon();
+  };
+  const cancel = button("취소", "queue-bulk-ghost", () => {
+    bulkConfirm = null;
+    rerender();
+  });
+  if (bulkConfirm === "dismiss") {
+    bar.appendChild(el("span", "queue-bulk-msg", `${total}건을 취소합니다`));
+    bar.appendChild(cancel);
+    bar.appendChild(button("비우기", "queue-bulk-danger", () => void run("dismiss")));
+    return;
+  }
+  if (bulkConfirm === "approve") {
+    const kept = total - approvable;
+    bar.appendChild(
+      el(
+        "span",
+        "queue-bulk-msg",
+        kept > 0
+          ? `${approvable}건 승인, ${kept}건은 남습니다(Touch ID 필요 등)`
+          : `${approvable}건을 승인합니다`,
+      ),
+    );
+    bar.appendChild(cancel);
+    bar.appendChild(button("승인", "queue-bulk-primary", () => void run("approve")));
+    return;
+  }
+  bar.appendChild(
+    button(
+      `모두 승인 (${approvable})`,
+      "queue-bulk-primary",
+      () => {
+        bulkConfirm = "approve";
+        rerender();
+      },
+      approvable === 0,
+    ),
+  );
+  bar.appendChild(
+    button(`큐 비우기 (${total})`, "queue-bulk-danger", () => {
+      bulkConfirm = "dismiss";
+      rerender();
+    }),
+  );
+}
+
+function renderList(items: QueueItem[], approvable = 0) {
+  forceList = false;
   activeDetailId = null;
   daemonBusy = false;
   resetView();
@@ -1731,9 +1809,14 @@ function renderList(items: QueueItem[]) {
   content.innerHTML = "";
 
   if (items.length === 0) {
+    bulkConfirm = null;
     content.appendChild(el("p", "queue-empty", "대기 중인 요청이 없습니다."));
     return;
   }
+  const bar = el("div", "queue-bulk");
+  const paintBar = () => renderBulkBar(bar, items.length, approvable, paintBar);
+  paintBar();
+  content.appendChild(bar);
   const list = el("div", "queue-list");
   items.forEach((item, index) => {
     const card = el("div", "queue-card");
@@ -1807,7 +1890,7 @@ async function renderDaemon() {
     activeDetailId = null;
     submitted = false;
   }
-  if (q.items.length === 1) {
+  if (q.items.length === 1 && !forceList) {
     try {
       openDetail(q.items[0]);
     } catch (e) {
@@ -1819,7 +1902,7 @@ async function renderDaemon() {
     }
     return;
   }
-  renderList(q.items);
+  renderList(q.items, q.approvable ?? 0);
 }
 
 async function init() {
@@ -1895,6 +1978,15 @@ async function init() {
       );
       // Event-driven refresh + a slow poll as a backstop for missed events.
       listen("queue-changed", () => void renderDaemon());
+      // 트레이 "대기 N건 모두 취소": 열려 있던 상세는 접고 목록의 확인 단계로 보낸다.
+      listen("confirm-clear-queue", () => {
+        daemonBusy = false;
+        activeDetailId = null;
+        submitted = false;
+        bulkConfirm = "dismiss";
+        forceList = true;
+        void renderDaemon();
+      });
       setInterval(() => void renderDaemon(), 2000);
       return;
     }
