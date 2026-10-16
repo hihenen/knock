@@ -4,6 +4,11 @@ All notable changes to knock are documented here. Versions follow [SemVer](https
 
 ## [Unreleased]
 
+## [0.7.8] - 2026-10-16
+
+### Changed
+- macOS 바이너리를 고정 self-signed 인증서와 고정 identifier(`io.github.hihenen.knock`)로 서명한다. 이전엔 ad-hoc 서명이라 업데이트마다 키체인 "항상 허용"이 풀려 Slack 토큰을 못 읽고 끊겼다. 이 버전으로 처음 올릴 때 한 번 더 허용하면 이후 업데이트에서는 유지된다
+
 ## [0.7.7] - 2026-10-16
 
 ### Added
