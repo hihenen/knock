@@ -4,6 +4,11 @@ All notable changes to knock are documented here. Versions follow [SemVer](https
 
 ## [Unreleased]
 
+### Changed
+- Slack 토큰을 `/usr/bin/security` 서브프로세스로 읽고 쓴다(토큰은 명령 인자가 아니라 표준입력으로만 전달). 접근하는 쪽이 Apple 도구라 knock 이 업데이트로 바뀌어도(키체인 파티션의 cdhash) 허용 창이 다시 뜨지 않는다. 기존 항목은 첫 실행에서 한 번 읽어(이때 창이 마지막으로 한 번 뜰 수 있다) 새 방식으로 옮긴다
+- 대가: 같은 사용자로 도는 프로그램이 `security find-generic-password` 로 창 없이 토큰을 읽을 수 있다
+- 키체인을 못 쓰면 `~/.config/knock/slack-tokens.json`(디렉토리 0700, 파일 0600, **평문**)으로 폴백하고 `knock.log` 에 한 줄 남긴다. `~/.config/knock/config.json` 의 `"token_store": "file"` 로 처음부터 파일만 쓸 수 있다(기본 `"keychain"`)
+
 ## [0.8.0] - 2026-10-17
 
 ### Added
