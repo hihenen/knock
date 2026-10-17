@@ -1435,6 +1435,8 @@ struct QueueEntry {
     source: Value,
     created_at: u64,
     remote_slack: bool,
+    /// Slack 에서 `ask` 를 한 번에 못 끝내는 경우(여러 질문·복수 선택·기타)의 질문별 진행 상태.
+    ask_picks: Vec<slack::AskPick>,
     decision_via: Option<&'static str>,
     responder: ipc::Responder,
 }
@@ -2199,12 +2201,18 @@ fn run_daemon() {
                         .cloned()
                         .unwrap_or_else(|| serde_json::json!({}));
                     let slack_config = slack::config_from_value(&read_config());
-                    // ask: 질문 1개·단일 선택이면 선택지 버튼으로 Slack 병행. Touch ID 를 켠 경우는 맥 전용.
+                    // ask: 질문 4개 이하·한도 안이면 선택 UI(버튼·체크박스·기타)로 Slack 병행. Touch ID 를 켠 경우는 맥 전용.
                     let ask_remote = kind == "ask"
                         && slack_config.enabled
                         && !config_touch_id()
                         && !inner.get("touchId").and_then(Value::as_bool).unwrap_or(false)
-                        && slack::ask_remote_spec(&inner).is_some();
+                        && {
+                            let fits = slack::ask_remote_spec(&inner).is_some();
+                            if !fits {
+                                eprintln!("knock: ask 가 Slack 한도(질문 4개·선택지 24개/체크 10개)를 넘어 맥 창 전용으로 처리");
+                            }
+                            fits
+                        };
                     let remote_slack = !payload.get("hook").and_then(Value::as_bool).unwrap_or(false)
                         && !slack_config.owner_user_id.is_empty()
                         && (ask_remote || slack::is_remote_target(
@@ -2235,17 +2243,17 @@ fn run_daemon() {
                             source,
                             created_at,
                             remote_slack,
+                            ask_picks: Vec::new(),
                             decision_via: None,
                             responder: incoming.responder,
                         });
                         if remote_slack {
                             let entry = qq.last().unwrap();
-                            if let Some((ask_body, labels)) = slack::ask_remote_spec(&entry.payload).filter(|_| entry.kind == "ask") {
+                            if let Some(spec) = slack::ask_remote_spec(&entry.payload).filter(|_| entry.kind == "ask") {
                                 slack_requests.queue_ask_request(
                                     entry.id.clone(),
                                     entry.payload.get("title").and_then(Value::as_str).unwrap_or("Knock").to_string(),
-                                    ask_body,
-                                    labels,
+                                    spec,
                                 );
                             } else {
                             slack_requests.queue_request(
@@ -3240,6 +3248,7 @@ mod tests {
             source: serde_json::json!({}),
             created_at: 1,
             remote_slack: false,
+            ask_picks: Vec::new(),
             decision_via: None,
             responder: super::ipc::Responder::new(CaptureWriter(bytes.clone())),
         };

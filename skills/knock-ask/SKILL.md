@@ -1,6 +1,6 @@
 ---
 name: knock-ask
-description: Use when the user has to choose between options (two or more alternatives where the rationale matters) and you would otherwise ask in chat or with AskUserQuestion, where the question gets missed. Opens knock's desktop window (and Slack option buttons for a single-select question when enabled) and returns the selected answers as JSON arrays. Read `knock guide` first.
+description: Use when the user has to choose between options (two or more alternatives where the rationale matters) and you would otherwise ask in chat or with AskUserQuestion, where the question gets missed. Opens knock's desktop window (and Slack buttons/checkboxes and an "Other" text modal when enabled) and returns the selected answers as JSON arrays. Read `knock guide` first.
 allowed-tools: Bash(knock:*)
 ---
 

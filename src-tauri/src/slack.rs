@@ -668,52 +668,269 @@ fn build_post_blocks(
     (fallback, blocks)
 }
 
-/// Slack 으로 보낼 수 있는 `ask` 인지 판정한다: 질문 1개, 단일 선택, 선택지 1~24개(버튼 25개 한도).
-/// 보내도 되면 (본문 마크다운, 선택지 라벨들).
-pub(super) fn ask_remote_spec(inner: &Value) -> Option<(String, Vec<String>)> {
-    let questions = inner.get("questions")?.get("questions")?.as_array()?;
-    let [question] = questions.as_slice() else {
-        return None;
-    };
-    if question
-        .get("multiSelect")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        return None;
+fn build_post_view(
+    id: &str,
+    title: &str,
+    body: &str,
+    action_url: Option<&str>,
+    ask: Option<&AskSpec>,
+) -> (String, Vec<Value>) {
+    match ask {
+        Some(spec) => build_ask_blocks(id, title, spec, &[], None),
+        None => build_post_blocks(id, title, body, action_url, &[]),
     }
-    let options = question.get("options")?.as_array()?;
-    if options.is_empty() || options.len() > 24 {
-        return None;
+}
+
+/// 질문 하나의 Slack 표현: 답 키(맥 창 `keyFor` 와 같다), 본문 마크다운, 복수 선택 여부, 선택지 라벨.
+#[derive(Clone, Debug)]
+pub(super) struct AskQuestion {
+    key: String,
+    body: String,
+    multi: bool,
+    labels: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct AskSpec {
+    questions: Vec<AskQuestion>,
+}
+
+/// 질문 하나에 지금까지 고른 것: 선택지 인덱스(오름차순)와 "기타" 입력 원문.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct AskPick {
+    sel: Vec<usize>,
+    other: Option<String>,
+}
+
+const ASK_MAX_QUESTIONS: usize = 4;
+const ASK_MAX_BUTTON_OPTIONS: usize = 24;
+const ASK_MAX_CHECKBOX_OPTIONS: usize = 10;
+
+impl AskSpec {
+    fn any_multi(&self) -> bool {
+        self.questions.iter().any(|question| question.multi)
     }
-    let labels: Vec<String> = options
+}
+
+/// 맥 창 `labelsFor` 와 같은 순서: 고른 선택지 라벨들, 그 뒤에 기타 입력.
+fn ask_labels(question: &AskQuestion, pick: &AskPick) -> Vec<String> {
+    let mut out: Vec<String> = pick
+        .sel
         .iter()
-        .filter_map(|option| option.get("label").and_then(Value::as_str))
-        .map(str::to_string)
+        .filter_map(|&index| question.labels.get(index).cloned())
         .collect();
-    if labels.len() != options.len() || labels.iter().any(|label| label.trim().is_empty()) {
+    if let Some(other) = pick
+        .other
+        .as_deref()
+        .map(str::trim)
+        .filter(|o| !o.is_empty())
+    {
+        out.push(other.to_string());
+    }
+    out
+}
+
+/// Slack 으로 보낼 수 있는 `ask` 인지 판정한다: 질문 1~4개, 질문마다 선택지 1~24개
+/// (복수 선택은 체크박스 한도 10개). 한도를 넘으면 None(맥 창 전용).
+pub(super) fn ask_remote_spec(inner: &Value) -> Option<AskSpec> {
+    let questions = inner.get("questions")?.get("questions")?.as_array()?;
+    if questions.is_empty() || questions.len() > ASK_MAX_QUESTIONS {
         return None;
     }
-    let mut body = String::new();
-    if let Some(text) = question.get("question").and_then(Value::as_str) {
-        body.push_str(text);
-        body.push_str("\n\n");
-    }
-    for option in options {
-        let label = option
-            .get("label")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        match option
-            .get("description")
-            .and_then(Value::as_str)
-            .filter(|d| !d.is_empty())
-        {
-            Some(description) => body.push_str(&format!("- **{label}** — {description}\n")),
-            None => body.push_str(&format!("- **{label}**\n")),
+    let mut out = Vec::with_capacity(questions.len());
+    for (qi, question) in questions.iter().enumerate() {
+        let multi = question
+            .get("multiSelect")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let options = question.get("options")?.as_array()?;
+        let limit = if multi {
+            ASK_MAX_CHECKBOX_OPTIONS
+        } else {
+            ASK_MAX_BUTTON_OPTIONS
+        };
+        if options.is_empty() || options.len() > limit {
+            return None;
         }
+        let labels: Vec<String> = options
+            .iter()
+            .filter_map(|option| option.get("label").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect();
+        if labels.len() != options.len() || labels.iter().any(|label| label.trim().is_empty()) {
+            return None;
+        }
+        let mut body = String::new();
+        if let Some(text) = question.get("question").and_then(Value::as_str) {
+            body.push_str(text);
+            body.push_str("\n\n");
+        }
+        for option in options {
+            let label = option
+                .get("label")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            match option
+                .get("description")
+                .and_then(Value::as_str)
+                .filter(|d| !d.is_empty())
+            {
+                Some(description) => body.push_str(&format!("- **{label}** — {description}\n")),
+                None => body.push_str(&format!("- **{label}**\n")),
+            }
+        }
+        let text_of = |field: &str| {
+            question
+                .get(field)
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+        };
+        let key = text_of("header")
+            .or_else(|| text_of("question"))
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("q{qi}"));
+        out.push(AskQuestion {
+            key,
+            body,
+            multi,
+            labels,
+        });
     }
-    Some((body, labels))
+    Some(AskSpec { questions: out })
+}
+
+fn ask_other_button(action_id: String, value: String, text: &str) -> Value {
+    json!({ "type": "button", "action_id": action_id, "value": value,
+        "text": { "type": "plain_text", "text": text, "emoji": true } })
+}
+
+fn ask_plain(text: &str, limit: usize) -> String {
+    mask_secrets(text).chars().take(limit).collect()
+}
+
+/// `ask` 메시지 블록. 질문 1개·단일 선택은 기존 버튼 한 줄(+기타), 그 밖은 질문마다 섹션 + 선택 UI,
+/// 끝에 [제출](복수 선택이 있을 때)·[취소]. `picks` 의 선택은 ✓/체크로 그린다.
+fn build_ask_blocks(
+    id: &str,
+    title: &str,
+    spec: &AskSpec,
+    picks: &[AskPick],
+    notice: Option<&str>,
+) -> (String, Vec<Value>) {
+    let hint = "기타 답은 `기타…` 버튼으로 입력합니다";
+    let (fallback, mut blocks) = match spec.questions.as_slice() {
+        [question] if !question.multi => {
+            let (fallback, mut blocks) =
+                build_post_blocks(id, title, &question.body, None, &question.labels);
+            if let Some(elements) = blocks
+                .last_mut()
+                .and_then(|block| block["elements"].as_array_mut())
+            {
+                let at = elements.len().saturating_sub(1);
+                elements.insert(
+                    at,
+                    ask_other_button("knock_ask_other_0".into(), format!("{id}|0"), "기타…"),
+                );
+            }
+            (fallback, blocks)
+        }
+        questions => {
+            let count = questions.len();
+            let intro = if spec.any_multi() {
+                format!("질문 {count}개 — 복수 선택 질문은 체크한 뒤 [제출]을 누르세요.")
+            } else {
+                format!("질문 {count}개 — 질문마다 하나씩 고르세요.")
+            };
+            let (fallback, mut blocks) = build_message_blocks(id, title, &intro, None);
+            blocks.pop();
+            let empty = AskPick::default();
+            for (qi, question) in questions.iter().enumerate() {
+                let pick = picks.get(qi).unwrap_or(&empty);
+                let section = format!(
+                    "*{}/{count}* {}",
+                    qi + 1,
+                    markdown_to_mrkdwn(&mask_secrets(&question.body))
+                );
+                add_section_blocks(&mut blocks, &section);
+                let mut elements = Vec::new();
+                if question.multi {
+                    let options: Vec<Value> = question
+                        .labels
+                        .iter()
+                        .enumerate()
+                        .map(|(oi, label)| {
+                            json!({ "text": { "type": "plain_text", "text": ask_plain(label, 75) },
+                                "value": format!("{id}|{qi}|{oi}") })
+                        })
+                        .collect();
+                    let mut checkboxes = json!({ "type": "checkboxes",
+                        "action_id": format!("knock_ask_chk_{qi}"), "options": options });
+                    let initial: Vec<Value> = pick
+                        .sel
+                        .iter()
+                        .filter_map(|&oi| checkboxes["options"].get(oi).cloned())
+                        .collect();
+                    if !initial.is_empty() {
+                        checkboxes["initial_options"] = Value::Array(initial);
+                    }
+                    elements.push(checkboxes);
+                } else {
+                    for (oi, label) in question.labels.iter().enumerate() {
+                        let chosen = pick.sel.contains(&oi);
+                        let text = ask_plain(label, 68);
+                        let mut button = json!({ "type": "button",
+                            "action_id": format!("knock_ask_q{qi}_o{oi}"),
+                            "text": { "type": "plain_text", "emoji": true,
+                                "text": if chosen { format!("✓ {text}") } else { text } },
+                            "value": format!("{id}|{qi}|{oi}") });
+                        if chosen {
+                            button["style"] = json!("primary");
+                        }
+                        elements.push(button);
+                    }
+                }
+                elements.push(ask_other_button(
+                    format!("knock_ask_other_{qi}"),
+                    format!("{id}|{qi}"),
+                    if pick.other.is_some() {
+                        "✓ 기타…"
+                    } else {
+                        "기타…"
+                    },
+                ));
+                blocks.push(json!({ "type": "actions", "block_id": format!("{qi}|{id}"),
+                    "elements": elements }));
+                if let Some(other) = pick.other.as_deref() {
+                    let shown = truncate_slack_text(
+                        &escape_mrkdwn_text(&mask_secrets(other)),
+                        SLACK_SECTION_TEXT_LIMIT,
+                    );
+                    blocks.push(json!({ "type": "context", "elements": [
+                        { "type": "mrkdwn", "text": format!("✍️ 기타: {shown}") }
+                    ] }));
+                }
+            }
+            let mut last = Vec::new();
+            if spec.any_multi() {
+                last.push(json!({ "type": "button", "action_id": "knock_ask_submit", "value": id,
+                    "text": { "type": "plain_text", "text": "제출", "emoji": true }, "style": "primary" }));
+            }
+            last.push(json!({ "type": "button", "action_id": "knock_dismiss", "value": id,
+                "text": { "type": "plain_text", "text": "취소", "emoji": true }, "style": "danger" }));
+            blocks.push(json!({ "type": "actions", "elements": last }));
+            (fallback, blocks)
+        }
+    };
+    let mut notes = vec![hint.to_string()];
+    notes.extend(notice.map(str::to_string));
+    let at = blocks.len().saturating_sub(1);
+    for (offset, note) in notes.into_iter().enumerate() {
+        blocks.insert(
+            at + offset,
+            json!({ "type": "context", "elements": [{ "type": "mrkdwn", "text": note }] }),
+        );
+    }
+    (fallback, blocks)
 }
 
 fn resolution_parts(decision: &str) -> (&'static str, &'static str, &'static str) {
@@ -1004,8 +1221,13 @@ pub(super) enum Work {
         title: String,
         body: String,
         action_url: Option<String>,
-        /// 비어 있지 않으면 승인/취소 대신 선택지 버튼을 단다 (`ask` 단일 선택 질문).
-        options: Vec<String>,
+        /// 있으면 승인/취소 대신 질문별 선택 UI 를 단다 (`ask`).
+        ask: Option<AskSpec>,
+    },
+    /// 기타 입력 모달 열기 (`views.open`). trigger_id 는 3초 안에 써야 하므로 실패해도 재시도하지 않는다.
+    OpenModal {
+        trigger_id: String,
+        view: Value,
     },
     Update {
         id: String,
@@ -1041,18 +1263,12 @@ impl Integration {
         body: String,
         action_url: Option<String>,
     ) {
-        self.queue_post(id, title, body, action_url, Vec::new());
+        self.queue_post(id, title, body, action_url, None);
     }
 
-    /// `ask` 단일 선택 질문을 선택지 버튼으로 보낸다.
-    pub(super) fn queue_ask_request(
-        &self,
-        id: String,
-        title: String,
-        body: String,
-        options: Vec<String>,
-    ) {
-        self.queue_post(id, title, body, None, options);
+    /// `ask` 질문을 선택 UI(버튼·체크박스·기타)로 보낸다.
+    pub(super) fn queue_ask_request(&self, id: String, title: String, spec: AskSpec) {
+        self.queue_post(id, title, String::new(), None, Some(spec));
     }
 
     fn queue_post(
@@ -1061,9 +1277,9 @@ impl Integration {
         title: String,
         body: String,
         action_url: Option<String>,
-        options: Vec<String>,
+        ask: Option<AskSpec>,
     ) {
-        let (_, blocks) = build_post_blocks(&id, &title, &body, action_url.as_deref(), &options);
+        let (_, blocks) = build_post_view(&id, &title, &body, action_url.as_deref(), ask.as_ref());
         self.messages
             .lock()
             .unwrap()
@@ -1073,7 +1289,7 @@ impl Integration {
             title,
             body,
             action_url,
-            options,
+            ask,
         });
     }
 
@@ -1523,12 +1739,12 @@ fn post_message(
         title,
         body,
         action_url,
-        options,
+        ask,
     } = work
     else {
         return Err("Slack post 작업이 올바르지 않습니다".into());
     };
-    let (fallback, blocks) = build_post_blocks(id, title, body, action_url.as_deref(), options);
+    let (fallback, blocks) = build_post_view(id, title, body, action_url.as_deref(), ask.as_ref());
     let result = api_call(
         client,
         bot_token,
@@ -1616,6 +1832,16 @@ pub(super) enum ActionResult {
         message: Option<SlackMessageRef>,
         blocks: Option<Value>,
     },
+    /// 아직 다 답하지 않은 `ask`: 선택 표시를 반영한 블록으로 메시지를 갱신한다.
+    AskUpdate {
+        message: Option<SlackMessageRef>,
+        text: String,
+        blocks: Vec<Value>,
+    },
+    OpenModal {
+        trigger_id: String,
+        view: Value,
+    },
     Ignored,
 }
 
@@ -1661,6 +1887,9 @@ pub(super) fn process_block_action(
             blocks,
         };
     }
+    if payload.get("type").and_then(Value::as_str) == Some("view_submission") {
+        return process_view_submission(queue, payload);
+    }
     let Some(action) = payload
         .get("actions")
         .and_then(Value::as_array)
@@ -1669,13 +1898,16 @@ pub(super) fn process_block_action(
         eprintln!("knock: Slack action ignored (no actions in payload)");
         return ActionResult::Ignored;
     };
-    if let Some(index) = action
+    if let Some(qi) = action
         .get("action_id")
         .and_then(Value::as_str)
-        .and_then(|action_id| action_id.strip_prefix("knock_ask_opt_"))
-        .and_then(|index| index.parse::<usize>().ok())
+        .and_then(|action_id| action_id.strip_prefix("knock_ask_other_"))
+        .and_then(|qi| qi.parse::<usize>().ok())
     {
-        return process_ask_option(queue, action, index);
+        return open_other_modal(queue, action, qi, payload);
+    }
+    if let Some((id, edit)) = parse_ask_edit(action) {
+        return apply_ask_edit(queue, &id, edit, message_ref(payload));
     }
     let decision = match action.get("action_id").and_then(Value::as_str) {
         Some("knock_approve") => "approved",
@@ -1701,65 +1933,274 @@ pub(super) fn process_block_action(
     }
 }
 
-/// `ask` 선택지 버튼: 큐 항목의 질문에서 라벨을 찾아 맥 창과 같은 형식의 answers 로 답한다.
-fn process_ask_option(
+/// 큐 항목에 적용할 `ask` 편집.
+enum AskEdit {
+    Pick(usize, usize),
+    Check(usize, Vec<usize>),
+    Other(usize, String),
+    Submit,
+}
+
+/// 버튼/체크박스 action 을 `ask` 편집으로 푼다. 모르는 모양이면 None.
+fn parse_ask_edit(action: &Value) -> Option<(String, AskEdit)> {
+    let action_id = action.get("action_id").and_then(Value::as_str)?;
+    let value = action
+        .get("value")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let num = |text: &str| text.parse::<usize>().ok();
+    if action_id == "knock_ask_submit" {
+        return Some((value.to_string(), AskEdit::Submit));
+    }
+    if let Some(index) = action_id.strip_prefix("knock_ask_opt_").and_then(num) {
+        // 질문 1개·단일 선택 버튼: value = `<id>|<옵션>`
+        let (id, oi) = value.rsplit_once('|')?;
+        return (num(oi)? == index).then(|| (id.to_string(), AskEdit::Pick(0, index)));
+    }
+    if let Some(rest) = action_id.strip_prefix("knock_ask_q") {
+        let (qi, oi) = rest.split_once("_o")?;
+        let (qi, oi) = (num(qi)?, num(oi)?);
+        let (id, tail) = value.split_once('|')?;
+        return (tail == format!("{qi}|{oi}")).then(|| (id.to_string(), AskEdit::Pick(qi, oi)));
+    }
+    if let Some(qi) = action_id.strip_prefix("knock_ask_chk_").and_then(num) {
+        // 체크가 모두 풀리면 selected_options 가 비므로 id 는 block_id(`<질문>|<id>`)로 받는다.
+        let (block_qi, id) = action
+            .get("block_id")
+            .and_then(Value::as_str)?
+            .split_once('|')?;
+        (num(block_qi)? == qi).then_some(())?;
+        let picked = action
+            .get("selected_options")?
+            .as_array()?
+            .iter()
+            .filter_map(|option| option.get("value").and_then(Value::as_str))
+            .filter_map(|value| {
+                let mut parts = value.rsplitn(3, '|');
+                let oi = num(parts.next()?)?;
+                (num(parts.next()?)? == qi).then_some(oi)
+            })
+            .collect();
+        return Some((id.to_string(), AskEdit::Check(qi, picked)));
+    }
+    None
+}
+
+/// `ask` 편집을 큐 항목에 적용한다. 모두 답해졌으면(복수 선택이 있으면 제출까지) 맥 창과 같은 형식의
+/// answers 로 답하고, 아니면 갱신된 블록을 돌려준다.
+fn apply_ask_edit(
+    queue: &Arc<Mutex<Vec<crate::QueueEntry>>>,
+    id: &str,
+    edit: AskEdit,
+    message: Option<SlackMessageRef>,
+) -> ActionResult {
+    enum Outcome {
+        Done(Value),
+        Progress(String, Vec<Value>),
+        Ignore,
+    }
+    let outcome = {
+        let mut queue = queue.lock().unwrap();
+        let Some(entry) = queue
+            .iter_mut()
+            .find(|entry| entry.id == id && entry.remote_slack && entry.kind == "ask")
+        else {
+            eprintln!("knock: Slack action ignored (no pending remote ask for id={id})");
+            return ActionResult::Ignored;
+        };
+        let Some(spec) = ask_remote_spec(&entry.payload) else {
+            eprintln!("knock: Slack action ignored (ask is not remote-capable, id={id})");
+            return ActionResult::Ignored;
+        };
+        entry
+            .ask_picks
+            .resize(spec.questions.len(), AskPick::default());
+        let submit = matches!(edit, AskEdit::Submit);
+        let picks = &mut entry.ask_picks;
+        let ok = match edit {
+            AskEdit::Pick(qi, oi) => spec
+                .questions
+                .get(qi)
+                .filter(|question| !question.multi && oi < question.labels.len())
+                .map(|_| {
+                    picks[qi] = AskPick {
+                        sel: vec![oi],
+                        other: None,
+                    }
+                })
+                .is_some(),
+            AskEdit::Check(qi, mut picked) => spec
+                .questions
+                .get(qi)
+                .filter(|question| question.multi)
+                .map(|question| {
+                    picked.retain(|&oi| oi < question.labels.len());
+                    picked.sort_unstable();
+                    picked.dedup();
+                    picks[qi].sel = picked;
+                })
+                .is_some(),
+            AskEdit::Other(qi, text) => spec
+                .questions
+                .get(qi)
+                .map(|question| {
+                    if !question.multi {
+                        picks[qi].sel.clear();
+                    }
+                    picks[qi].other = Some(text);
+                })
+                .is_some(),
+            AskEdit::Submit => true,
+        };
+        if !ok {
+            eprintln!("knock: Slack action ignored (ask edit out of range, id={id})");
+            Outcome::Ignore
+        } else {
+            let all = spec
+                .questions
+                .iter()
+                .zip(picks.iter())
+                .all(|(question, pick)| !ask_labels(question, pick).is_empty());
+            if all && (!spec.any_multi() || submit) {
+                let answers: serde_json::Map<String, Value> = spec
+                    .questions
+                    .iter()
+                    .zip(picks.iter())
+                    .map(|(question, pick)| {
+                        (question.key.clone(), json!(ask_labels(question, pick)))
+                    })
+                    .collect();
+                Outcome::Done(json!({ "answers": answers, "decision": "approved", "via": "slack" }))
+            } else {
+                let notice =
+                    (submit && !all).then_some("⚠️ 선택하지 않은 질문이 있어 제출하지 않았습니다");
+                let title = entry
+                    .payload
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Knock");
+                let (text, blocks) = build_ask_blocks(id, title, &spec, picks, notice);
+                Outcome::Progress(text, blocks)
+            }
+        }
+    };
+    match outcome {
+        Outcome::Ignore => ActionResult::Ignored,
+        Outcome::Progress(text, blocks) => ActionResult::AskUpdate {
+            message,
+            text,
+            blocks,
+        },
+        Outcome::Done(response) => {
+            if crate::reply_queue_entry(queue, id, &response, |entry| entry.remote_slack, |_| {})
+                .is_none()
+            {
+                eprintln!("knock: Slack action ignored (no pending remote entry for id={id})");
+                return ActionResult::Ignored;
+            }
+            ActionResult::Applied {
+                id: id.to_string(),
+                decision: "approved",
+            }
+        }
+    }
+}
+
+/// `기타…` 버튼: 입력 모달을 연다. 현재 입력(있으면)을 미리 채운다.
+fn open_other_modal(
     queue: &Arc<Mutex<Vec<crate::QueueEntry>>>,
     action: &Value,
-    index: usize,
+    qi: usize,
+    payload: &Value,
 ) -> ActionResult {
-    let Some(value) = action.get("value").and_then(Value::as_str) else {
-        eprintln!("knock: Slack action ignored (no value on ask button)");
+    let id = action
+        .get("value")
+        .and_then(Value::as_str)
+        .and_then(|value| value.split_once('|'))
+        .filter(|(_, tail)| tail.parse::<usize>().ok() == Some(qi))
+        .map(|(id, _)| id.to_string());
+    let (Some(id), Some(trigger_id), Some(message)) = (
+        id,
+        payload.get("trigger_id").and_then(Value::as_str),
+        message_ref(payload),
+    ) else {
+        eprintln!("knock: Slack action ignored (malformed ask other button)");
         return ActionResult::Ignored;
     };
-    let Some((id, value_index)) = value.rsplit_once('|') else {
-        eprintln!("knock: Slack action ignored (malformed ask button value)");
-        return ActionResult::Ignored;
-    };
-    if value_index.parse::<usize>().ok() != Some(index) {
-        eprintln!("knock: Slack action ignored (ask button index mismatch)");
-        return ActionResult::Ignored;
-    }
-    let question = {
+    let found = {
         let queue = queue.lock().unwrap();
         queue
             .iter()
             .find(|entry| entry.id == id && entry.remote_slack && entry.kind == "ask")
-            .and_then(|entry| ask_remote_spec(&entry.payload).map(|_| entry.payload.clone()))
-            .and_then(|payload| payload["questions"]["questions"].get(0).cloned())
+            .and_then(|entry| {
+                let spec = ask_remote_spec(&entry.payload)?;
+                let question = spec.questions.get(qi)?.clone();
+                let current = entry.ask_picks.get(qi).and_then(|pick| pick.other.clone());
+                Some((question, current))
+            })
     };
-    let Some(question) = question else {
+    let Some((question, current)) = found else {
         eprintln!("knock: Slack action ignored (no pending remote ask for id={id})");
         return ActionResult::Ignored;
     };
-    let Some(label) = question["options"]
-        .get(index)
-        .and_then(|option| option.get("label"))
-        .and_then(Value::as_str)
-    else {
-        eprintln!("knock: Slack action ignored (ask option {index} out of range)");
+    let mut element = json!({ "type": "plain_text_input", "action_id": "text", "multiline": true });
+    if let Some(current) = current.filter(|text| !text.is_empty()) {
+        element["initial_value"] = json!(current);
+    }
+    let view = json!({
+        "type": "modal",
+        "callback_id": "knock_ask_other",
+        "private_metadata": json!({ "id": id, "qi": qi,
+            "channel": message.channel, "ts": message.ts }).to_string(),
+        "title": { "type": "plain_text", "text": "기타 입력" },
+        "submit": { "type": "plain_text", "text": "확인" },
+        "close": { "type": "plain_text", "text": "닫기" },
+        "blocks": [{ "type": "input", "block_id": "other",
+            "label": { "type": "plain_text", "text": ask_plain(&question.key, 200) },
+            "element": element }]
+    });
+    ActionResult::OpenModal {
+        trigger_id: trigger_id.to_string(),
+        view,
+    }
+}
+
+/// 기타 모달 제출(`view_submission`): 그 질문의 답으로 넣는다. 소유자 검사는 호출 전에 끝나 있다.
+fn process_view_submission(
+    queue: &Arc<Mutex<Vec<crate::QueueEntry>>>,
+    payload: &Value,
+) -> ActionResult {
+    let view = &payload["view"];
+    if view["callback_id"] != "knock_ask_other" {
+        return ActionResult::Ignored;
+    }
+    let meta: Value = view["private_metadata"]
+        .as_str()
+        .and_then(|raw| serde_json::from_str(raw).ok())
+        .unwrap_or(Value::Null);
+    let (Some(id), Some(qi)) = (
+        meta["id"].as_str(),
+        meta["qi"].as_u64().map(|qi| qi as usize),
+    ) else {
+        eprintln!("knock: Slack view ignored (malformed metadata)");
         return ActionResult::Ignored;
     };
-    let key = question
-        .get("header")
-        .and_then(Value::as_str)
-        .filter(|header| !header.is_empty())
-        .or_else(|| {
-            question
-                .get("question")
-                .and_then(Value::as_str)
-                .filter(|q| !q.is_empty())
-        })
-        .unwrap_or("q0");
-    let response = json!({ "answers": { key: [label] }, "decision": "approved", "via": "slack" });
-    if crate::reply_queue_entry(queue, id, &response, |entry| entry.remote_slack, |_| {}).is_none()
-    {
-        eprintln!("knock: Slack action ignored (no pending remote entry for id={id})");
+    let text = view["state"]["values"]["other"]["text"]["value"]
+        .as_str()
+        .map(str::trim)
+        .unwrap_or_default();
+    if text.is_empty() {
+        eprintln!("knock: Slack view ignored (empty other text)");
         return ActionResult::Ignored;
     }
-    ActionResult::Applied {
-        id: id.to_string(),
-        decision: "approved",
-    }
+    let message = match (meta["channel"].as_str(), meta["ts"].as_str()) {
+        (Some(channel), Some(ts)) => Some(SlackMessageRef {
+            channel: channel.into(),
+            ts: ts.into(),
+        }),
+        _ => None,
+    };
+    apply_ask_edit(queue, id, AskEdit::Other(qi, text.to_string()), message)
 }
 
 fn stamp() -> (SlackConfig, Option<SystemTime>) {
@@ -1915,7 +2356,10 @@ fn run_socket_reader(
                     "knock: Slack interactive payload received (type={})",
                     payload.get("type").and_then(Value::as_str).unwrap_or("?")
                 );
-                if payload.get("type").and_then(Value::as_str) == Some("block_actions") {
+                if matches!(
+                    payload.get("type").and_then(Value::as_str),
+                    Some("block_actions" | "view_submission")
+                ) {
                     integration.deliver_action(payload, config.clone());
                 }
             }
@@ -1991,7 +2435,20 @@ fn handle_action(
             message,
             blocks,
         }),
-        ActionResult::Rejected { message: None, .. } | ActionResult::Ignored => None,
+        ActionResult::AskUpdate {
+            message: Some(message),
+            text,
+            blocks,
+        } => Some(Work::Update {
+            id: String::new(),
+            text,
+            message,
+            blocks: Some(Value::Array(blocks)),
+        }),
+        ActionResult::OpenModal { trigger_id, view } => Some(Work::OpenModal { trigger_id, view }),
+        ActionResult::Rejected { message: None, .. }
+        | ActionResult::AskUpdate { message: None, .. }
+        | ActionResult::Ignored => None,
     }
 }
 
@@ -2046,6 +2503,19 @@ fn execute_http(
             }
             Ok(())
         }
+        Work::OpenModal { trigger_id, view } => {
+            let opened = api_call(
+                client,
+                &session.bot_token,
+                "views.open",
+                json!({ "trigger_id": trigger_id, "view": view }),
+                Some(version),
+            );
+            if opened.is_err() {
+                eprintln!("knock: Slack views.open failed");
+            }
+            Ok(())
+        }
         _ => Ok(()),
     }
 }
@@ -2057,7 +2527,10 @@ fn dispatch_or_hold(
     execute: impl FnOnce(&Work) -> Result<(), ()>,
 ) -> bool {
     if !connected {
-        if matches!(&work, Work::Post { .. } | Work::Update { .. }) {
+        if matches!(
+            &work,
+            Work::Post { .. } | Work::Update { .. } | Work::OpenModal { .. }
+        ) {
             pending.push_back(work);
         }
         return false;
@@ -2198,7 +2671,9 @@ pub(super) fn run_worker(
         let work = if session.is_some() {
             match receiver.try_recv() {
                 Ok(work @ (Work::Action { .. } | Work::SocketEnded { .. })) => Some(work),
-                Ok(work @ (Work::Post { .. } | Work::Update { .. })) if !pending.is_empty() => {
+                Ok(work @ (Work::Post { .. } | Work::Update { .. } | Work::OpenModal { .. }))
+                    if !pending.is_empty() =>
+                {
                     pending.push_back(work);
                     pending.pop_front()
                 }
@@ -2230,7 +2705,7 @@ pub(super) fn run_worker(
                     attempt = attempt.saturating_add(1);
                 }
             }
-            work @ (Work::Post { .. } | Work::Update { .. }) => {
+            work @ (Work::Post { .. } | Work::Update { .. } | Work::OpenModal { .. }) => {
                 let failed = dispatch_or_hold(work, session.is_some(), &mut pending, |work| {
                     execute_http(
                         work,
@@ -2283,6 +2758,7 @@ mod tests {
             source: json!({}),
             created_at: 1,
             remote_slack,
+            ask_picks: Vec::new(),
             decision_via: None,
             responder: crate::ipc::Responder::new(SharedWriter(bytes.clone())),
         }]));
@@ -2620,16 +3096,286 @@ mod tests {
     }
 
     #[test]
-    fn ask_remote_spec_only_accepts_single_single_select_questions() {
+    fn ask_remote_spec_enforces_question_and_option_limits() {
         assert!(ask_remote_spec(&ask_payload(false, 3)).is_some());
-        assert!(ask_remote_spec(&ask_payload(true, 3)).is_none());
+        assert!(ask_remote_spec(&ask_payload(true, 3)).is_some());
         assert!(ask_remote_spec(&ask_payload(false, 0)).is_none());
+        assert!(ask_remote_spec(&ask_payload(false, 24)).is_some());
         assert!(ask_remote_spec(&ask_payload(false, 25)).is_none());
-        let two = json!({ "questions": { "questions": [
-            { "question": "a", "options": [{ "label": "x" }] },
-            { "question": "b", "options": [{ "label": "y" }] }
-        ] } });
-        assert!(ask_remote_spec(&two).is_none());
+        assert!(ask_remote_spec(&ask_payload(true, 10)).is_some());
+        assert!(ask_remote_spec(&ask_payload(true, 11)).is_none());
+        assert_eq!(
+            ask_remote_spec(&two_questions()).unwrap().questions.len(),
+            2
+        );
+        let mut five = two_questions();
+        let q = five["questions"]["questions"][0].clone();
+        five["questions"]["questions"] = json!([q, q, q, q, q]);
+        assert!(ask_remote_spec(&five).is_none());
+    }
+
+    /// 단일 선택 "배포" + 복수 선택 "기능" 질문 둘.
+    fn two_questions() -> Value {
+        json!({ "mode": "ask", "title": "t", "questions": { "questions": [
+            { "header": "배포", "question": "환경?", "multiSelect": false,
+              "options": [{ "label": "dev" }, { "label": "prd" }] },
+            { "question": "기능?", "multiSelect": true,
+              "options": [{ "label": "a" }, { "label": "b" }, { "label": "c" }] }
+        ] } })
+    }
+
+    fn ask_queue(payload: Value) -> (TestResponse, TestQueue) {
+        let (bytes, queue) = queued(true);
+        {
+            let mut q = queue.lock().unwrap();
+            q[0].kind = "ask".into();
+            q[0].payload = payload;
+        }
+        (bytes, queue)
+    }
+
+    fn ask_click(queue: &TestQueue, user: &str, action: Value) -> ActionResult {
+        let mut payload = action_payload(user, action);
+        payload["trigger_id"] = json!("trig-1");
+        process_block_action(true, "U_OWNER", queue, &payload)
+    }
+
+    fn action_payload(user: &str, action: Value) -> Value {
+        let mut payload = self::action(user, "x", "q-1");
+        payload["actions"] = json!([action]);
+        payload
+    }
+
+    fn btn(action_id: &str, value: &str) -> Value {
+        json!({ "type": "button", "action_id": action_id, "value": value })
+    }
+
+    fn progress_blocks(result: ActionResult) -> Vec<Value> {
+        match result {
+            ActionResult::AskUpdate { blocks, .. } => blocks,
+            _ => panic!("AskUpdate 가 아니다"),
+        }
+    }
+
+    fn texts(blocks: &[Value]) -> String {
+        serde_json::to_string(blocks).unwrap()
+    }
+
+    #[test]
+    fn multi_question_blocks_have_per_question_controls_and_other() {
+        let spec = ask_remote_spec(&two_questions()).unwrap();
+        let (_, blocks) = build_ask_blocks("q-1", "t", &spec, &[], None);
+        let actions: Vec<&Value> = blocks.iter().filter(|b| b["type"] == "actions").collect();
+        assert_eq!(actions.len(), 3);
+        // 질문 1: 버튼 2 + 기타
+        let e0 = actions[0]["elements"].as_array().unwrap();
+        assert_eq!(e0[0]["action_id"], "knock_ask_q0_o0");
+        assert_eq!(e0[1]["value"], "q-1|0|1");
+        assert_eq!(e0[2]["action_id"], "knock_ask_other_0");
+        // 질문 2: 체크박스 + 기타
+        let e1 = actions[1]["elements"].as_array().unwrap();
+        assert_eq!(e1[0]["type"], "checkboxes");
+        assert_eq!(e1[0]["options"].as_array().unwrap().len(), 3);
+        assert_eq!(e1[1]["action_id"], "knock_ask_other_1");
+        // 끝: 제출 + 취소
+        let last = actions[2]["elements"].as_array().unwrap();
+        assert_eq!(last[0]["action_id"], "knock_ask_submit");
+        assert_eq!(last[1]["action_id"], "knock_dismiss");
+        assert!(blocks.len() <= SLACK_BLOCK_LIMIT);
+    }
+
+    #[test]
+    fn single_question_single_select_keeps_buttons_and_adds_other_before_cancel() {
+        let spec = ask_remote_spec(&ask_payload(false, 2)).unwrap();
+        let (_, blocks) = build_ask_blocks("q-1", "t", &spec, &[], None);
+        let ids: Vec<&str> = blocks
+            .iter()
+            .filter(|b| b["type"] == "actions")
+            .flat_map(|b| b["elements"].as_array().unwrap())
+            .map(|e| e["action_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                "knock_ask_opt_0",
+                "knock_ask_opt_1",
+                "knock_ask_other_0",
+                "knock_dismiss"
+            ]
+        );
+    }
+
+    #[test]
+    fn multi_question_click_sequence_marks_selection_then_replies_on_submit() {
+        let (bytes, queue) = ask_queue(two_questions());
+        // 질문 1 선택 → 갱신
+        let blocks = progress_blocks(ask_click(
+            &queue,
+            "U_OWNER",
+            btn("knock_ask_q0_o0", "q-1|0|0"),
+        ));
+        assert!(texts(&blocks).contains("✓ dev"));
+        // 재선택 → 마지막 값
+        let blocks = progress_blocks(ask_click(
+            &queue,
+            "U_OWNER",
+            btn("knock_ask_q0_o1", "q-1|0|1"),
+        ));
+        assert!(texts(&blocks).contains("✓ prd") && !texts(&blocks).contains("✓ dev"));
+        // 질문 2 체크 (b, a 순서로 와도 오름차순)
+        let check = json!({ "type": "checkboxes", "action_id": "knock_ask_chk_1", "block_id": "1|q-1",
+            "selected_options": [{ "value": "q-1|1|1" }, { "value": "q-1|1|0" }] });
+        let blocks = progress_blocks(ask_click(&queue, "U_OWNER", check));
+        assert!(texts(&blocks).contains("initial_options"));
+        // 제출
+        let result = ask_click(&queue, "U_OWNER", btn("knock_ask_submit", "q-1"));
+        assert!(matches!(
+            result,
+            ActionResult::Applied {
+                decision: "approved",
+                ..
+            }
+        ));
+        let response = reply(&bytes);
+        assert_eq!(response["answers"]["배포"], json!(["prd"]));
+        assert_eq!(response["answers"]["기능?"], json!(["a", "b"]));
+        assert_eq!(response["via"], "slack");
+        // 끝난 요청의 클릭은 무시
+        assert!(matches!(
+            ask_click(&queue, "U_OWNER", btn("knock_ask_submit", "q-1")),
+            ActionResult::Ignored
+        ));
+    }
+
+    #[test]
+    fn all_single_select_questions_reply_when_last_one_is_answered() {
+        let mut payload = two_questions();
+        payload["questions"]["questions"][1]["multiSelect"] = json!(false);
+        let (bytes, queue) = ask_queue(payload);
+        assert!(matches!(
+            ask_click(&queue, "U_OWNER", btn("knock_ask_q1_o2", "q-1|1|2")),
+            ActionResult::AskUpdate { .. }
+        ));
+        assert!(matches!(
+            ask_click(&queue, "U_OWNER", btn("knock_ask_q0_o0", "q-1|0|0")),
+            ActionResult::Applied { .. }
+        ));
+        let response = reply(&bytes);
+        assert_eq!(response["answers"]["배포"], json!(["dev"]));
+        assert_eq!(response["answers"]["기능?"], json!(["c"]));
+    }
+
+    #[test]
+    fn submitting_with_an_unanswered_question_is_ignored_with_a_notice() {
+        let (bytes, queue) = ask_queue(two_questions());
+        ask_click(&queue, "U_OWNER", btn("knock_ask_q0_o0", "q-1|0|0"));
+        let blocks = progress_blocks(ask_click(&queue, "U_OWNER", btn("knock_ask_submit", "q-1")));
+        assert!(texts(&blocks).contains("제출하지 않았습니다"));
+        assert!(bytes.lock().unwrap().is_empty());
+        // 체크를 모두 풀어도(빈 selected_options) 제출은 막힌다
+        let check = json!({ "type": "checkboxes", "action_id": "knock_ask_chk_1", "block_id": "1|q-1",
+            "selected_options": [] });
+        ask_click(&queue, "U_OWNER", check);
+        let blocks = progress_blocks(ask_click(&queue, "U_OWNER", btn("knock_ask_submit", "q-1")));
+        assert!(texts(&blocks).contains("제출하지 않았습니다"));
+    }
+
+    #[test]
+    fn other_button_opens_modal_with_trigger_and_metadata() {
+        let (_, queue) = ask_queue(two_questions());
+        let result = ask_click(&queue, "U_OWNER", btn("knock_ask_other_1", "q-1|1"));
+        let ActionResult::OpenModal { trigger_id, view } = result else {
+            panic!("OpenModal 이 아니다");
+        };
+        assert_eq!(trigger_id, "trig-1");
+        assert_eq!(view["callback_id"], "knock_ask_other");
+        assert_eq!(view["blocks"][0]["element"]["type"], "plain_text_input");
+        assert_eq!(view["blocks"][0]["element"]["multiline"], true);
+        let meta: Value = serde_json::from_str(view["private_metadata"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            (meta["id"].as_str(), meta["qi"].as_u64()),
+            (Some("q-1"), Some(1))
+        );
+        // value 의 질문 번호가 action_id 와 다르면 무시
+        assert!(matches!(
+            ask_click(&queue, "U_OWNER", btn("knock_ask_other_1", "q-1|0")),
+            ActionResult::Ignored
+        ));
+    }
+
+    fn view_submission(user: &str, qi: usize, text: &str) -> Value {
+        json!({ "type": "view_submission", "user": { "id": user }, "view": {
+            "callback_id": "knock_ask_other",
+            "private_metadata": json!({ "id": "q-1", "qi": qi, "channel": "D123", "ts": "1.2" }).to_string(),
+            "state": { "values": { "other": { "text": { "type": "plain_text_input", "value": text } } } }
+        } })
+    }
+
+    #[test]
+    fn other_text_replaces_single_choice_and_joins_multi_choice_like_the_mac_window() {
+        let (bytes, queue) = ask_queue(two_questions());
+        ask_click(&queue, "U_OWNER", btn("knock_ask_q0_o0", "q-1|0|0"));
+        let check = json!({ "type": "checkboxes", "action_id": "knock_ask_chk_1", "block_id": "1|q-1",
+            "selected_options": [{ "value": "q-1|1|2" }] });
+        ask_click(&queue, "U_OWNER", check);
+        // 단일 선택에 기타 → 선택 대체 (원문 trim 후 그대로, 마스킹은 표시에만)
+        let secret = "token ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        let result = process_block_action(
+            true,
+            "U_OWNER",
+            &queue,
+            &view_submission("U_OWNER", 0, secret),
+        );
+        let blocks = progress_blocks(result);
+        assert!(!texts(&blocks).contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"));
+        assert!(!texts(&blocks).contains("✓ dev"));
+        // 복수 선택에 기타 → 체크와 함께
+        process_block_action(
+            true,
+            "U_OWNER",
+            &queue,
+            &view_submission("U_OWNER", 1, "  직접\n입력 "),
+        );
+        let result = ask_click(&queue, "U_OWNER", btn("knock_ask_submit", "q-1"));
+        assert!(matches!(result, ActionResult::Applied { .. }));
+        let response = reply(&bytes);
+        assert_eq!(response["answers"]["배포"], json!([secret]));
+        assert_eq!(response["answers"]["기능?"], json!(["c", "직접\n입력"]));
+    }
+
+    #[test]
+    fn view_submission_from_non_owner_or_empty_text_is_not_applied() {
+        let (bytes, queue) = ask_queue(ask_payload(false, 2));
+        let result =
+            process_block_action(true, "U_OWNER", &queue, &view_submission("U_EVIL", 0, "x"));
+        assert!(matches!(
+            result,
+            ActionResult::Rejected { message: None, .. }
+        ));
+        let result = process_block_action(
+            true,
+            "U_OWNER",
+            &queue,
+            &view_submission("U_OWNER", 0, "   "),
+        );
+        assert!(matches!(result, ActionResult::Ignored));
+        assert!(bytes.lock().unwrap().is_empty());
+        // 질문 1개·단일 선택은 기타 하나로 바로 끝난다
+        let result = process_block_action(
+            true,
+            "U_OWNER",
+            &queue,
+            &view_submission("U_OWNER", 0, "직접"),
+        );
+        assert!(matches!(result, ActionResult::Applied { .. }));
+        assert_eq!(reply(&bytes)["answers"]["배포"], json!(["직접"]));
+    }
+
+    #[test]
+    fn other_button_from_non_owner_is_rejected() {
+        let (_, queue) = ask_queue(two_questions());
+        let result = ask_click(&queue, "U_EVIL", btn("knock_ask_other_0", "q-1|0"));
+        assert!(matches!(result, ActionResult::Rejected { .. }));
     }
 
     #[test]
@@ -3189,7 +3935,7 @@ mod tests {
             title: "t".into(),
             body: "b".into(),
             action_url: None,
-            options: Vec::new(),
+            ask: None,
         };
         let update = Work::Update {
             id: "q-1".into(),
