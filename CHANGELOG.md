@@ -4,6 +4,8 @@ All notable changes to knock are documented here. Versions follow [SemVer](https
 
 ## [Unreleased]
 
+- 트레이 메뉴에서 설정 창을 열고, 이미 열려 있으면 앞으로 가져온다.
+
 ## [0.7.9] - 2026-10-16
 
 ### Fixed

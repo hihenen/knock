@@ -18,7 +18,7 @@ use std::io::{prelude::*, BufReader};
 use interprocess::local_socket::GenericFilePath;
 #[cfg(windows)]
 use interprocess::local_socket::GenericNamespaced;
-use interprocess::local_socket::{prelude::*, ListenerOptions, Name, Stream};
+use interprocess::local_socket::{prelude::*, Listener, ListenerOptions, Name, Stream};
 use serde_json::Value;
 
 #[cfg(unix)]
@@ -47,6 +47,72 @@ fn pipe_name() -> std::io::Result<Name<'static>> {
     #[cfg(unix)]
     {
         unix_sock_path().to_fs_name::<GenericFilePath>()
+    }
+}
+
+fn settings_pipe_name() -> std::io::Result<Name<'static>> {
+    #[cfg(windows)]
+    {
+        let user = std::env::var("USERNAME").unwrap_or_else(|_| "user".to_string());
+        format!("knock-settings-{}.sock", user).to_ns_name::<GenericNamespaced>()
+    }
+    #[cfg(unix)]
+    {
+        format!("{}.settings", unix_sock_path()).to_fs_name::<GenericFilePath>()
+    }
+}
+
+fn claim_settings_at(name: Name<'static>) -> std::io::Result<Option<Listener>> {
+    match ListenerOptions::new().name(name.clone()).create_sync() {
+        Ok(listener) => Ok(Some(listener)),
+        Err(_error) if Stream::connect(name).is_ok() => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+pub fn bind_settings_focus() -> std::io::Result<Option<Listener>> {
+    claim_settings_at(settings_pipe_name()?)
+}
+
+pub fn serve_settings_focus<F>(listener: Listener, mut on_focus: F)
+where
+    F: FnMut() -> bool + Send + 'static,
+{
+    for _stream in listener.incoming().flatten() {
+        if !on_focus() {
+            break;
+        }
+    }
+}
+
+pub fn cleanup_settings_focus() {
+    #[cfg(unix)]
+    let _ = std::fs::remove_file(format!("{}.settings", unix_sock_path()));
+}
+
+#[cfg(all(test, unix))]
+mod settings_tests {
+    use super::*;
+
+    #[test]
+    fn settings_socket_focuses_existing_window_and_rebinds_after_close() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("settings.sock");
+        let name = socket.clone().to_fs_name::<GenericFilePath>().unwrap();
+        let listener = claim_settings_at(name.clone()).unwrap().unwrap();
+        let (focused, received) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            serve_settings_focus(listener, move || {
+                focused.send(()).unwrap();
+                false
+            })
+        });
+        assert!(claim_settings_at(name.clone()).unwrap().is_none());
+        received
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        server.join().unwrap();
+        assert!(claim_settings_at(name).unwrap().is_some());
     }
 }
 
