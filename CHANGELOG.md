@@ -4,6 +4,9 @@ All notable changes to knock are documented here. Versions follow [SemVer](https
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-17
+
+### Added
 - 트레이 메뉴에서 설정 창을 열고, 이미 열려 있으면 앞으로 가져온다.
 - `ask` 를 Slack 에서 여러 질문(최대 4개)·복수 선택(체크박스 + 제출)까지 답할 수 있다. 질문마다 `기타…` 버튼이 입력 모달을 열고, 입력은 맥 창의 Other 와 같은 형식으로 돌아온다. 한도를 넘으면 맥 창 전용(로그).
 
