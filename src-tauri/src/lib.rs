@@ -712,6 +712,14 @@ struct AutoApproveMergeMenu(CheckMenuItem<tauri::Wry>);
 /// 트레이의 "대기 N건 모두 취소" 항목. 건수에 맞춰 문구와 활성 상태를 바꾼다.
 struct ClearQueueMenu(MenuItem<tauri::Wry>);
 
+fn open_settings_from_tray() {
+    std::thread::spawn(|| {
+        if let Ok(exe) = std::env::current_exe() {
+            let _ = std::process::Command::new(exe).arg("settings").status();
+        }
+    });
+}
+
 /// Sandbox flags forced onto every `<iframe>` in gate content.
 ///
 /// `allow-scripts` is deliberate: gate bodies embed generated diagrams that need
@@ -953,7 +961,10 @@ fn finish(decision: &str, feedback: Option<&str>, state: &AppState) -> ! {
         Mode::Ask { .. } => {
             print_and_exit(serde_json::json!({ "decision": "dismissed" }).to_string())
         }
-        Mode::Settings => print_nothing_and_exit(),
+        Mode::Settings => {
+            ipc::cleanup_settings_focus();
+            print_nothing_and_exit();
+        }
     }
 }
 
@@ -2303,6 +2314,7 @@ fn run_daemon() {
                     }
                 });
             }
+            let settings = MenuItemBuilder::with_id("settings", "설정 열기…").build(app)?;
             let sep = PredefinedMenuItem::separator(app)?;
             let touch_toggle = CheckMenuItemBuilder::with_id("touch_id", "Use Touch ID by default")
                 .checked(config_touch_id())
@@ -2330,6 +2342,7 @@ fn run_daemon() {
                     &info,
                     &slack_status,
                     &sep,
+                    &settings,
                     &touch_toggle,
                     &auto_approve_merge_toggle,
                     &open_url_toggle,
@@ -2357,6 +2370,7 @@ fn run_daemon() {
                         }
                     })
                     .on_menu_event(move |app, event| match event.id().as_ref() {
+                        "settings" => open_settings_from_tray(),
                         "quit" => {
                             ipc::cleanup();
                             app.exit(0);
@@ -2416,6 +2430,18 @@ fn zoom_debug(msg: String) {
 }
 
 fn launch(state: AppState) {
+    let settings_listener = if matches!(&state.mode, Mode::Settings) {
+        match ipc::bind_settings_focus() {
+            Ok(Some(listener)) => Some(listener),
+            Ok(None) => return,
+            Err(error) => {
+                eprintln!("설정 창 연결을 열지 못했습니다: {error}");
+                return;
+            }
+        }
+    } else {
+        None
+    };
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
@@ -2444,7 +2470,19 @@ fn launch(state: AppState) {
                 finish("dismissed", None, &state);
             }
         })
-        .setup(|app| {
+        .setup(move |app| {
+            if let Some(listener) = settings_listener {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || ipc::serve_settings_focus(listener, move || {
+                    let h = handle.clone();
+                    let _ = handle.run_on_main_thread(move || {
+                        if let Some(win) = h.get_webview_window("main") {
+                            let _ = win.unminimize(); let _ = win.show(); let _ = win.set_focus();
+                        }
+                    });
+                    true
+                }));
+            }
             let sc = Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyK);
             let _ = app
                 .global_shortcut()
