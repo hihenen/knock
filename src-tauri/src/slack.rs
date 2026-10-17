@@ -13,7 +13,6 @@ use tauri_plugin_notification::NotificationExt;
 use tungstenite::{stream::MaybeTlsStream, Message, WebSocket};
 use url::Url;
 
-const SERVICE: &str = "knock-slack";
 const DEFAULT_HOSTS: &[&str] = &["fnfcorp.scalr.io"];
 const MAX_BACKOFF_SECS: u64 = 60;
 const SOCKET_POLL: Duration = Duration::from_secs(1);
@@ -1423,8 +1422,16 @@ impl Integration {
 #[cfg(target_os = "macos")]
 fn store_token(account: &str, token: &str) -> Result<(), String> {
     token_cache().update(|| {
-        security_framework::passwords::set_generic_password(SERVICE, account, token.as_bytes())
-            .map_err(|error| format!("macOS 키체인 저장 실패 ({})", error.code()))?;
+        let mode = crate::token_store::Mode::from_config(&crate::read_config());
+        let security = crate::token_store::SecurityCli { keychain: None };
+        crate::token_store::store(
+            mode,
+            &security,
+            &crate::token_store::FrameworkLegacy,
+            &crate::token_store::token_file_path(),
+            account,
+            token,
+        )?;
         bump_token_generation()
     })
 }
@@ -1436,9 +1443,15 @@ fn store_token(_account: &str, _token: &str) -> Result<(), String> {
 
 #[cfg(target_os = "macos")]
 fn read_token(account: &str) -> Result<String, String> {
-    let bytes = security_framework::passwords::get_generic_password(SERVICE, account)
-        .map_err(|error| format!("macOS 키체인 항목을 읽을 수 없습니다 ({})", error.code()))?;
-    String::from_utf8(bytes).map_err(|_| "macOS 키체인 토큰 형식이 올바르지 않습니다".into())
+    let mode = crate::token_store::Mode::from_config(&crate::read_config());
+    let security = crate::token_store::SecurityCli { keychain: None };
+    crate::token_store::load(
+        mode,
+        &security,
+        &crate::token_store::FrameworkLegacy,
+        &crate::token_store::token_file_path(),
+        account,
+    )
 }
 
 #[cfg(not(target_os = "macos"))]

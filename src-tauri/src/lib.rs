@@ -24,6 +24,8 @@ use tauri_plugin_notification::NotificationExt;
 
 mod ipc;
 mod slack;
+#[cfg(target_os = "macos")]
+mod token_store;
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
