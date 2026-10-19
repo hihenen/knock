@@ -627,7 +627,8 @@ fn build_message_blocks(
     }
     blocks.push(json!({ "type": "actions", "elements": [
         { "type": "button", "action_id": "knock_approve", "text": { "type": "plain_text", "text": "승인", "emoji": true }, "style": "primary", "value": id },
-        { "type": "button", "action_id": "knock_dismiss", "text": { "type": "plain_text", "text": "취소", "emoji": true }, "style": "danger", "value": id }
+        { "type": "button", "action_id": "knock_dismiss", "text": { "type": "plain_text", "text": "취소", "emoji": true }, "style": "danger", "value": id },
+        { "type": "button", "action_id": "knock_approve_all", "text": { "type": "plain_text", "text": "모두 승인", "emoji": true }, "value": id }
     ] }));
     let fallback = format!("{title}\n{context}\n{execution_section}\n{formatted_body}\n{ai}");
     (fallback, blocks)
@@ -1841,6 +1842,11 @@ pub(super) enum ActionResult {
         id: String,
         decision: &'static str,
     },
+    AppliedMany {
+        clicked_id: String,
+        ids: Vec<String>,
+        remote_ids: Vec<String>,
+    },
     Rejected {
         message: Option<SlackMessageRef>,
         blocks: Option<Value>,
@@ -1863,6 +1869,30 @@ pub(super) fn process_block_action(
     owner_user_id: &str,
     queue: &Arc<Mutex<Vec<crate::QueueEntry>>>,
     payload: &Value,
+) -> ActionResult {
+    let needs_global_touch_id = enabled
+        && payload
+            .get("actions")
+            .and_then(Value::as_array)
+            .and_then(|actions| actions.first())
+            .and_then(|action| action.get("action_id"))
+            .and_then(Value::as_str)
+            == Some("knock_approve_all");
+    process_block_action_with_touch_id(
+        enabled,
+        owner_user_id,
+        queue,
+        payload,
+        needs_global_touch_id && crate::config_touch_id(),
+    )
+}
+
+fn process_block_action_with_touch_id(
+    enabled: bool,
+    owner_user_id: &str,
+    queue: &Arc<Mutex<Vec<crate::QueueEntry>>>,
+    payload: &Value,
+    config_touch_id: bool,
 ) -> ActionResult {
     if !enabled {
         eprintln!("knock: Slack action ignored (slack disabled)");
@@ -1921,6 +1951,76 @@ pub(super) fn process_block_action(
     }
     if let Some((id, edit)) = parse_ask_edit(action) {
         return apply_ask_edit(queue, &id, edit, message_ref(payload));
+    }
+    if action.get("action_id").and_then(Value::as_str) == Some("knock_approve_all") {
+        let Some(clicked_id) = action.get("value").and_then(Value::as_str) else {
+            eprintln!("knock: Slack bulk action ignored (no value on button)");
+            return ActionResult::Ignored;
+        };
+        // The clicked card anchors the bulk operation. Ignore stale cards and
+        // cards which no longer belong to Slack, so an old button cannot act
+        // on requests that arrived later.
+        if !queue
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|entry| entry.id == clicked_id && entry.remote_slack)
+        {
+            eprintln!(
+                "knock: Slack bulk action ignored (no pending remote entry for id={clicked_id})"
+            );
+            return ActionResult::Ignored;
+        }
+        let candidates: Vec<String> = queue
+            .lock()
+            .unwrap()
+            .iter()
+            // Slack 으로 보낸 건만 대상이다. --local-only·Slack 비대상 게이트는 맥 앞에서만
+            // 승인해야 하므로 Slack 버튼이 건드리지 않는다 (ctl approve all 은 로컬이라 예외).
+            .filter(|entry| {
+                entry.remote_slack
+                    && crate::bulk_approve_skip_reason(
+                        &entry.kind,
+                        &entry.payload,
+                        entry.in_progress,
+                        config_touch_id,
+                    )
+                    .is_none()
+            })
+            .map(|entry| entry.id.clone())
+            .collect();
+        let response = json!({ "decision": "approved", "via": "slack" });
+        let mut ids = Vec::new();
+        let mut remote_ids = Vec::new();
+        for id in candidates {
+            let resolved = crate::reply_queue_entry(
+                queue,
+                &id,
+                &response,
+                |entry| {
+                    entry.remote_slack
+                        && crate::bulk_approve_skip_reason(
+                            &entry.kind,
+                            &entry.payload,
+                            entry.in_progress,
+                            config_touch_id,
+                        )
+                        .is_none()
+                },
+                |_| {},
+            );
+            if let Some(resolved) = resolved {
+                if resolved.remote_slack {
+                    remote_ids.push(id.clone());
+                }
+                ids.push(id);
+            }
+        }
+        return ActionResult::AppliedMany {
+            clicked_id: clicked_id.to_string(),
+            ids,
+            remote_ids,
+        };
     }
     let decision = match action.get("action_id").and_then(Value::as_str) {
         Some("knock_approve") => "approved",
@@ -2439,6 +2539,23 @@ fn handle_action(
             notify_local_resolution(app, queue);
             None
         }
+        ActionResult::AppliedMany {
+            clicked_id,
+            ids,
+            remote_ids,
+        } => {
+            for id in &remote_ids {
+                if id == &clicked_id {
+                    integration.resolve_action(id, &payload, "approved");
+                } else {
+                    integration.mark_processed(id, "approved", "slack");
+                }
+            }
+            if !ids.is_empty() {
+                notify_local_resolution(app, queue);
+            }
+            None
+        }
         ActionResult::Rejected {
             message: Some(message),
             blocks,
@@ -2762,20 +2879,53 @@ mod tests {
     }
 
     fn queued(remote_slack: bool) -> (TestResponse, TestQueue) {
+        let (entry, bytes) = queue_entry(
+            "q-1",
+            "annotate",
+            json!({ "mode": "annotate" }),
+            remote_slack,
+            false,
+        );
+        (bytes, Arc::new(Mutex::new(vec![entry])))
+    }
+
+    fn queue_entry(
+        id: &str,
+        kind: &str,
+        payload: Value,
+        remote_slack: bool,
+        in_progress: bool,
+    ) -> (crate::QueueEntry, TestResponse) {
         let bytes = Arc::new(Mutex::new(Vec::new()));
-        let queue = Arc::new(Mutex::new(vec![crate::QueueEntry {
-            in_progress: false,
-            id: "q-1".into(),
-            kind: "annotate".into(),
-            payload: json!({ "mode": "annotate" }),
+        let entry = crate::QueueEntry {
+            in_progress,
+            id: id.into(),
+            kind: kind.into(),
+            payload,
             source: json!({}),
             created_at: 1,
             remote_slack,
             ask_picks: Vec::new(),
             decision_via: None,
             responder: crate::ipc::Responder::new(SharedWriter(bytes.clone())),
-        }]));
-        (bytes, queue)
+        };
+        (entry, bytes)
+    }
+
+    fn gate_entry(
+        id: &str,
+        remote: bool,
+        gate: bool,
+        touch_id: bool,
+        in_progress: bool,
+    ) -> (crate::QueueEntry, TestResponse) {
+        queue_entry(
+            id,
+            "annotate",
+            json!({ "gate": gate, "touchId": touch_id }),
+            remote,
+            in_progress,
+        )
     }
 
     fn click(queue: &TestQueue, user: &str, action_id: &str, id: &str) -> ActionResult {
@@ -3456,6 +3606,28 @@ mod tests {
     }
 
     #[test]
+    fn approve_all_button_is_third_and_absent_from_single_and_multi_asks() {
+        let (_, blocks) = build_message_blocks("q-all", "title", "body", None);
+        let elements = blocks.last().unwrap()["elements"].as_array().unwrap();
+        assert_eq!(elements[0]["action_id"], "knock_approve");
+        assert_eq!(elements[1]["action_id"], "knock_dismiss");
+        let button = &elements[2];
+        assert_eq!(button["action_id"], "knock_approve_all");
+        assert_eq!(button["text"]["type"], "plain_text");
+        assert_eq!(button["text"]["text"], "모두 승인");
+        assert_eq!(button["value"], "q-all");
+        assert!(button.get("style").is_none());
+
+        for spec in [
+            ask_remote_spec(&ask_payload(false, 2)).unwrap(),
+            ask_remote_spec(&two_questions()).unwrap(),
+        ] {
+            let (_, ask_blocks) = build_ask_blocks("q-ask", "question", &spec, &[], None);
+            assert!(!texts(&ask_blocks).contains("knock_approve_all"));
+        }
+    }
+
+    #[test]
     fn token_crossing_limit_is_masked_before_unicode_truncation() {
         let value = format!(
             "{} xoxb-1234567890-secret{}",
@@ -3810,6 +3982,140 @@ mod tests {
         }
         assert!(bytes.lock().unwrap().is_empty());
         assert_eq!(queue.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn approve_all_approves_only_eligible_remote_gates_and_keeps_local_only() {
+        let (remote, remote_bytes) = gate_entry("remote", true, true, false, false);
+        let (local, local_bytes) = gate_entry("local", false, true, false, false);
+        let (ask, ask_bytes) = queue_entry("ask", "ask", ask_payload(false, 2), true, false);
+        let (touch, touch_bytes) = gate_entry("touch", true, true, true, false);
+        let (non_gate, non_gate_bytes) = gate_entry("non-gate", false, false, false, false);
+        let (progress, progress_bytes) = gate_entry("progress", false, true, false, true);
+        let queue = Arc::new(Mutex::new(vec![
+            remote, local, ask, touch, non_gate, progress,
+        ]));
+
+        let result = process_block_action_with_touch_id(
+            true,
+            "U_OWNER",
+            &queue,
+            &action("U_OWNER", "knock_approve_all", "remote"),
+            false,
+        );
+
+        match result {
+            ActionResult::AppliedMany {
+                clicked_id,
+                ids,
+                remote_ids,
+            } => {
+                assert_eq!(clicked_id, "remote");
+                assert_eq!(ids, ["remote"]);
+                assert_eq!(remote_ids, ["remote"]);
+            }
+            _ => panic!("bulk approval should be applied"),
+        }
+        assert_eq!(
+            reply(&remote_bytes),
+            json!({ "decision": "approved", "via": "slack" })
+        );
+        assert!(local_bytes.lock().unwrap().is_empty());
+        assert!(ask_bytes.lock().unwrap().is_empty());
+        assert!(touch_bytes.lock().unwrap().is_empty());
+        assert!(non_gate_bytes.lock().unwrap().is_empty());
+        assert!(progress_bytes.lock().unwrap().is_empty());
+        assert_eq!(
+            queue
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            ["local", "ask", "touch", "non-gate", "progress"]
+        );
+    }
+
+    #[test]
+    fn approve_all_rejects_non_owner_without_changing_queue_or_responses() {
+        let (bytes, queue) = queued(true);
+        let result = process_block_action_with_touch_id(
+            true,
+            "U_OWNER",
+            &queue,
+            &action("U_OTHER", "knock_approve_all", "q-1"),
+            false,
+        );
+        assert!(matches!(result, ActionResult::Rejected { .. }));
+        assert_eq!(queue.lock().unwrap().len(), 1);
+        assert!(bytes.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn approve_all_respects_global_touch_id_setting() {
+        let (anchor, anchor_bytes) = gate_entry("anchor", true, true, false, false);
+        let (plain, plain_bytes) = gate_entry("plain", false, true, false, false);
+        let globally_protected = Arc::new(Mutex::new(vec![anchor, plain]));
+        let result = process_block_action_with_touch_id(
+            true,
+            "U_OWNER",
+            &globally_protected,
+            &action("U_OWNER", "knock_approve_all", "anchor"),
+            true,
+        );
+        assert!(matches!(result, ActionResult::AppliedMany { ref ids, .. } if ids.is_empty()));
+        assert!(anchor_bytes.lock().unwrap().is_empty());
+        assert!(plain_bytes.lock().unwrap().is_empty());
+        assert_eq!(globally_protected.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn approve_all_wrapper_uses_current_global_touch_id_setting() {
+        let (entry, bytes) = gate_entry("remote", true, true, false, false);
+        let queue = Arc::new(Mutex::new(vec![entry]));
+        let config_touch_id = crate::config_touch_id();
+
+        let result = process_block_action(
+            true,
+            "U_OWNER",
+            &queue,
+            &action("U_OWNER", "knock_approve_all", "remote"),
+        );
+
+        match result {
+            ActionResult::AppliedMany { ids, .. } if config_touch_id => {
+                assert!(ids.is_empty());
+                assert_eq!(queue.lock().unwrap().len(), 1);
+                assert!(bytes.lock().unwrap().is_empty());
+            }
+            ActionResult::AppliedMany { ids, .. } => {
+                assert_eq!(ids, ["remote"]);
+                assert_eq!(reply(&bytes)["via"], "slack");
+                assert!(queue.lock().unwrap().is_empty());
+            }
+            _ => panic!("bulk approval wrapper should be applied"),
+        }
+    }
+
+    #[test]
+    fn approve_all_ignores_stale_anchor_without_resolving_other_requests() {
+        let (local, local_bytes) = gate_entry("local", false, true, false, false);
+        let queue = Arc::new(Mutex::new(vec![local]));
+
+        for anchor in ["stale", "local"] {
+            assert!(matches!(
+                process_block_action_with_touch_id(
+                    true,
+                    "U_OWNER",
+                    &queue,
+                    &action("U_OWNER", "knock_approve_all", anchor),
+                    false
+                ),
+                ActionResult::Ignored
+            ));
+        }
+        assert_eq!(queue.lock().unwrap().len(), 1);
+        assert!(local_bytes.lock().unwrap().is_empty());
     }
 
     #[test]

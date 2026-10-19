@@ -4,6 +4,10 @@ All notable changes to knock are documented here. Versions follow [SemVer](https
 
 ## [Unreleased]
 
+### Added
+
+- Slack 게이트 메시지에 owner가 대기 중인 승인 가능한 게이트를 한 번에 승인하는 **모두 승인** 버튼을 추가했다. Slack 으로 보낸 건만 대상이고(`--local-only` 는 제외) ask·검토용(`--gate` 아님)·진행 중 요청과 Touch ID가 필요한 건은 남긴다.
+
 ## [0.8.1] - 2026-10-17
 
 ### Changed
