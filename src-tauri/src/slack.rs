@@ -627,8 +627,7 @@ fn build_message_blocks(
     }
     blocks.push(json!({ "type": "actions", "elements": [
         { "type": "button", "action_id": "knock_approve", "text": { "type": "plain_text", "text": "승인", "emoji": true }, "style": "primary", "value": id },
-        { "type": "button", "action_id": "knock_dismiss", "text": { "type": "plain_text", "text": "취소", "emoji": true }, "style": "danger", "value": id },
-        { "type": "button", "action_id": "knock_approve_all", "text": { "type": "plain_text", "text": "모두 승인", "emoji": true }, "value": id }
+        { "type": "button", "action_id": "knock_dismiss", "text": { "type": "plain_text", "text": "취소", "emoji": true }, "style": "danger", "value": id }
     ] }));
     let fallback = format!("{title}\n{context}\n{execution_section}\n{formatted_body}\n{ai}");
     (fallback, blocks)
@@ -1193,9 +1192,87 @@ pub(super) struct SlackMessageRef {
     ts: String,
 }
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub(super) struct BundleKey {
+    project: String,
+    caller: String,
+    cwd: String,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct BundleRef {
+    key: BundleKey,
+    cycle: u64,
+}
+
+#[derive(Clone)]
+struct BundleItem {
+    id: String,
+    created_at: u64,
+    title: String,
+    body: String,
+    action_url: Option<String>,
+    approvable_without_global_touch_id: bool,
+    critical: bool,
+    decision: Option<&'static str>,
+    detail_posted: bool,
+}
+
+#[derive(Clone)]
+enum BundleDelivery {
+    Queued,
+    Posting,
+    Posted(SlackMessageRef),
+}
+
+#[derive(Clone)]
+struct BundleState {
+    key: BundleKey,
+    cycle: u64,
+    items: Vec<BundleItem>,
+    approved: usize,
+    dismissed: usize,
+    delivery: BundleDelivery,
+}
+
+#[derive(Default)]
+struct Bundles {
+    by_key: HashMap<BundleKey, BundleState>,
+    retired: HashMap<BundleRef, BundleState>,
+    key_by_id: HashMap<String, BundleRef>,
+    next_cycle: u64,
+}
+
+impl Bundles {
+    fn state(&self, bundle_ref: &BundleRef) -> Option<&BundleState> {
+        self.by_key
+            .get(&bundle_ref.key)
+            .filter(|state| state.cycle == bundle_ref.cycle)
+            .or_else(|| self.retired.get(bundle_ref))
+    }
+
+    fn state_mut(&mut self, bundle_ref: &BundleRef) -> Option<&mut BundleState> {
+        if self
+            .by_key
+            .get(&bundle_ref.key)
+            .is_some_and(|state| state.cycle == bundle_ref.cycle)
+        {
+            self.by_key.get_mut(&bundle_ref.key)
+        } else {
+            self.retired.get_mut(bundle_ref)
+        }
+    }
+
+    fn next_cycle(&mut self) -> u64 {
+        self.next_cycle = self.next_cycle.wrapping_add(1).max(1);
+        self.next_cycle
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct Integration {
     messages: Arc<Mutex<HashMap<String, MessageState>>>,
+    bundles: Arc<Mutex<Bundles>>,
     sender: mpsc::Sender<Work>,
 }
 
@@ -1224,6 +1301,19 @@ pub(super) enum Work {
         /// 있으면 승인/취소 대신 질문별 선택 UI 를 단다 (`ask`).
         ask: Option<AskSpec>,
     },
+    PostBundle {
+        key: BundleKey,
+        cycle: u64,
+    },
+    UpdateBundle {
+        key: BundleKey,
+        cycle: u64,
+    },
+    PostThreadReply {
+        thread: SlackMessageRef,
+        text: String,
+        blocks: Vec<Value>,
+    },
     /// 기타 입력 모달 열기 (`views.open`). trigger_id 는 3초 안에 써야 하므로 실패해도 재시도하지 않는다.
     OpenModal {
         trigger_id: String,
@@ -1244,12 +1334,285 @@ pub(super) enum Work {
     },
 }
 
+fn bundle_key_from_source(source: &Value) -> Option<BundleKey> {
+    let field = |name: &str| {
+        let value = source
+            .get(name)
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())?;
+        Some(value.to_string())
+    };
+    Some(BundleKey {
+        project: field("project")?,
+        caller: field("caller")?,
+        cwd: field("cwd")?,
+    })
+}
+
+fn is_critical_request(title: &str, body: &str, execution: &str) -> bool {
+    static CRITICAL_TERMS: OnceLock<Regex> = OnceLock::new();
+    let terms = CRITICAL_TERMS.get_or_init(|| {
+        Regex::new(
+            r"(?i)(?:^|[^A-Za-z0-9])(?:destroy|delete|prd|prod|apply|force|merge|drop|rm\s+-rf|--hard)(?:$|[^A-Za-z0-9])",
+        )
+        .expect("critical request regex is valid")
+    });
+    terms.is_match(&format!("{title}\n{body}\n{execution}"))
+}
+
+fn is_critical_body(title: &str, body: &str) -> bool {
+    let execution = extract_body_sections(&mask_secrets(body))
+        .execution
+        .unwrap_or_default();
+    is_critical_request(title, body, &execution)
+}
+
+fn queue_entry_is_critical(entry: &crate::QueueEntry) -> bool {
+    let title = entry
+        .payload
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let (body, is_html) = if let Some(body) = entry.payload.get("slackBody").and_then(Value::as_str)
+    {
+        (body, false)
+    } else if let Some(body) = entry.payload.get("html").and_then(Value::as_str) {
+        (body, true)
+    } else {
+        ("", false)
+    };
+    if is_html {
+        is_critical_body(title, &crate::html_to_text(body))
+    } else {
+        is_critical_body(title, body)
+    }
+}
+
+fn bundle_id(key: &BundleKey) -> String {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut hasher);
+    format!("bundle-{:016x}", hasher.finish())
+}
+
+fn truncate_chars(value: &str, limit: usize) -> String {
+    let mut chars = value.chars();
+    let prefix: String = chars.by_ref().take(limit).collect();
+    if chars.next().is_some() {
+        format!("{prefix}…")
+    } else {
+        prefix
+    }
+}
+
+fn bundle_item_line(item: &BundleItem, index: usize) -> String {
+    let title = escape_mrkdwn_text(&truncate_chars(&mask_secrets(&item.title), 80));
+    let marker = match item.decision {
+        Some("approved") => "✅",
+        Some("dismissed") => "✖️",
+        Some(_) => "☑️",
+        None if item.critical => "🔴",
+        None => "⏳",
+    };
+    if item.decision.is_some() {
+        return format!("{index}. {marker} *{title}*");
+    }
+    let execution = extract_body_sections(&mask_secrets(&item.body))
+        .execution
+        .unwrap_or_else(|| item.action_url.clone().unwrap_or_default());
+    let command = execution.split_whitespace().collect::<Vec<_>>().join(" ");
+    let command = escape_mrkdwn_text(&truncate_chars(&mask_secrets(&command), 80));
+    if command.is_empty() {
+        format!("{index}. {marker} *{title}* · ▶ (실행 명령 없음)")
+    } else {
+        format!("{index}. {marker} *{title}* · ▶ {command}")
+    }
+}
+
+fn bundle_message_blocks(state: &BundleState, config_touch_id: bool) -> (String, Vec<Value>) {
+    const MAX_PENDING_VISIBLE: usize = 10;
+    let pending = state
+        .items
+        .iter()
+        .filter(|item| item.decision.is_none())
+        .collect::<Vec<_>>();
+    let hidden_pending = pending.len().saturating_sub(MAX_PENDING_VISIBLE);
+    let folded_processed = state.items.len().saturating_sub(pending.len());
+    let visible = pending
+        .into_iter()
+        .take(MAX_PENDING_VISIBLE)
+        .collect::<Vec<_>>();
+    bundle_message_blocks_once(
+        state,
+        &visible,
+        hidden_pending,
+        folded_processed,
+        config_touch_id,
+    )
+}
+
+fn bundle_message_blocks_once(
+    state: &BundleState,
+    visible: &[&BundleItem],
+    hidden_pending: usize,
+    folded_processed: usize,
+    config_touch_id: bool,
+) -> (String, Vec<Value>) {
+    let pending = visible
+        .iter()
+        .filter(|item| item.decision.is_none())
+        .collect::<Vec<_>>();
+    let all_pending = state
+        .items
+        .iter()
+        .filter(|item| item.decision.is_none())
+        .count();
+    if all_pending == 0 {
+        let text = format!(
+            "✅ 처리 완료 (승인 {} · 취소 {})",
+            state.approved, state.dismissed
+        );
+        return (
+            text.clone(),
+            vec![json!({ "type": "section", "text": { "type": "mrkdwn", "text": text } })],
+        );
+    }
+
+    let eligible = pending
+        .iter()
+        .filter(|item| {
+            item.approvable_without_global_touch_id && !item.critical && !config_touch_id
+        })
+        .count();
+    let critical = state
+        .items
+        .iter()
+        .filter(|item| item.decision.is_none() && item.critical)
+        .count();
+    let folder = std::path::Path::new(&state.key.cwd)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| state.key.cwd.clone());
+    let heading = format!(
+        "⚠️ *{} · {} · {} · 대기 {}건*",
+        escape_mrkdwn_text(&truncate_chars(&mask_secrets(&state.key.project), 100)),
+        escape_mrkdwn_text(&truncate_chars(&mask_secrets(&state.key.caller), 100)),
+        escape_mrkdwn_text(&truncate_chars(&mask_secrets(&folder), 100)),
+        all_pending
+    );
+    let mut lines = Vec::with_capacity(visible.len() + 2);
+    if folded_processed > 0 {
+        lines.push(format!("외 {folded_processed}건 처리됨"));
+    }
+    lines.extend(
+        visible
+            .iter()
+            .enumerate()
+            .map(|(index, item)| bundle_item_line(item, index + 1)),
+    );
+    if hidden_pending > 0 {
+        lines.push(format!(
+            "외 {hidden_pending}건 대기 (앞 건을 처리하면 표시)"
+        ));
+    }
+    if critical > 0 {
+        lines.push(format!("🔴 {critical}건은 개별 확인 필요"));
+    }
+    let mut sections = Vec::new();
+    let mut chunk = heading;
+    for line in &lines {
+        if utf16_len(&chunk) + 1 + utf16_len(line) > SLACK_SECTION_TEXT_LIMIT {
+            sections
+                .push(json!({ "type": "section", "text": { "type": "mrkdwn", "text": chunk } }));
+            chunk = line.clone();
+        } else {
+            chunk.push('\n');
+            chunk.push_str(line);
+        }
+    }
+    if !chunk.is_empty() {
+        sections.push(json!({ "type": "section", "text": { "type": "mrkdwn", "text": chunk } }));
+    }
+
+    let mut buttons = Vec::with_capacity(pending.len() * 3 + usize::from(eligible > 0));
+    for (index, item) in visible.iter().enumerate() {
+        if item.decision.is_some() {
+            continue;
+        }
+        let number = index + 1;
+        buttons.push(json!({
+            "type": "button",
+            "action_id": format!("knock_bundle_approve_{number}"),
+            "text": { "type": "plain_text", "text": if item.critical { format!("{number} 개별 승인만") } else { format!("{number} 승인") }, "emoji": true },
+            "style": "primary",
+            "value": item.id
+        }));
+        buttons.push(json!({
+            "type": "button",
+            "action_id": format!("knock_bundle_dismiss_{number}"),
+            "text": { "type": "plain_text", "text": format!("{number} 취소"), "emoji": true },
+            "style": "danger",
+            "value": item.id
+        }));
+        buttons.push(json!({
+            "type": "button",
+            "action_id": format!("knock_bundle_detail_{number}"),
+            "text": { "type": "plain_text", "text": format!("{number} 자세히"), "emoji": true },
+            "value": item.id
+        }));
+    }
+    if eligible > 0 {
+        buttons.push(json!({
+            "type": "button",
+            "action_id": "knock_bundle_approve_group",
+            "text": { "type": "plain_text", "text": format!("이 묶음 승인 ({eligible}건)"), "emoji": true },
+            "style": "primary",
+            "value": bundle_id(&state.key)
+        }));
+    }
+    let mut action_blocks = Vec::new();
+    for (index, elements) in buttons.chunks(25).enumerate() {
+        action_blocks.push(json!({
+            "type": "actions",
+            "block_id": format!("knock-bundle-actions-{index}"),
+            "elements": elements
+        }));
+    }
+    let mut blocks = sections;
+    blocks.extend(action_blocks);
+    let fallback = truncate_slack_text(
+        &format!(
+            "{}\n{}",
+            heading_fallback(&state.key, all_pending),
+            lines.join("\n")
+        ),
+        SLACK_SECTION_TEXT_LIMIT,
+    );
+    (fallback, blocks)
+}
+
+fn heading_fallback(key: &BundleKey, pending: usize) -> String {
+    let folder = std::path::Path::new(&key.cwd)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| key.cwd.clone());
+    format!(
+        "⚠️ {} · {} · {} · 대기 {pending}건",
+        mask_secrets(&key.project),
+        mask_secrets(&key.caller),
+        mask_secrets(&folder)
+    )
+}
+
 impl Integration {
     pub(super) fn new() -> (Self, mpsc::Receiver<Work>) {
         let (sender, receiver) = mpsc::channel();
         (
             Self {
                 messages: Arc::new(Mutex::new(HashMap::new())),
+                bundles: Arc::new(Mutex::new(Bundles::default())),
                 sender,
             },
             receiver,
@@ -1264,6 +1627,122 @@ impl Integration {
         action_url: Option<String>,
     ) {
         self.queue_post(id, title, body, action_url, None);
+    }
+
+    pub(super) fn queue_request_for_entry(
+        &self,
+        entry: &crate::QueueEntry,
+        title: String,
+        body: String,
+        action_url: Option<String>,
+    ) {
+        if !entry.remote_slack {
+            return;
+        }
+        let Some(key) = bundle_key_from_source(&entry.source) else {
+            self.queue_request(entry.id.clone(), title, body, action_url);
+            return;
+        };
+        let critical = queue_entry_is_critical(entry);
+        let approvable_without_global_touch_id = !entry
+            .payload
+            .get("localOnly")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            && crate::bulk_approve_skip_reason(
+                &entry.kind,
+                &entry.payload,
+                entry.in_progress,
+                false,
+            )
+            .is_none();
+        let item = BundleItem {
+            id: entry.id.clone(),
+            created_at: entry.created_at,
+            title,
+            body,
+            action_url,
+            approvable_without_global_touch_id,
+            critical,
+            decision: None,
+            detail_posted: false,
+        };
+        let mut work = Vec::new();
+        {
+            let mut bundles = self.bundles.lock().unwrap();
+            if bundles
+                .by_key
+                .get(&key)
+                .is_some_and(|bundle| bundle.items.iter().all(|item| item.decision.is_some()))
+            {
+                let completed = bundles.by_key.remove(&key).unwrap();
+                let old_ref = BundleRef {
+                    key: key.clone(),
+                    cycle: completed.cycle,
+                };
+                for old_item in &completed.items {
+                    if bundles.key_by_id.get(&old_item.id) == Some(&old_ref) {
+                        bundles.key_by_id.remove(&old_item.id);
+                    }
+                }
+                let needs_update = matches!(
+                    completed.delivery,
+                    BundleDelivery::Posting | BundleDelivery::Posted(_)
+                );
+                if needs_update {
+                    bundles.retired.insert(old_ref.clone(), completed);
+                    work.push(Work::UpdateBundle {
+                        key: old_ref.key.clone(),
+                        cycle: old_ref.cycle,
+                    });
+                }
+            }
+
+            if let Some(bundle) = bundles.by_key.get_mut(&key) {
+                if bundle.items.iter().any(|existing| existing.id == entry.id) {
+                    return;
+                }
+                let cycle = bundle.cycle;
+                let bundle_ref = BundleRef {
+                    key: key.clone(),
+                    cycle,
+                };
+                bundle.items.push(item);
+                bundle.items.sort_by_key(|item| item.created_at);
+                if matches!(
+                    bundle.delivery,
+                    BundleDelivery::Posting | BundleDelivery::Posted(_)
+                ) {
+                    work.push(Work::UpdateBundle {
+                        key: key.clone(),
+                        cycle,
+                    });
+                }
+                bundles.key_by_id.insert(entry.id.clone(), bundle_ref);
+            } else {
+                let cycle = bundles.next_cycle();
+                let bundle_ref = BundleRef {
+                    key: key.clone(),
+                    cycle,
+                };
+                bundles.key_by_id.insert(entry.id.clone(), bundle_ref);
+                bundles.by_key.insert(
+                    key.clone(),
+                    BundleState {
+                        key: key.clone(),
+                        cycle,
+                        items: vec![item],
+                        approved: 0,
+                        dismissed: 0,
+                        delivery: BundleDelivery::Queued,
+                    },
+                );
+                work.push(Work::PostBundle { key, cycle });
+            }
+        }
+        for work in work {
+            self.enqueue(work);
+        }
     }
 
     /// `ask` 질문을 선택 UI(버튼·체크박스·기타)로 보낸다.
@@ -1306,6 +1785,10 @@ impl Integration {
     }
 
     pub(super) fn mark_processed(&self, id: &str, decision: &str, via: &str) {
+        if let Some(bundle_ref) = self.update_bundle_item(id, decision) {
+            self.queue_bundle_update(bundle_ref);
+            return;
+        }
         let (text, blocks, update) = {
             let mut messages = self.messages.lock().unwrap();
             let Some(state) = messages.get_mut(id) else {
@@ -1335,6 +1818,250 @@ impl Integration {
         }
     }
 
+    pub(super) fn mark_processed_many(&self, ids: &[String], decision: &str, via: &str) {
+        let mut updated_bundles = std::collections::HashSet::new();
+        for id in ids {
+            if let Some(bundle_ref) = self.update_bundle_item(id, decision) {
+                updated_bundles.insert(bundle_ref);
+            } else {
+                self.mark_processed(id, decision, via);
+            }
+        }
+        for bundle_ref in updated_bundles {
+            self.queue_bundle_update(bundle_ref);
+        }
+    }
+
+    fn update_bundle_item(&self, id: &str, decision: &str) -> Option<BundleRef> {
+        let mut bundles = self.bundles.lock().unwrap();
+        let bundle_ref = bundles.key_by_id.get(id)?.clone();
+        let bundle = bundles.state_mut(&bundle_ref)?;
+        let item = bundle.items.iter_mut().find(|item| item.id == id)?;
+        if item.decision.is_some() {
+            return None;
+        }
+        let decision = match decision {
+            "approved" => "approved",
+            "dismissed" => "dismissed",
+            _ => "processed",
+        };
+        item.decision = Some(decision);
+        match decision {
+            "approved" => bundle.approved += 1,
+            "dismissed" => bundle.dismissed += 1,
+            _ => {}
+        }
+        Some(bundle_ref)
+    }
+
+    fn queue_bundle_update(&self, bundle_ref: BundleRef) {
+        let should_update = self
+            .bundles
+            .lock()
+            .unwrap()
+            .state(&bundle_ref)
+            .is_some_and(|bundle| {
+                matches!(
+                    &bundle.delivery,
+                    BundleDelivery::Posting | BundleDelivery::Posted(_)
+                )
+            });
+        if should_update {
+            self.enqueue(Work::UpdateBundle {
+                key: bundle_ref.key,
+                cycle: bundle_ref.cycle,
+            });
+        }
+    }
+
+    fn begin_bundle_post(&self, key: &BundleKey, cycle: u64) -> Option<(String, Vec<Value>)> {
+        let mut bundles = self.bundles.lock().unwrap();
+        let bundle = bundles.state_mut(&BundleRef {
+            key: key.clone(),
+            cycle,
+        })?;
+        if matches!(bundle.delivery, BundleDelivery::Posted(_)) {
+            return None;
+        }
+        bundle.delivery = BundleDelivery::Posting;
+        Some(bundle_message_blocks(bundle, crate::config_touch_id()))
+    }
+
+    fn bundle_posted(&self, key: &BundleKey, cycle: u64, message: SlackMessageRef) {
+        let bundle_ref = BundleRef {
+            key: key.clone(),
+            cycle,
+        };
+        let completed = {
+            let mut bundles = self.bundles.lock().unwrap();
+            if let Some(bundle) = bundles.state_mut(&bundle_ref) {
+                bundle.delivery = BundleDelivery::Posted(message);
+                bundle.items.iter().all(|item| item.decision.is_some())
+            } else {
+                false
+            }
+        };
+        if completed {
+            self.queue_bundle_update(bundle_ref);
+        }
+    }
+
+    fn bundle_update_payload(
+        &self,
+        key: &BundleKey,
+        cycle: u64,
+    ) -> Option<(SlackMessageRef, String, Vec<Value>, bool)> {
+        let bundles = self.bundles.lock().unwrap();
+        let bundle = bundles.state(&BundleRef {
+            key: key.clone(),
+            cycle,
+        })?;
+        let BundleDelivery::Posted(message) = &bundle.delivery else {
+            return None;
+        };
+        let (text, blocks) = bundle_message_blocks(bundle, crate::config_touch_id());
+        let complete = bundle.items.iter().all(|item| item.decision.is_some());
+        Some((message.clone(), text, blocks, complete))
+    }
+
+    fn bundle_update_succeeded(&self, key: &BundleKey, cycle: u64, snapshot_complete: bool) {
+        if !snapshot_complete {
+            return;
+        }
+        let mut bundles = self.bundles.lock().unwrap();
+        let bundle_ref = BundleRef {
+            key: key.clone(),
+            cycle,
+        };
+        let completed = bundles
+            .state(&bundle_ref)
+            .is_some_and(|bundle| bundle.items.iter().all(|item| item.decision.is_some()));
+        if !completed {
+            return;
+        }
+        let bundle = if bundles
+            .by_key
+            .get(key)
+            .is_some_and(|bundle| bundle.cycle == cycle)
+        {
+            bundles.by_key.remove(key)
+        } else {
+            bundles.retired.remove(&bundle_ref)
+        };
+        if let Some(bundle) = bundle {
+            for item in bundle.items {
+                if bundles.key_by_id.get(&item.id) == Some(&bundle_ref) {
+                    bundles.key_by_id.remove(&item.id);
+                }
+            }
+        }
+    }
+
+    fn bundle_refresh_work(&self, message: &SlackMessageRef) -> Option<Work> {
+        let bundles = self.bundles.lock().unwrap();
+        let bundle = bundles
+            .by_key
+            .values()
+            .chain(bundles.retired.values())
+            .find(|bundle| {
+            matches!(&bundle.delivery, BundleDelivery::Posted(posted) if posted == message)
+            })?;
+        Some(Work::UpdateBundle {
+            key: bundle.key.clone(),
+            cycle: bundle.cycle,
+        })
+    }
+
+    fn bundle_action_cycle(&self, payload: &Value) -> Option<(bool, SlackMessageRef)> {
+        let message = message_ref(payload)?;
+        let action = payload
+            .get("actions")
+            .and_then(Value::as_array)
+            .and_then(|actions| actions.first())?;
+        let action_id = action["action_id"].as_str().unwrap_or_default();
+        let value = action["value"].as_str().unwrap_or_default();
+        let bundles = self.bundles.lock().unwrap();
+        let group = action_id == "knock_bundle_approve_group";
+        let individual = [
+            "knock_bundle_approve_",
+            "knock_bundle_dismiss_",
+            "knock_bundle_detail_",
+        ]
+        .iter()
+        .any(|prefix| {
+            action_id
+                .strip_prefix(prefix)
+                .is_some_and(|suffix| suffix.parse::<usize>().is_ok())
+        });
+        if !group && !individual {
+            return None;
+        }
+        for bundle in bundles.by_key.values() {
+            if !matches!(&bundle.delivery, BundleDelivery::Posted(posted) if posted == &message) {
+                continue;
+            }
+            let bundle_ref = BundleRef {
+                key: bundle.key.clone(),
+                cycle: bundle.cycle,
+            };
+            if group && value == bundle_id(&bundle.key) {
+                return Some((true, message));
+            }
+            if individual
+                && bundles.key_by_id.get(value) == Some(&bundle_ref)
+                && bundle
+                    .items
+                    .iter()
+                    .any(|item| item.id == value && item.decision.is_none())
+            {
+                return Some((true, message));
+            }
+        }
+        if group {
+            for (bundle_ref, bundle) in &bundles.retired {
+                if bundle_ref.key == bundle.key
+                    && matches!(&bundle.delivery, BundleDelivery::Posted(posted) if posted == &message)
+                    && value == bundle_id(&bundle.key)
+                {
+                    return Some((false, message));
+                }
+            }
+        }
+        None
+    }
+
+    fn queue_bundle_detail(&self, id: &str) -> Option<Work> {
+        let mut bundles = self.bundles.lock().unwrap();
+        let bundle_ref = bundles.key_by_id.get(id)?.clone();
+        let bundle = bundles.state_mut(&bundle_ref)?;
+        let BundleDelivery::Posted(thread) = &bundle.delivery else {
+            return None;
+        };
+        let thread = thread.clone();
+        let item = bundle.items.iter_mut().find(|item| item.id == id)?;
+        if item.decision.is_some() || item.detail_posted {
+            return None;
+        }
+        item.detail_posted = true;
+        let (text, mut blocks) = build_message_blocks(
+            &item.id,
+            &item.title,
+            &item.body,
+            item.action_url.as_deref(),
+        );
+        if blocks
+            .last()
+            .is_some_and(|block| block["type"] == "actions")
+        {
+            blocks.pop();
+        }
+        Some(Work::PostThreadReply {
+            thread,
+            text,
+            blocks,
+        })
+    }
+
     fn should_post(&self, id: &str) -> bool {
         matches!(
             self.messages.lock().unwrap().get(id),
@@ -1351,6 +2078,10 @@ impl Integration {
     }
 
     fn resolve_action(&self, id: &str, payload: &Value, decision: &str) {
+        if self.bundles.lock().unwrap().key_by_id.contains_key(id) {
+            self.mark_processed(id, decision, "slack");
+            return;
+        }
         let message = message_ref(payload);
         let payload_blocks = payload
             .get("message")
@@ -1786,6 +2517,72 @@ fn post_message(
     })
 }
 
+fn post_bundle_message(
+    client: &Client,
+    bot_token: &str,
+    dm_channel: &str,
+    key: &BundleKey,
+    cycle: u64,
+    integration: &Integration,
+    expected: Option<&(SlackConfig, Option<SystemTime>)>,
+) -> Result<(), String> {
+    let Some((text, blocks)) = integration.begin_bundle_post(key, cycle) else {
+        return Ok(());
+    };
+    let result = api_call(
+        client,
+        bot_token,
+        "chat.postMessage",
+        json!({
+            "channel": dm_channel,
+            "text": text,
+            "blocks": blocks,
+            "unfurl_links": false,
+            "unfurl_media": false,
+        }),
+        expected,
+    )?;
+    let message = SlackMessageRef {
+        channel: result
+            .get("channel")
+            .and_then(Value::as_str)
+            .ok_or("Slack 메시지 채널을 찾을 수 없습니다")?
+            .into(),
+        ts: result
+            .get("ts")
+            .and_then(Value::as_str)
+            .ok_or("Slack 메시지 ID를 찾을 수 없습니다")?
+            .into(),
+    };
+    integration.bundle_posted(key, cycle, message);
+    Ok(())
+}
+
+fn post_thread_reply(
+    client: &Client,
+    bot_token: &str,
+    thread: &SlackMessageRef,
+    text: &str,
+    blocks: &[Value],
+    expected: Option<&(SlackConfig, Option<SystemTime>)>,
+) -> Result<(), String> {
+    api_call(
+        client,
+        bot_token,
+        "chat.postMessage",
+        json!({
+            "channel": thread.channel,
+            "thread_ts": thread.ts,
+            "text": text,
+            "blocks": blocks,
+            "unfurl_links": false,
+            "unfurl_media": false,
+        }),
+        expected,
+    )?;
+    Ok(())
+}
+
 fn update_message(
     client: &Client,
     bot_token: &str,
@@ -1843,9 +2640,14 @@ pub(super) enum ActionResult {
         decision: &'static str,
     },
     AppliedMany {
-        clicked_id: String,
         ids: Vec<String>,
         remote_ids: Vec<String>,
+    },
+    RefreshBundle {
+        message: SlackMessageRef,
+    },
+    BundleDetail {
+        id: String,
     },
     Rejected {
         message: Option<SlackMessageRef>,
@@ -1877,7 +2679,7 @@ pub(super) fn process_block_action(
             .and_then(|actions| actions.first())
             .and_then(|action| action.get("action_id"))
             .and_then(Value::as_str)
-            == Some("knock_approve_all");
+            == Some("knock_bundle_approve_group");
     process_block_action_with_touch_id(
         enabled,
         owner_user_id,
@@ -1952,43 +2754,48 @@ fn process_block_action_with_touch_id(
     if let Some((id, edit)) = parse_ask_edit(action) {
         return apply_ask_edit(queue, &id, edit, message_ref(payload));
     }
-    if action.get("action_id").and_then(Value::as_str) == Some("knock_approve_all") {
-        let Some(clicked_id) = action.get("value").and_then(Value::as_str) else {
-            eprintln!("knock: Slack bulk action ignored (no value on button)");
+    if action.get("action_id").and_then(Value::as_str) == Some("knock_bundle_approve_group") {
+        let Some(clicked_bundle_id) = action.get("value").and_then(Value::as_str) else {
+            eprintln!("knock: Slack bundle action ignored (no bundle id on button)");
             return ActionResult::Ignored;
         };
-        // The clicked card anchors the bulk operation. Ignore stale cards and
-        // cards which no longer belong to Slack, so an old button cannot act
-        // on requests that arrived later.
-        if !queue
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|entry| entry.id == clicked_id && entry.remote_slack)
-        {
-            eprintln!(
-                "knock: Slack bulk action ignored (no pending remote entry for id={clicked_id})"
-            );
+        let Some(message) = message_ref(payload) else {
             return ActionResult::Ignored;
+        };
+        let Some(displayed_ids) = bundle_visible_ids(payload) else {
+            eprintln!("knock: Slack bundle action ignored (no displayed item buttons)");
+            return ActionResult::Ignored;
+        };
+        let (key, candidates) = {
+            let queue = queue.lock().unwrap();
+            let Some(key) = queue
+                .iter()
+                .filter(|entry| entry.remote_slack)
+                .filter_map(|entry| bundle_key_from_source(&entry.source))
+                .find(|key| bundle_id(key) == clicked_bundle_id)
+            else {
+                eprintln!(
+                    "knock: Slack bundle action ignored (stale bundle id={clicked_bundle_id})"
+                );
+                return ActionResult::RefreshBundle { message };
+            };
+            let candidates = displayed_ids
+                .iter()
+                .filter_map(|id| {
+                    queue.iter().find(|entry| {
+                        entry.id == *id
+                            && entry.remote_slack
+                            && bundle_key_from_source(&entry.source).as_ref() == Some(&key)
+                            && entry_is_bundle_eligible(entry, config_touch_id)
+                    })
+                })
+                .map(|entry| entry.id.clone())
+                .collect::<Vec<_>>();
+            (key, candidates)
+        };
+        if candidates.is_empty() {
+            return ActionResult::RefreshBundle { message };
         }
-        let candidates: Vec<String> = queue
-            .lock()
-            .unwrap()
-            .iter()
-            // Slack 으로 보낸 건만 대상이다. --local-only·Slack 비대상 게이트는 맥 앞에서만
-            // 승인해야 하므로 Slack 버튼이 건드리지 않는다 (ctl approve all 은 로컬이라 예외).
-            .filter(|entry| {
-                entry.remote_slack
-                    && crate::bulk_approve_skip_reason(
-                        &entry.kind,
-                        &entry.payload,
-                        entry.in_progress,
-                        config_touch_id,
-                    )
-                    .is_none()
-            })
-            .map(|entry| entry.id.clone())
-            .collect();
         let response = json!({ "decision": "approved", "via": "slack" });
         let mut ids = Vec::new();
         let mut remote_ids = Vec::new();
@@ -1999,13 +2806,9 @@ fn process_block_action_with_touch_id(
                 &response,
                 |entry| {
                     entry.remote_slack
-                        && crate::bulk_approve_skip_reason(
-                            &entry.kind,
-                            &entry.payload,
-                            entry.in_progress,
-                            config_touch_id,
-                        )
-                        .is_none()
+                        && displayed_ids.iter().any(|displayed| displayed == &entry.id)
+                        && bundle_key_from_source(&entry.source).as_ref() == Some(&key)
+                        && entry_is_bundle_eligible(entry, config_touch_id)
                 },
                 |_| {},
             );
@@ -2016,10 +2819,51 @@ fn process_block_action_with_touch_id(
                 ids.push(id);
             }
         }
-        return ActionResult::AppliedMany {
-            clicked_id: clicked_id.to_string(),
-            ids,
-            remote_ids,
+        if ids.is_empty() {
+            return ActionResult::RefreshBundle { message };
+        }
+        return ActionResult::AppliedMany { ids, remote_ids };
+    }
+    let action_id = action
+        .get("action_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if let Some((kind, _index)) = action_id
+        .rsplit_once('_')
+        .and_then(|(prefix, suffix)| suffix.parse::<usize>().ok().map(|index| (prefix, index)))
+        .filter(|(prefix, _)| {
+            matches!(
+                *prefix,
+                "knock_bundle_approve" | "knock_bundle_dismiss" | "knock_bundle_detail"
+            )
+        })
+    {
+        let Some(id) = action.get("value").and_then(Value::as_str) else {
+            return ActionResult::Ignored;
+        };
+        let belongs_to_bundle = queue.lock().unwrap().iter().any(|entry| {
+            entry.id == id && entry.remote_slack && bundle_key_from_source(&entry.source).is_some()
+        });
+        if !belongs_to_bundle {
+            return ActionResult::Ignored;
+        }
+        if kind == "knock_bundle_detail" {
+            return ActionResult::BundleDetail { id: id.to_string() };
+        }
+        let decision = if kind == "knock_bundle_approve" {
+            "approved"
+        } else {
+            "dismissed"
+        };
+        let response = json!({ "decision": decision, "via": "slack" });
+        if crate::reply_queue_entry(queue, id, &response, |entry| entry.remote_slack, |_| {})
+            .is_none()
+        {
+            return ActionResult::Ignored;
+        }
+        return ActionResult::Applied {
+            id: id.to_string(),
+            decision,
         };
     }
     let decision = match action.get("action_id").and_then(Value::as_str) {
@@ -2044,6 +2888,53 @@ fn process_block_action_with_touch_id(
         id: id.to_string(),
         decision,
     }
+}
+
+fn entry_is_bundle_eligible(entry: &crate::QueueEntry, config_touch_id: bool) -> bool {
+    !entry
+        .payload
+        .get("localOnly")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        && crate::bulk_approve_skip_reason(
+            &entry.kind,
+            &entry.payload,
+            entry.in_progress,
+            config_touch_id,
+        )
+        .is_none()
+        && !queue_entry_is_critical(entry)
+}
+
+fn bundle_visible_ids(payload: &Value) -> Option<Vec<String>> {
+    let blocks = payload.get("message")?.get("blocks")?.as_array()?;
+    let mut ids = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for element in blocks
+        .iter()
+        .filter(|block| block["type"] == "actions")
+        .flat_map(|block| block["elements"].as_array().into_iter().flatten())
+    {
+        let action_id = element["action_id"].as_str().unwrap_or_default();
+        let individual_bundle_action = [
+            "knock_bundle_approve_",
+            "knock_bundle_dismiss_",
+            "knock_bundle_detail_",
+        ]
+        .iter()
+        .any(|prefix| {
+            action_id
+                .strip_prefix(prefix)
+                .is_some_and(|suffix| suffix.parse::<usize>().is_ok())
+        });
+        let Some(id) = element["value"].as_str() else {
+            continue;
+        };
+        if individual_bundle_action && seen.insert(id.to_string()) {
+            ids.push(id.to_string());
+        }
+    }
+    Some(ids)
 }
 
 /// 큐 항목에 적용할 `ask` 편집.
@@ -2533,29 +3424,28 @@ fn handle_action(
     if !config.enabled || !version.0.enabled || config.owner_user_id != version.0.owner_user_id {
         return None;
     }
-    match process_block_action(config.enabled, &config.owner_user_id, queue, &payload) {
+    match process_action_for_current_bundle(
+        integration,
+        config.enabled,
+        &config.owner_user_id,
+        queue,
+        &payload,
+        None,
+    ) {
         ActionResult::Applied { id, decision } => {
             integration.resolve_action(&id, &payload, decision);
             notify_local_resolution(app, queue);
             None
         }
-        ActionResult::AppliedMany {
-            clicked_id,
-            ids,
-            remote_ids,
-        } => {
-            for id in &remote_ids {
-                if id == &clicked_id {
-                    integration.resolve_action(id, &payload, "approved");
-                } else {
-                    integration.mark_processed(id, "approved", "slack");
-                }
-            }
+        ActionResult::AppliedMany { ids, remote_ids } => {
+            integration.mark_processed_many(&remote_ids, "approved", "slack");
             if !ids.is_empty() {
                 notify_local_resolution(app, queue);
             }
             None
         }
+        ActionResult::RefreshBundle { message } => integration.bundle_refresh_work(&message),
+        ActionResult::BundleDetail { id } => integration.queue_bundle_detail(&id),
         ActionResult::Rejected {
             message: Some(message),
             blocks,
@@ -2579,6 +3469,48 @@ fn handle_action(
         ActionResult::Rejected { message: None, .. }
         | ActionResult::AskUpdate { message: None, .. }
         | ActionResult::Ignored => None,
+    }
+}
+
+fn process_action_for_current_bundle(
+    integration: &Integration,
+    enabled: bool,
+    owner_user_id: &str,
+    queue: &Arc<Mutex<Vec<crate::QueueEntry>>>,
+    payload: &Value,
+    config_touch_id: Option<bool>,
+) -> ActionResult {
+    let action_id = payload
+        .get("actions")
+        .and_then(Value::as_array)
+        .and_then(|actions| actions.first())
+        .and_then(|action| action.get("action_id"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if enabled
+        && payload["user"]["id"].as_str() == Some(owner_user_id)
+        && action_id.starts_with("knock_bundle_")
+    {
+        let Some((active, message)) = integration.bundle_action_cycle(payload) else {
+            return ActionResult::Ignored;
+        };
+        if !active {
+            return if action_id == "knock_bundle_approve_group" {
+                ActionResult::RefreshBundle { message }
+            } else {
+                ActionResult::Ignored
+            };
+        }
+    }
+    match config_touch_id {
+        Some(config_touch_id) => process_block_action_with_touch_id(
+            enabled,
+            owner_user_id,
+            queue,
+            payload,
+            config_touch_id,
+        ),
+        None => process_block_action(enabled, owner_user_id, queue, payload),
     }
 }
 
@@ -2633,6 +3565,47 @@ fn execute_http(
             }
             Ok(())
         }
+        Work::PostBundle { key, cycle } => post_bundle_message(
+            client,
+            &session.bot_token,
+            &session.dm_channel,
+            key,
+            *cycle,
+            integration,
+            Some(version),
+        )
+        .map_err(|_| ()),
+        Work::UpdateBundle { key, cycle } => {
+            let Some((message, text, blocks, snapshot_complete)) =
+                integration.bundle_update_payload(key, *cycle)
+            else {
+                return Ok(());
+            };
+            update_message(
+                client,
+                &session.bot_token,
+                &message,
+                &text,
+                Some(Value::Array(blocks)),
+                Some(version),
+            )
+            .map_err(|_| ())?;
+            integration.bundle_update_succeeded(key, *cycle, snapshot_complete);
+            Ok(())
+        }
+        Work::PostThreadReply {
+            thread,
+            text,
+            blocks,
+        } => post_thread_reply(
+            client,
+            &session.bot_token,
+            thread,
+            text,
+            blocks,
+            Some(version),
+        )
+        .map_err(|_| ()),
         Work::OpenModal { trigger_id, view } => {
             let opened = api_call(
                 client,
@@ -2659,7 +3632,12 @@ fn dispatch_or_hold(
     if !connected {
         if matches!(
             &work,
-            Work::Post { .. } | Work::Update { .. } | Work::OpenModal { .. }
+            Work::Post { .. }
+                | Work::PostBundle { .. }
+                | Work::UpdateBundle { .. }
+                | Work::PostThreadReply { .. }
+                | Work::Update { .. }
+                | Work::OpenModal { .. }
         ) {
             pending.push_back(work);
         }
@@ -2801,9 +3779,14 @@ pub(super) fn run_worker(
         let work = if session.is_some() {
             match receiver.try_recv() {
                 Ok(work @ (Work::Action { .. } | Work::SocketEnded { .. })) => Some(work),
-                Ok(work @ (Work::Post { .. } | Work::Update { .. } | Work::OpenModal { .. }))
-                    if !pending.is_empty() =>
-                {
+                Ok(
+                    work @ (Work::Post { .. }
+                    | Work::PostBundle { .. }
+                    | Work::UpdateBundle { .. }
+                    | Work::PostThreadReply { .. }
+                    | Work::Update { .. }
+                    | Work::OpenModal { .. }),
+                ) if !pending.is_empty() => {
                     pending.push_back(work);
                     pending.pop_front()
                 }
@@ -2835,7 +3818,12 @@ pub(super) fn run_worker(
                     attempt = attempt.saturating_add(1);
                 }
             }
-            work @ (Work::Post { .. } | Work::Update { .. } | Work::OpenModal { .. }) => {
+            work @ (Work::Post { .. }
+            | Work::PostBundle { .. }
+            | Work::UpdateBundle { .. }
+            | Work::PostThreadReply { .. }
+            | Work::Update { .. }
+            | Work::OpenModal { .. }) => {
                 let failed = dispatch_or_hold(work, session.is_some(), &mut pending, |work| {
                     execute_http(
                         work,
@@ -2912,22 +3900,6 @@ mod tests {
         (entry, bytes)
     }
 
-    fn gate_entry(
-        id: &str,
-        remote: bool,
-        gate: bool,
-        touch_id: bool,
-        in_progress: bool,
-    ) -> (crate::QueueEntry, TestResponse) {
-        queue_entry(
-            id,
-            "annotate",
-            json!({ "gate": gate, "touchId": touch_id }),
-            remote,
-            in_progress,
-        )
-    }
-
     fn click(queue: &TestQueue, user: &str, action_id: &str, id: &str) -> ActionResult {
         process_block_action(true, "U_OWNER", queue, &action(user, action_id, id))
     }
@@ -2950,6 +3922,142 @@ mod tests {
             "channel": { "id": "D123" },
             "container": { "message_ts": "1548261231.000200" },
             "message": { "ts": "1548261231.000200", "blocks": blocks }
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn bundle_entry(
+        id: &str,
+        cwd: &str,
+        title: &str,
+        kind: &str,
+        remote_slack: bool,
+        gate: bool,
+        local_only: bool,
+        touch_id: bool,
+        in_progress: bool,
+        created_at: u64,
+    ) -> (crate::QueueEntry, TestResponse) {
+        let mut payload = json!({
+            "title": title,
+            "gate": gate,
+            "localOnly": local_only,
+            "touchId": touch_id,
+            "slackBody": "▶️ 승인 시 실행: cargo test\n\n요청 본문",
+        });
+        if kind == "ask" {
+            payload["mode"] = json!("ask");
+        }
+        let (mut entry, bytes) = queue_entry(id, kind, payload, remote_slack, in_progress);
+        entry.source = json!({ "project": "sample", "caller": "Codex", "cwd": cwd });
+        entry.created_at = created_at;
+        (entry, bytes)
+    }
+
+    fn bundle_state_for_entries(entries: &[crate::QueueEntry]) -> BundleState {
+        let (integration, _receiver) = Integration::new();
+        for entry in entries {
+            integration.queue_request_for_entry(
+                entry,
+                entry.payload["title"].as_str().unwrap_or("Knock").into(),
+                entry.payload["slackBody"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .into(),
+                None,
+            );
+        }
+        let state = integration
+            .bundles
+            .lock()
+            .unwrap()
+            .by_key
+            .values()
+            .next()
+            .cloned()
+            .unwrap_or(BundleState {
+                key: BundleKey {
+                    project: "sample".into(),
+                    caller: "Codex".into(),
+                    cwd: "/work/repo".into(),
+                },
+                cycle: 0,
+                items: Vec::new(),
+                approved: 0,
+                dismissed: 0,
+                delivery: BundleDelivery::Queued,
+            });
+        state
+    }
+
+    fn bundle_action_payload(
+        entries: &[crate::QueueEntry],
+        user: &str,
+        action_id: &str,
+        value: &str,
+    ) -> Value {
+        let state = bundle_state_for_entries(entries);
+        let (_, blocks) = bundle_message_blocks(&state, false);
+        json!({
+            "type": "block_actions",
+            "user": { "id": user },
+            "actions": [{ "type": "button", "action_id": action_id, "value": value }],
+            "channel": { "id": "D123" },
+            "container": { "message_ts": "1548261231.000200" },
+            "message": { "ts": "1548261231.000200", "blocks": blocks }
+        })
+    }
+
+    fn bundle_group_payload(entries: &[crate::QueueEntry], user: &str) -> Value {
+        let state = bundle_state_for_entries(entries);
+        bundle_action_payload(
+            entries,
+            user,
+            "knock_bundle_approve_group",
+            &bundle_id(&state.key),
+        )
+    }
+
+    fn queue_plain_bundle(
+        integration: &Integration,
+        id: &str,
+        created_at: u64,
+    ) -> (crate::QueueEntry, TestResponse) {
+        let (entry, bytes) = bundle_entry(
+            id,
+            "/work/repo",
+            id,
+            "annotate",
+            true,
+            true,
+            false,
+            false,
+            false,
+            created_at,
+        );
+        integration.queue_request_for_entry(&entry, id.into(), "body".into(), None);
+        (entry, bytes)
+    }
+
+    fn tracked_group_payload(
+        integration: &Integration,
+        key: &BundleKey,
+        cycle: u64,
+        message: &SlackMessageRef,
+    ) -> Value {
+        let bundles = integration.bundles.lock().unwrap();
+        let state = bundles
+            .state(&BundleRef {
+                key: key.clone(),
+                cycle,
+            })
+            .unwrap();
+        let (_, blocks) = bundle_message_blocks(state, false);
+        json!({
+            "type": "block_actions", "user": { "id": "U_OWNER" },
+            "actions": [{ "action_id": "knock_bundle_approve_group", "value": bundle_id(key) }],
+            "channel": { "id": message.channel },
+            "message": { "ts": message.ts, "blocks": blocks }
         })
     }
 
@@ -3606,23 +4714,20 @@ mod tests {
     }
 
     #[test]
-    fn approve_all_button_is_third_and_absent_from_single_and_multi_asks() {
+    fn single_request_and_ask_buttons_do_not_offer_global_approval() {
         let (_, blocks) = build_message_blocks("q-all", "title", "body", None);
         let elements = blocks.last().unwrap()["elements"].as_array().unwrap();
+        // 이 케이스는 전역 모두 승인 버튼을 단건 메시지에서 제거했기 때문에 통과한다.
         assert_eq!(elements[0]["action_id"], "knock_approve");
         assert_eq!(elements[1]["action_id"], "knock_dismiss");
-        let button = &elements[2];
-        assert_eq!(button["action_id"], "knock_approve_all");
-        assert_eq!(button["text"]["type"], "plain_text");
-        assert_eq!(button["text"]["text"], "모두 승인");
-        assert_eq!(button["value"], "q-all");
-        assert!(button.get("style").is_none());
+        assert_eq!(elements.len(), 2);
 
         for spec in [
             ask_remote_spec(&ask_payload(false, 2)).unwrap(),
             ask_remote_spec(&two_questions()).unwrap(),
         ] {
             let (_, ask_blocks) = build_ask_blocks("q-ask", "question", &spec, &[], None);
+            // 이 케이스는 질문 선택 UI에 전역 모두 승인 동작이 없기 때문에 통과한다.
             assert!(!texts(&ask_blocks).contains("knock_approve_all"));
         }
     }
@@ -3985,46 +5090,178 @@ mod tests {
     }
 
     #[test]
-    fn approve_all_approves_only_eligible_remote_gates_and_keeps_local_only() {
-        let (remote, remote_bytes) = gate_entry("remote", true, true, false, false);
-        let (local, local_bytes) = gate_entry("local", false, true, false, false);
-        let (ask, ask_bytes) = queue_entry("ask", "ask", ask_payload(false, 2), true, false);
-        let (touch, touch_bytes) = gate_entry("touch", true, true, true, false);
-        let (non_gate, non_gate_bytes) = gate_entry("non-gate", false, false, false, false);
-        let (progress, progress_bytes) = gate_entry("progress", false, true, false, true);
-        let queue = Arc::new(Mutex::new(vec![
-            remote, local, ask, touch, non_gate, progress,
-        ]));
-
-        let result = process_block_action_with_touch_id(
+    fn same_source_requests_update_one_bundle_in_created_order() {
+        // 이 케이스는 같은 source 키를 재사용하고 created_at으로 정렬하기 때문에 통과한다.
+        let (integration, receiver) = Integration::new();
+        let (newer, _) = bundle_entry(
+            "newer",
+            "/work/repo",
+            "newer title",
+            "annotate",
             true,
-            "U_OWNER",
-            &queue,
-            &action("U_OWNER", "knock_approve_all", "remote"),
+            true,
             false,
+            false,
+            false,
+            2,
+        );
+        integration.queue_request_for_entry(&newer, "newer title".into(), "body".into(), None);
+        let Work::PostBundle { key, cycle } = receiver.try_recv().unwrap() else {
+            panic!("first request posts a bundle")
+        };
+        assert!(integration.begin_bundle_post(&key, cycle).is_some());
+        integration.bundle_posted(
+            &key,
+            cycle,
+            SlackMessageRef {
+                channel: "D1".into(),
+                ts: "1.2".into(),
+            },
         );
 
-        match result {
-            ActionResult::AppliedMany {
-                clicked_id,
-                ids,
-                remote_ids,
-            } => {
-                assert_eq!(clicked_id, "remote");
-                assert_eq!(ids, ["remote"]);
-                assert_eq!(remote_ids, ["remote"]);
-            }
-            _ => panic!("bulk approval should be applied"),
+        let (older, _) = bundle_entry(
+            "older",
+            "/work/repo",
+            "older title",
+            "annotate",
+            true,
+            true,
+            false,
+            false,
+            false,
+            1,
+        );
+        integration.queue_request_for_entry(&older, "older title".into(), "body".into(), None);
+        assert!(matches!(receiver.try_recv(), Ok(Work::UpdateBundle { .. })));
+        let (_, _, blocks, _) = integration.bundle_update_payload(&key, cycle).unwrap();
+        let rendered = serde_json::to_string(&blocks).unwrap();
+        assert!(rendered.find("older title").unwrap() < rendered.find("newer title").unwrap());
+        assert_eq!(integration.bundles.lock().unwrap().by_key.len(), 1);
+    }
+
+    #[test]
+    fn different_cwd_values_create_separate_bundles() {
+        // 이 케이스는 project와 caller가 같아도 cwd가 다르면 별도 키가 되기 때문에 통과한다.
+        let (integration, receiver) = Integration::new();
+        for (id, cwd) in [("one", "/work/one"), ("two", "/work/two")] {
+            let (entry, _) =
+                bundle_entry(id, cwd, id, "annotate", true, true, false, false, false, 1);
+            integration.queue_request_for_entry(&entry, id.into(), "body".into(), None);
         }
+        assert!(matches!(receiver.try_recv(), Ok(Work::PostBundle { .. })));
+        assert!(matches!(receiver.try_recv(), Ok(Work::PostBundle { .. })));
+        assert_eq!(integration.bundles.lock().unwrap().by_key.len(), 2);
+    }
+
+    #[test]
+    fn bundle_approval_resolves_only_visible_eligible_remote_requests() {
+        // 이 케이스는 각 보호 조건이 다른 보호 조건 없이 자기 요청만 남기기 때문에 통과한다.
+        let (plain, plain_bytes) = bundle_entry(
+            "plain",
+            "/work/repo",
+            "plain",
+            "annotate",
+            true,
+            true,
+            false,
+            false,
+            false,
+            1,
+        );
+        let (local_only, local_bytes) = bundle_entry(
+            "local-only",
+            "/work/repo",
+            "local-only",
+            "annotate",
+            true,
+            true,
+            true,
+            false,
+            false,
+            2,
+        );
+        let (touch, touch_bytes) = bundle_entry(
+            "touch",
+            "/work/repo",
+            "touch",
+            "annotate",
+            true,
+            true,
+            false,
+            true,
+            false,
+            3,
+        );
+        let (ask, ask_bytes) = bundle_entry(
+            "ask",
+            "/work/repo",
+            "ask",
+            "ask",
+            true,
+            true,
+            false,
+            false,
+            false,
+            4,
+        );
+        let (not_gate, not_gate_bytes) = bundle_entry(
+            "not-gate",
+            "/work/repo",
+            "not gate",
+            "annotate",
+            true,
+            false,
+            false,
+            false,
+            false,
+            5,
+        );
+        let (progress, progress_bytes) = bundle_entry(
+            "progress",
+            "/work/repo",
+            "progress",
+            "annotate",
+            true,
+            true,
+            false,
+            false,
+            true,
+            6,
+        );
+        let (critical, critical_bytes) = bundle_entry(
+            "critical",
+            "/work/repo",
+            "destroy request",
+            "annotate",
+            true,
+            true,
+            false,
+            false,
+            false,
+            7,
+        );
+        let entries = vec![plain, local_only, touch, ask, not_gate, progress, critical];
+        let queue = Arc::new(Mutex::new(entries));
+        let payload = {
+            let entries = queue.lock().unwrap();
+            bundle_group_payload(&entries, "U_OWNER")
+        };
+        let result = process_block_action_with_touch_id(true, "U_OWNER", &queue, &payload, false);
+        assert!(matches!(result, ActionResult::AppliedMany { ids, .. } if ids == ["plain"]));
         assert_eq!(
-            reply(&remote_bytes),
+            reply(&plain_bytes),
             json!({ "decision": "approved", "via": "slack" })
         );
-        assert!(local_bytes.lock().unwrap().is_empty());
-        assert!(ask_bytes.lock().unwrap().is_empty());
-        assert!(touch_bytes.lock().unwrap().is_empty());
-        assert!(non_gate_bytes.lock().unwrap().is_empty());
-        assert!(progress_bytes.lock().unwrap().is_empty());
+        for bytes in [
+            local_bytes,
+            touch_bytes,
+            ask_bytes,
+            not_gate_bytes,
+            progress_bytes,
+            critical_bytes,
+        ] {
+            assert!(bytes.lock().unwrap().is_empty());
+        }
         assert_eq!(
             queue
                 .lock()
@@ -4032,90 +5269,873 @@ mod tests {
                 .iter()
                 .map(|entry| entry.id.as_str())
                 .collect::<Vec<_>>(),
-            ["local", "ask", "touch", "non-gate", "progress"]
+            [
+                "local-only",
+                "touch",
+                "ask",
+                "not-gate",
+                "progress",
+                "critical"
+            ]
         );
     }
 
     #[test]
-    fn approve_all_rejects_non_owner_without_changing_queue_or_responses() {
-        let (bytes, queue) = queued(true);
-        let result = process_block_action_with_touch_id(
+    fn first_critical_bundle_item_does_not_anchor_bulk_approval() {
+        // 이 케이스는 첫 요청만 critical이고 두 번째 표시 요청은 eligible이기 때문에 통과한다.
+        let (critical, critical_bytes) = bundle_entry(
+            "critical",
+            "/work/repo",
+            "destroy preview",
+            "annotate",
+            true,
+            true,
+            false,
+            false,
+            false,
+            1,
+        );
+        let (plain, plain_bytes) = bundle_entry(
+            "plain",
+            "/work/repo",
+            "plain",
+            "annotate",
+            true,
+            true,
+            false,
+            false,
+            false,
+            2,
+        );
+        let queue = Arc::new(Mutex::new(vec![critical, plain]));
+        let payload = bundle_group_payload(&queue.lock().unwrap(), "U_OWNER");
+        let rendered = serde_json::to_string(&payload["message"]["blocks"]).unwrap();
+        assert!(rendered.contains("이 묶음 승인 (1건)"));
+        assert!(rendered.contains("1 개별 승인만"));
+        assert!(rendered.contains("🔴 1건은 개별 확인 필요"));
+        assert_ne!(payload["actions"][0]["value"], "critical");
+        let result = process_block_action_with_touch_id(true, "U_OWNER", &queue, &payload, false);
+        assert!(matches!(result, ActionResult::AppliedMany { ids, .. } if ids == ["plain"]));
+        assert!(critical_bytes.lock().unwrap().is_empty());
+        assert_eq!(reply(&plain_bytes)["via"], "slack");
+    }
+
+    #[test]
+    fn first_touch_id_bundle_item_does_not_anchor_bulk_approval() {
+        // 이 케이스는 첫 요청만 Touch ID 보호 대상이고 다음 표준 요청은 eligible이기 때문에 통과한다.
+        let (touch, touch_bytes) = bundle_entry(
+            "touch",
+            "/work/repo",
+            "touch",
+            "annotate",
+            true,
+            true,
+            false,
+            true,
+            false,
+            1,
+        );
+        let (plain, plain_bytes) = bundle_entry(
+            "plain",
+            "/work/repo",
+            "plain",
+            "annotate",
+            true,
+            true,
+            false,
+            false,
+            false,
+            2,
+        );
+        let queue = Arc::new(Mutex::new(vec![touch, plain]));
+        let payload = bundle_group_payload(&queue.lock().unwrap(), "U_OWNER");
+        let result = process_block_action_with_touch_id(true, "U_OWNER", &queue, &payload, false);
+        assert!(matches!(result, ActionResult::AppliedMany { ids, .. } if ids == ["plain"]));
+        assert!(touch_bytes.lock().unwrap().is_empty());
+        assert_eq!(reply(&plain_bytes)["via"], "slack");
+    }
+
+    #[test]
+    fn bundle_action_uses_global_touch_id_default_path() {
+        // 이 케이스는 실제 묶음 경로에서 설정을 주입하지 않아 현재 Touch ID 정책이 판정을 좌우하기 때문에 통과한다.
+        let (integration, receiver) = Integration::new();
+        let (plain, bytes) = queue_plain_bundle(&integration, "plain", 1);
+        let Work::PostBundle { key, cycle } = receiver.try_recv().unwrap() else {
+            panic!("bundle post expected")
+        };
+        integration.begin_bundle_post(&key, cycle).unwrap();
+        let message = SlackMessageRef {
+            channel: "D1".into(),
+            ts: "1.2".into(),
+        };
+        integration.bundle_posted(&key, cycle, message.clone());
+        let payload = tracked_group_payload(&integration, &key, cycle, &message);
+        let queue = Arc::new(Mutex::new(vec![plain]));
+        let touch_required = crate::config_touch_id();
+        let result = process_action_for_current_bundle(
+            &integration,
             true,
             "U_OWNER",
             &queue,
-            &action("U_OTHER", "knock_approve_all", "q-1"),
-            false,
+            &payload,
+            None,
         );
-        assert!(matches!(result, ActionResult::Rejected { .. }));
+        match result {
+            ActionResult::RefreshBundle { .. } if touch_required => {}
+            ActionResult::AppliedMany { ids, .. } => assert_eq!(ids, ["plain"]),
+            _ => panic!("bundle action should use the normal action path"),
+        }
+        assert_eq!(queue.lock().unwrap().len(), usize::from(touch_required));
+        if touch_required {
+            assert!(bytes.lock().unwrap().is_empty());
+        } else {
+            assert_eq!(reply(&bytes)["via"], "slack");
+        }
+    }
+
+    #[test]
+    fn explicit_global_touch_id_hides_bulk_button_and_keeps_plain_gate() {
+        // 이 케이스는 전역 Touch ID만 켠 plain gate가 보호되어 승인 UI와 응답이 막히기 때문에 통과한다.
+        let (entry, bytes) = bundle_entry(
+            "plain",
+            "/work/repo",
+            "plain",
+            "annotate",
+            true,
+            true,
+            false,
+            false,
+            false,
+            1,
+        );
+        let queue = Arc::new(Mutex::new(vec![entry]));
+        let entries = queue.lock().unwrap();
+        let state = bundle_state_for_entries(&entries);
+        let (_, protected_blocks) = bundle_message_blocks(&state, true);
+        assert!(!protected_blocks
+            .iter()
+            .flat_map(|block| block["elements"].as_array().into_iter().flatten())
+            .any(|element| element["action_id"] == "knock_bundle_approve_group"));
+        let payload = bundle_group_payload(&entries, "U_OWNER");
+        drop(entries);
+        let result = process_block_action_with_touch_id(true, "U_OWNER", &queue, &payload, true);
+        assert!(matches!(result, ActionResult::RefreshBundle { .. }));
         assert_eq!(queue.lock().unwrap().len(), 1);
         assert!(bytes.lock().unwrap().is_empty());
     }
 
     #[test]
-    fn approve_all_respects_global_touch_id_setting() {
-        let (anchor, anchor_bytes) = gate_entry("anchor", true, true, false, false);
-        let (plain, plain_bytes) = gate_entry("plain", false, true, false, false);
-        let globally_protected = Arc::new(Mutex::new(vec![anchor, plain]));
-        let result = process_block_action_with_touch_id(
+    fn critical_classifier_matches_word_boundaries_only() {
+        // 이 케이스는 실행 명령의 apply가 단어 경계 토큰이기 때문에 통과한다.
+        assert!(is_critical_request("safe", "safe", "apply"));
+        // 이 케이스는 실행 명령의 --hard가 단어 경계 토큰이기 때문에 통과한다.
+        assert!(is_critical_request("safe", "safe", "--hard"));
+        // 이 케이스는 실행 명령의 rm -rf가 단어 경계 토큰이기 때문에 통과한다.
+        assert!(is_critical_request("safe", "safe", "rm -rf /tmp/x"));
+        // 이 케이스는 제목의 destroy가 단어 경계 토큰이기 때문에 통과한다.
+        assert!(is_critical_request("DESTROY preview", "safe", "echo ok"));
+        // 이 케이스는 본문의 prd가 단어 경계 토큰이기 때문에 통과한다.
+        assert!(is_critical_request("safe", "deploy to prd", "echo ok"));
+        // 이 케이스는 한글이 ASCII 경계 밖이어서 prd 토큰을 구분하기 때문에 통과한다.
+        assert!(is_critical_request("safe", "prd에 배포", "echo ok"));
+        // 이 케이스는 한글이 ASCII 경계 밖이어서 prod 토큰을 구분하기 때문에 통과한다.
+        assert!(is_critical_request("safe", "prod환경", "echo ok"));
+        // 이 케이스는 밑줄이 ASCII 영숫자가 아니어서 prod 토큰을 구분하기 때문에 통과한다.
+        assert!(is_critical_request("safe", "env_prod", "echo ok"));
+        // 이 케이스는 applying이 apply 전체 단어가 아니기 때문에 통과한다.
+        assert!(!is_critical_request("safe", "safe", "applying docs"));
+        // 이 케이스는 approve에 위험 단어 경계가 없기 때문에 통과한다.
+        assert!(!is_critical_request("approve request", "safe", "echo ok"));
+        // 이 케이스는 --harder가 --hard 전체 단어가 아니기 때문에 통과한다.
+        assert!(!is_critical_request("safe", "safe", "--harder"));
+        // 이 케이스는 production에서 prod 뒤에 ASCII 영숫자가 이어지기 때문에 통과한다.
+        assert!(!is_critical_request("safe", "production", "echo ok"));
+        // 이 케이스는 deleted에서 delete 뒤에 ASCII 영숫자가 이어지기 때문에 통과한다.
+        assert!(!is_critical_request("safe", "deleted", "echo ok"));
+    }
+
+    fn assert_markdown_shell_body_stays_critical(command: &str, request_id: &str) {
+        let (mut critical, critical_bytes) = bundle_entry(
+            request_id,
+            "/work/repo",
+            "shell request",
+            "annotate",
             true,
-            "U_OWNER",
-            &globally_protected,
-            &action("U_OWNER", "knock_approve_all", "anchor"),
             true,
+            false,
+            false,
+            false,
+            1,
         );
-        assert!(matches!(result, ActionResult::AppliedMany { ref ids, .. } if ids.is_empty()));
-        assert!(anchor_bytes.lock().unwrap().is_empty());
-        assert!(plain_bytes.lock().unwrap().is_empty());
-        assert_eq!(globally_protected.lock().unwrap().len(), 2);
+        let body = format!("▶️ 승인 시 실행: {command}");
+        critical.payload["slackBody"] = json!(body);
+        let (plain, plain_bytes) = bundle_entry(
+            "plain-control",
+            "/work/repo",
+            "plain control",
+            "annotate",
+            true,
+            true,
+            false,
+            false,
+            false,
+            2,
+        );
+        let (integration, receiver) = Integration::new();
+        integration.queue_request_for_entry(&critical, "shell request".into(), body, None);
+        integration.queue_request_for_entry(
+            &plain,
+            "plain control".into(),
+            "▶️ 승인 시 실행: echo safe".into(),
+            None,
+        );
+        let Work::PostBundle { key, cycle } = receiver.try_recv().unwrap() else {
+            panic!("bundle post expected")
+        };
+        integration.begin_bundle_post(&key, cycle).unwrap();
+        let message = SlackMessageRef {
+            channel: "D1".into(),
+            ts: "4.2".into(),
+        };
+        integration.bundle_posted(&key, cycle, message.clone());
+        let state = integration.bundles.lock().unwrap().by_key[&key].clone();
+        let (_, blocks) = bundle_message_blocks(&state, false);
+        let rendered = serde_json::to_string(&blocks).unwrap();
+        assert!(rendered.contains("🔴"));
+        assert!(rendered.contains("1 개별 승인만"));
+        assert!(rendered.contains("이 묶음 승인 (1건)"));
+        let group_button = blocks
+            .iter()
+            .flat_map(|block| block["elements"].as_array().into_iter().flatten())
+            .find(|element| element["action_id"] == "knock_bundle_approve_group")
+            .unwrap()
+            .clone();
+        let payload = json!({
+            "type": "block_actions",
+            "user": { "id": "U_OWNER" },
+            "actions": [group_button],
+            "channel": { "id": message.channel },
+            "message": { "ts": message.ts, "blocks": blocks },
+        });
+        let queue = Arc::new(Mutex::new(vec![critical, plain]));
+        assert!(matches!(
+            process_action_for_current_bundle(
+                &integration,
+                true,
+                "U_OWNER",
+                &queue,
+                &payload,
+                Some(false),
+            ),
+            ActionResult::AppliedMany { ref ids, .. }
+                if ids.len() == 1 && ids[0] == "plain-control"
+        ));
+        assert!(critical_bytes.lock().unwrap().is_empty());
+        assert_eq!(reply(&plain_bytes)["via"], "slack");
     }
 
     #[test]
-    fn approve_all_wrapper_uses_current_global_touch_id_setting() {
-        let (entry, bytes) = gate_entry("remote", true, true, false, false);
-        let queue = Arc::new(Mutex::new(vec![entry]));
-        let config_touch_id = crate::config_touch_id();
+    fn slack_body_markdown_shell_comparison_keeps_apply_critical() {
+        // 이 케이스는 slackBody의 `< 3`가 마크다운 원문으로 판정되어 apply가 개별 확인 대상이기 때문에 통과한다.
+        assert_markdown_shell_body_stays_critical(
+            "while [ $i < 3 ]; do terraform apply; done",
+            "shell-comparison",
+        );
+    }
 
-        let result = process_block_action(
+    #[test]
+    fn slack_body_markdown_shell_redirection_keeps_rm_rf_critical() {
+        // 이 케이스는 slackBody의 `<`와 `>`가 마크다운 원문으로 판정되어 rm -rf가 개별 확인 대상이기 때문에 통과한다.
+        assert_markdown_shell_body_stays_critical(
+            "cat < in.txt; rm -rf build > log",
+            "shell-redirection",
+        );
+    }
+
+    #[test]
+    fn html_only_critical_input_is_converted_after_slack_body_type_fallback() {
+        // 이 케이스는 slackBody가 문자열이 아니어서 html만 텍스트화되고 태그 속 prod는 판정에서 빠지기 때문에 통과한다.
+        let (mut entry, _) = bundle_entry(
+            "html-only",
+            "/work/repo",
+            "safe title",
+            "annotate",
+            true,
+            true,
+            false,
+            false,
+            false,
+            1,
+        );
+        entry.payload["slackBody"] = Value::Null;
+        entry.payload["html"] = json!("<p title='prod'>safe request</p>");
+        assert!(!queue_entry_is_critical(&entry));
+    }
+
+    #[test]
+    fn non_owner_bundle_action_and_stale_item_action_leave_other_requests_unchanged() {
+        // 이 케이스는 owner와 다른 사용자의 클릭이 responder를 건드리지 않기 때문에 통과한다.
+        let (first, first_bytes) = bundle_entry(
+            "first",
+            "/work/repo",
+            "first",
+            "annotate",
+            true,
+            true,
+            false,
+            false,
+            false,
+            1,
+        );
+        let (second, second_bytes) = bundle_entry(
+            "second",
+            "/work/repo",
+            "second",
+            "annotate",
+            true,
+            true,
+            false,
+            false,
+            false,
+            2,
+        );
+        let queue = Arc::new(Mutex::new(vec![first, second]));
+        let payload = bundle_group_payload(&queue.lock().unwrap(), "U_OTHER");
+        assert!(matches!(
+            process_block_action_with_touch_id(true, "U_OWNER", &queue, &payload, false),
+            ActionResult::Rejected { .. }
+        ));
+        assert_eq!(queue.lock().unwrap().len(), 2);
+        assert!(first_bytes.lock().unwrap().is_empty() && second_bytes.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn stale_bundle_item_click_does_not_resolve_another_item() {
+        // 이 케이스는 클릭한 버튼 ID가 이미 큐에서 사라졌기 때문에 다른 ID를 건드리지 않아 통과한다.
+        let (stale, stale_bytes) = bundle_entry(
+            "stale",
+            "/work/repo",
+            "stale",
+            "annotate",
+            true,
+            true,
+            false,
+            false,
+            false,
+            1,
+        );
+        let (remaining, remaining_bytes) = bundle_entry(
+            "remaining",
+            "/work/repo",
+            "remaining",
+            "annotate",
+            true,
+            true,
+            false,
+            false,
+            false,
+            2,
+        );
+        let queue = Arc::new(Mutex::new(vec![stale, remaining]));
+        let payload = bundle_action_payload(
+            &queue.lock().unwrap(),
+            "U_OWNER",
+            "knock_bundle_approve_1",
+            "stale",
+        );
+        queue.lock().unwrap().remove(0);
+        assert!(matches!(
+            process_block_action_with_touch_id(true, "U_OWNER", &queue, &payload, false),
+            ActionResult::Ignored
+        ));
+        assert_eq!(
+            queue
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            ["remaining"]
+        );
+        assert!(
+            stale_bytes.lock().unwrap().is_empty() && remaining_bytes.lock().unwrap().is_empty()
+        );
+    }
+
+    #[test]
+    fn bundle_group_click_uses_only_item_ids_in_its_rendered_snapshot() {
+        // 이 케이스는 현재 화면의 앞 10개가 아니라 클릭 payload의 버튼 ID만 승인되기 때문에 통과한다.
+        let pairs = (0..11)
+            .map(|i| {
+                bundle_entry(
+                    &format!("q-{i}"),
+                    "/work/repo",
+                    &format!("title-{i}"),
+                    "annotate",
+                    true,
+                    true,
+                    false,
+                    false,
+                    false,
+                    i as u64,
+                )
+            })
+            .collect::<Vec<_>>();
+        let (entries, responses): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
+        let queue = Arc::new(Mutex::new(entries));
+        let payload = bundle_group_payload(&queue.lock().unwrap(), "U_OWNER");
+        assert!(bundle_visible_ids(&payload)
+            .unwrap()
+            .contains(&"q-9".to_string()));
+        assert!(!bundle_visible_ids(&payload)
+            .unwrap()
+            .contains(&"q-10".to_string()));
+        queue.lock().unwrap().remove(0);
+        let result = process_block_action_with_touch_id(true, "U_OWNER", &queue, &payload, false);
+        assert!(
+            matches!(result, ActionResult::AppliedMany { ref ids, .. } if ids.len() == 9 && !ids.contains(&"q-10".to_string()))
+        );
+        assert!(queue.lock().unwrap().iter().any(|entry| entry.id == "q-10"));
+        assert!(responses[0].lock().unwrap().is_empty());
+        assert!(responses[10].lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn bundle_display_caps_417_pending_items_and_approves_only_the_visible_ten() {
+        // 이 케이스는 417건 중 오래된 표시 10건만 버튼 payload에 들어가기 때문에 통과한다.
+        let pairs = (0..417)
+            .map(|i| {
+                bundle_entry(
+                    &format!("q-{i:03}"),
+                    "/work/repo",
+                    &format!("title-{i:03}"),
+                    "annotate",
+                    true,
+                    true,
+                    false,
+                    false,
+                    false,
+                    i as u64,
+                )
+            })
+            .collect::<Vec<_>>();
+        let (entries, responses): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
+        let state = bundle_state_for_entries(&entries);
+        let (fallback, blocks) = bundle_message_blocks(&state, false);
+        assert!(blocks.len() <= SLACK_BLOCK_LIMIT);
+        assert!(fallback.contains("외 407건 대기 (앞 건을 처리하면 표시)"));
+        let payload = bundle_group_payload(&entries, "U_OWNER");
+        let visible = bundle_visible_ids(&payload).unwrap();
+        assert_eq!(visible.len(), 10);
+        assert_eq!(visible.first().map(String::as_str), Some("q-000"));
+        assert_eq!(visible.last().map(String::as_str), Some("q-009"));
+
+        let queue = Arc::new(Mutex::new(entries));
+        let result = process_block_action_with_touch_id(true, "U_OWNER", &queue, &payload, false);
+        assert!(matches!(result, ActionResult::AppliedMany { ref ids, .. } if ids.len() == 10));
+        assert_eq!(queue.lock().unwrap().len(), 407);
+        assert!(responses[..10]
+            .iter()
+            .all(|bytes| !bytes.lock().unwrap().is_empty()));
+        assert!(responses[10..]
+            .iter()
+            .all(|bytes| bytes.lock().unwrap().is_empty()));
+    }
+
+    #[test]
+    fn completed_bundle_shows_summary_without_actions_and_detail_posts_once() {
+        // 이 케이스는 모든 응답이 끝나면 완료 문구만 남기고 상세 클릭은 한 번만 큐잉하기 때문에 통과한다.
+        let (integration, receiver) = Integration::new();
+        let (entry, _) = bundle_entry(
+            "done",
+            "/work/repo",
+            "plain",
+            "annotate",
+            true,
+            true,
+            false,
+            false,
+            false,
+            1,
+        );
+        integration.queue_request_for_entry(&entry, "plain".into(), "body".into(), None);
+        let Work::PostBundle { key, cycle } = receiver.try_recv().unwrap() else {
+            panic!("bundle post expected")
+        };
+        integration.begin_bundle_post(&key, cycle).unwrap();
+        integration.bundle_posted(
+            &key,
+            cycle,
+            SlackMessageRef {
+                channel: "D1".into(),
+                ts: "1.2".into(),
+            },
+        );
+        assert!(matches!(
+            integration.queue_bundle_detail("done"),
+            Some(Work::PostThreadReply { .. })
+        ));
+        assert!(integration.queue_bundle_detail("done").is_none());
+        integration.mark_processed("done", "approved", "slack");
+        let (text, blocks) = integration
+            .bundle_update_payload(&key, cycle)
+            .map(|(_, text, blocks, _)| (text, blocks))
+            .unwrap();
+        assert_eq!(text, "✅ 처리 완료 (승인 1 · 취소 0)");
+        assert_eq!(blocks.len(), 1);
+        assert!(blocks.iter().all(|block| block["type"] != "actions"));
+    }
+
+    #[test]
+    fn completed_three_requests_start_a_fresh_cycle_and_skip_unsent_old_post() {
+        // 이 케이스는 세 요청이 모두 끝나 새 주기가 시작되고 미게시된 이전 주기는 폐기되기 때문에 통과한다.
+        let (integration, receiver) = Integration::new();
+        for (id, created_at) in [("old-1", 1), ("old-2", 2), ("old-3", 3)] {
+            queue_plain_bundle(&integration, id, created_at);
+        }
+        let Work::PostBundle {
+            key,
+            cycle: old_cycle,
+        } = receiver.try_recv().unwrap()
+        else {
+            panic!("first cycle post expected")
+        };
+        for id in ["old-1", "old-2", "old-3"] {
+            integration.mark_processed(id, "approved", "slack");
+        }
+        queue_plain_bundle(&integration, "new", 4);
+        let Work::PostBundle {
+            key: new_key,
+            cycle,
+        } = receiver.try_recv().unwrap()
+        else {
+            panic!("new request must post a fresh message")
+        };
+        assert_eq!(new_key, key);
+        assert_ne!(cycle, old_cycle);
+        assert!(integration.begin_bundle_post(&key, old_cycle).is_none());
+        let bundles = integration.bundles.lock().unwrap();
+        let current = &bundles.by_key[&key];
+        assert_eq!((current.approved, current.dismissed), (0, 0));
+        assert_eq!(current.items[0].id, "new");
+        assert!(bundles.retired.is_empty());
+        assert_eq!(bundles.key_by_id.len(), 1);
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn late_old_post_and_stale_clicks_cannot_change_the_new_cycle() {
+        // 이 케이스는 전송 중 완료된 옛 주기의 응답과 클릭이 메시지 참조·주기로 분리되기 때문에 통과한다.
+        let (integration, receiver) = Integration::new();
+        for (id, created_at) in [("old-1", 1), ("old-2", 2), ("old-3", 3)] {
+            queue_plain_bundle(&integration, id, created_at);
+        }
+        let Work::PostBundle {
+            key,
+            cycle: old_cycle,
+        } = receiver.try_recv().unwrap()
+        else {
+            panic!("old post expected")
+        };
+        integration.begin_bundle_post(&key, old_cycle).unwrap();
+        let old_message = SlackMessageRef {
+            channel: "D1".into(),
+            ts: "1.1".into(),
+        };
+        let old_payload = tracked_group_payload(&integration, &key, old_cycle, &old_message);
+        for id in ["old-1", "old-2", "old-3"] {
+            integration.mark_processed(id, "approved", "slack");
+        }
+        let (new_entry, new_bytes) = queue_plain_bundle(&integration, "new", 4);
+        let cycle = receiver
+            .try_iter()
+            .find_map(|work| match work {
+                Work::PostBundle { cycle, .. } => Some(cycle),
+                _ => None,
+            })
+            .unwrap();
+        integration.begin_bundle_post(&key, cycle).unwrap();
+        let new_message = SlackMessageRef {
+            channel: "D1".into(),
+            ts: "2.1".into(),
+        };
+        integration.bundle_posted(&key, cycle, new_message.clone());
+        integration.bundle_posted(&key, old_cycle, old_message.clone());
+        let (message, summary, _, complete) =
+            integration.bundle_update_payload(&key, old_cycle).unwrap();
+        assert_eq!(message, old_message);
+        assert_eq!(summary, "✅ 처리 완료 (승인 3 · 취소 0)");
+        assert!(complete);
+        let queue = Arc::new(Mutex::new(vec![new_entry]));
+        assert!(matches!(process_action_for_current_bundle(
+            &integration, true, "U_OWNER", &queue, &old_payload, None,
+        ), ActionResult::RefreshBundle { message } if message == old_message));
+        assert!(matches!(integration.bundle_refresh_work(&old_message),
+            Some(Work::UpdateBundle { cycle, .. }) if cycle == old_cycle));
+        // 이 케이스는 같은 옛 메시지라도 비-owner이면 갱신 경로 대신 기존 권한 거절을 받기 때문에 통과한다.
+        let mut other = old_payload.clone();
+        other["user"]["id"] = json!("U_OTHER");
+        assert!(matches!(
+            process_action_for_current_bundle(&integration, true, "U_OWNER", &queue, &other, None,),
+            ActionResult::Rejected { .. }
+        ));
+        let mut detail = old_payload;
+        detail["actions"] = json!([{ "action_id": "knock_bundle_detail_1", "value": "old-1" }]);
+        assert!(matches!(
+            process_action_for_current_bundle(&integration, true, "U_OWNER", &queue, &detail, None,),
+            ActionResult::Ignored
+        ));
+        integration.bundle_update_succeeded(&key, old_cycle, complete);
+        assert!(integration.bundles.lock().unwrap().retired.is_empty());
+        let (message, _, _, complete) = integration.bundle_update_payload(&key, cycle).unwrap();
+        assert_eq!(message, new_message);
+        assert!(!complete);
+        assert_eq!(queue.lock().unwrap().len(), 1);
+        assert!(new_bytes.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn pending_update_success_does_not_discard_a_later_completion() {
+        // 이 케이스는 성공한 전송 자체가 완료 snapshot일 때만 상태를 정리하기 때문에 통과한다.
+        let (integration, receiver) = Integration::new();
+        queue_plain_bundle(&integration, "last", 1);
+        let Work::PostBundle { key, cycle } = receiver.try_recv().unwrap() else {
+            panic!("post expected")
+        };
+        integration.begin_bundle_post(&key, cycle).unwrap();
+        integration.bundle_posted(
+            &key,
+            cycle,
+            SlackMessageRef {
+                channel: "D1".into(),
+                ts: "1.1".into(),
+            },
+        );
+        let (_, _, _, pending_snapshot) = integration.bundle_update_payload(&key, cycle).unwrap();
+        assert!(!pending_snapshot);
+        integration.mark_processed("last", "approved", "slack");
+        integration.bundle_update_succeeded(&key, cycle, pending_snapshot);
+        let (_, summary, _, completed_snapshot) =
+            integration.bundle_update_payload(&key, cycle).unwrap();
+        assert_eq!(summary, "✅ 처리 완료 (승인 1 · 취소 0)");
+        assert!(completed_snapshot);
+        integration.bundle_update_succeeded(&key, cycle, completed_snapshot);
+        assert!(integration.bundle_update_payload(&key, cycle).is_none());
+        assert!(integration.bundles.lock().unwrap().key_by_id.is_empty());
+    }
+
+    #[test]
+    fn empty_bundle_candidates_refresh_the_tracked_message_without_replying() {
+        // 이 케이스는 표시 뒤 보호된 요청만 남아 후보가 0건이어도 같은 메시지를 갱신하기 때문에 통과한다.
+        let (integration, receiver) = Integration::new();
+        let (mut entry, bytes) = queue_plain_bundle(&integration, "protected", 1);
+        let Work::PostBundle { key, cycle } = receiver.try_recv().unwrap() else {
+            panic!("post expected")
+        };
+        integration.begin_bundle_post(&key, cycle).unwrap();
+        let message = SlackMessageRef {
+            channel: "D1".into(),
+            ts: "1.1".into(),
+        };
+        integration.bundle_posted(&key, cycle, message.clone());
+        let payload = tracked_group_payload(&integration, &key, cycle, &message);
+        entry.payload["touchId"] = json!(true);
+        let queue = Arc::new(Mutex::new(vec![entry]));
+        let result = process_action_for_current_bundle(
+            &integration,
             true,
             "U_OWNER",
             &queue,
-            &action("U_OWNER", "knock_approve_all", "remote"),
+            &payload,
+            None,
         );
-
-        match result {
-            ActionResult::AppliedMany { ids, .. } if config_touch_id => {
-                assert!(ids.is_empty());
-                assert_eq!(queue.lock().unwrap().len(), 1);
-                assert!(bytes.lock().unwrap().is_empty());
-            }
-            ActionResult::AppliedMany { ids, .. } => {
-                assert_eq!(ids, ["remote"]);
-                assert_eq!(reply(&bytes)["via"], "slack");
-                assert!(queue.lock().unwrap().is_empty());
-            }
-            _ => panic!("bulk approval wrapper should be applied"),
-        }
+        let ActionResult::RefreshBundle { message: target } = result else {
+            panic!("zero candidates must refresh")
+        };
+        assert_eq!(target, message);
+        assert!(matches!(integration.bundle_refresh_work(&target),
+            Some(Work::UpdateBundle { key: target_key, cycle: target_cycle })
+                if target_key == key && target_cycle == cycle));
+        assert_eq!(queue.lock().unwrap().len(), 1);
+        assert!(bytes.lock().unwrap().is_empty());
     }
 
     #[test]
-    fn approve_all_ignores_stale_anchor_without_resolving_other_requests() {
-        let (local, local_bytes) = gate_entry("local", false, true, false, false);
-        let queue = Arc::new(Mutex::new(vec![local]));
+    fn missing_bundle_key_falls_back_to_one_masked_request_message() {
+        // 이 케이스는 cwd가 없는 source 키가 묶이지 않고 기존 단건 경로로 가기 때문에 통과한다.
+        let (integration, receiver) = Integration::new();
+        let (mut entry, _) = bundle_entry(
+            "fallback",
+            "/work/repo",
+            "token=xoxb-1234567890-secret",
+            "annotate",
+            true,
+            true,
+            false,
+            false,
+            false,
+            1,
+        );
+        entry.source = json!({ "project": "sample", "caller": "Codex" });
+        integration.queue_request_for_entry(
+            &entry,
+            "token=xoxb-1234567890-secret".into(),
+            "body".into(),
+            None,
+        );
+        let Work::Post {
+            title,
+            body,
+            action_url,
+            ask,
+            ..
+        } = receiver.try_recv().unwrap()
+        else {
+            panic!("missing key must use single post")
+        };
+        let (fallback, _) = build_post_view(
+            "fallback",
+            &title,
+            &body,
+            action_url.as_deref(),
+            ask.as_ref(),
+        );
+        assert!(fallback.contains("token=****"));
+        assert!(!fallback.contains("xoxb-1234567890-secret"));
+    }
 
-        for anchor in ["stale", "local"] {
-            assert!(matches!(
-                process_block_action_with_touch_id(
-                    true,
-                    "U_OWNER",
-                    &queue,
-                    &action("U_OWNER", "knock_approve_all", anchor),
-                    false
-                ),
-                ActionResult::Ignored
-            ));
+    #[test]
+    fn mixed_processed_bundle_folds_rows_and_keeps_decision_counts() {
+        // 이 케이스는 승인·취소된 두 행만 접고 마지막 대기 행은 표시하기 때문에 통과한다.
+        let (integration, receiver) = Integration::new();
+        for (id, created_at) in [("approved", 1), ("dismissed", 2), ("pending", 3)] {
+            let (entry, _) = bundle_entry(
+                id,
+                "/work/repo",
+                id,
+                "annotate",
+                true,
+                true,
+                false,
+                false,
+                false,
+                created_at,
+            );
+            integration.queue_request_for_entry(&entry, id.into(), "body".into(), None);
         }
-        assert_eq!(queue.lock().unwrap().len(), 1);
-        assert!(local_bytes.lock().unwrap().is_empty());
+        let Work::PostBundle { key, cycle } = receiver.try_recv().unwrap() else {
+            panic!("bundle post expected")
+        };
+        integration.begin_bundle_post(&key, cycle).unwrap();
+        integration.bundle_posted(
+            &key,
+            cycle,
+            SlackMessageRef {
+                channel: "D1".into(),
+                ts: "1.2".into(),
+            },
+        );
+        integration.mark_processed("approved", "approved", "slack");
+        integration.mark_processed("dismissed", "dismissed", "slack");
+        let (_, text, blocks, _) = integration.bundle_update_payload(&key, cycle).unwrap();
+        let rendered = serde_json::to_string(&blocks).unwrap();
+        assert!(rendered.contains("외 2건 처리됨"));
+        assert!(rendered.contains("pending"));
+        assert!(!rendered.contains("approved"));
+        assert!(!rendered.contains("dismissed"));
+        assert!(text.contains("대기 1건"));
+
+        integration.mark_processed("pending", "approved", "slack");
+        let (_, text, blocks, _) = integration.bundle_update_payload(&key, cycle).unwrap();
+        assert_eq!(text, "✅ 처리 완료 (승인 2 · 취소 1)");
+        assert!(blocks.iter().all(|block| block["type"] != "actions"));
+    }
+
+    #[test]
+    fn bundle_masks_project_caller_cwd_title_fallback_and_blocks() {
+        // 이 케이스는 source 머리와 제목 fallback·Block Kit의 비밀값이 모두 마스킹되기 때문에 통과한다.
+        let (mut entry, _) = bundle_entry(
+            "masked",
+            "/tmp/ghp_123456789012345678901234",
+            "secret=title-secret-value",
+            "annotate",
+            true,
+            true,
+            false,
+            false,
+            false,
+            1,
+        );
+        entry.source = json!({
+            "project": "xoxb-1234567890-project-secret",
+            "caller": "password=hunter2",
+            "cwd": "/tmp/ghp_123456789012345678901234",
+        });
+        let state = bundle_state_for_entries(&[entry]);
+        let (fallback, blocks) = bundle_message_blocks(&state, false);
+        let block_text = serde_json::to_string(&blocks).unwrap();
+        for secret in [
+            "xoxb-1234567890-project-secret",
+            "hunter2",
+            "ghp_123456789012345678901234",
+            "title-secret-value",
+        ] {
+            assert!(!fallback.contains(secret));
+            assert!(!block_text.contains(secret));
+        }
+        assert!(fallback.contains("****"));
+        assert!(block_text.contains("****"));
+    }
+
+    #[test]
+    fn non_slack_entry_is_not_registered_or_resolved_by_bundle_action() {
+        // 이 케이스는 나머지 조건이 모두 eligible해도 Slack remote가 false인 요청은 처리되지 않기 때문에 통과한다.
+        let (nonremote, nonremote_bytes) = bundle_entry(
+            "nonremote",
+            "/work/repo",
+            "nonremote",
+            "annotate",
+            true,
+            true,
+            false,
+            false,
+            false,
+            1,
+        );
+        let (remote, remote_bytes) = bundle_entry(
+            "remote",
+            "/work/repo",
+            "remote",
+            "annotate",
+            true,
+            true,
+            false,
+            false,
+            false,
+            2,
+        );
+        let mut original = vec![nonremote, remote];
+        let payload = bundle_group_payload(&original, "U_OWNER");
+        assert!(bundle_visible_ids(&payload)
+            .unwrap()
+            .contains(&"nonremote".to_string()));
+        original[0].remote_slack = false;
+        let nonremote = original.remove(0);
+        let queue = Arc::new(Mutex::new(vec![nonremote, original.remove(0)]));
+        let result = process_block_action_with_touch_id(true, "U_OWNER", &queue, &payload, false);
+        assert!(matches!(result, ActionResult::AppliedMany { ids, .. } if ids == ["remote"]));
+        assert!(nonremote_bytes.lock().unwrap().is_empty());
+        assert_eq!(reply(&remote_bytes)["via"], "slack");
+
+        let (integration, receiver) = Integration::new();
+        integration.queue_request_for_entry(
+            &queue.lock().unwrap()[0],
+            "nonremote".into(),
+            "body".into(),
+            None,
+        );
+        assert!(receiver.try_recv().is_err());
+        assert!(integration.bundles.lock().unwrap().by_key.is_empty());
     }
 
     #[test]
@@ -4285,6 +6305,62 @@ mod tests {
             }));
         }
         assert_eq!(sent, ["post:q-1", "update:q-1:done"]);
+    }
+
+    #[test]
+    fn bundle_http_work_holds_replays_in_order_and_preserves_failed_retry() {
+        // 이 케이스는 연결 전 세 작업을 순서대로 보류하고 실패한 첫 작업을 다시 맨 앞에 두기 때문에 통과한다.
+        let key = BundleKey {
+            project: "sample".into(),
+            caller: "Codex".into(),
+            cwd: "/work/repo".into(),
+        };
+        let works = vec![
+            Work::PostBundle {
+                key: key.clone(),
+                cycle: 1,
+            },
+            Work::UpdateBundle {
+                key: key.clone(),
+                cycle: 1,
+            },
+            Work::PostThreadReply {
+                thread: SlackMessageRef {
+                    channel: "D1".into(),
+                    ts: "1.2".into(),
+                },
+                text: "detail".into(),
+                blocks: Vec::new(),
+            },
+        ];
+        let label = |work: &Work| match work {
+            Work::PostBundle { .. } => "post-bundle",
+            Work::UpdateBundle { .. } => "update-bundle",
+            Work::PostThreadReply { .. } => "thread-reply",
+            _ => "unexpected",
+        };
+        let mut pending = VecDeque::new();
+        for work in works {
+            assert!(!dispatch_or_hold(work, false, &mut pending, |_| panic!(
+                "offline work must wait"
+            )));
+        }
+        assert_eq!(
+            pending.iter().map(label).collect::<Vec<_>>(),
+            ["post-bundle", "update-bundle", "thread-reply"]
+        );
+        let first = pending.pop_front().unwrap();
+        assert!(dispatch_or_hold(first, true, &mut pending, |_| Err(())));
+        assert_eq!(label(pending.front().unwrap()), "post-bundle");
+
+        let mut replayed = Vec::new();
+        while let Some(work) = pending.pop_front() {
+            assert!(!dispatch_or_hold(work, true, &mut pending, |work| {
+                replayed.push(label(work));
+                Ok(())
+            }));
+        }
+        assert_eq!(replayed, ["post-bundle", "update-bundle", "thread-reply"]);
     }
 
     #[test]

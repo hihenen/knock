@@ -2258,8 +2258,8 @@ fn run_daemon() {
                                     spec,
                                 );
                             } else {
-                            slack_requests.queue_request(
-                                entry.id.clone(),
+                            slack_requests.queue_request_for_entry(
+                                entry,
                                 entry.payload.get("title").and_then(Value::as_str).unwrap_or("Knock").to_string(),
                                 entry.payload.get("slackBody").and_then(Value::as_str)
                                     .or_else(|| entry.payload.get("html").and_then(Value::as_str))
@@ -2672,6 +2672,7 @@ fn request_source(hook_payload: Option<&Value>, hook: bool) -> Value {
     serde_json::json!({
         "project": project,
         "caller": caller,
+        "cwd": cwd,
     })
 }
 
@@ -4088,6 +4089,21 @@ mod tests {
         assert_eq!(
             project_name_from_cwd(&nested.to_string_lossy()).as_deref(),
             root.file_name().and_then(|name| name.to_str())
+        );
+    }
+
+    #[test]
+    fn default_request_source_includes_working_directory() {
+        // 이 케이스는 source 인자를 주입하지 않은 기본 경로가 현재 cwd를 반환하기 때문에 통과한다.
+        let source = request_source(None, false);
+        assert_eq!(
+            source["cwd"].as_str(),
+            std::env::var("KNOCK_CWD")
+                .ok()
+                .or_else(|| std::env::current_dir()
+                    .ok()
+                    .map(|cwd| cwd.to_string_lossy().into_owned()))
+                .as_deref()
         );
     }
 }
