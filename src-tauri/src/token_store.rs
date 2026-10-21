@@ -246,7 +246,7 @@ pub(super) fn store(
             let _ = file_update(file, account, None);
             return Ok(());
         }
-        eprintln!("knock: 키체인 저장 실패, 토큰을 폴백 파일에 저장합니다 ({account})");
+        crate::daemon_log!("knock: 키체인 저장 실패, 토큰을 폴백 파일에 저장합니다 ({account})");
     }
     file_update(file, account, Some(token))
 }
@@ -273,7 +273,7 @@ pub(super) fn load(
         .ok_or_else(|| "macOS 키체인 항목을 읽을 수 없습니다".to_string())?;
     legacy.delete(account);
     if security.write(account, &token).is_err() {
-        eprintln!("knock: 키체인 이전 실패, 토큰을 폴백 파일에 저장합니다 ({account})");
+        crate::daemon_log!("knock: 키체인 이전 실패, 토큰을 폴백 파일에 저장합니다 ({account})");
         file_update(file, account, Some(&token))?;
     }
     Ok(token)
