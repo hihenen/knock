@@ -136,6 +136,9 @@ fn extra_masking_patterns() -> &'static [(Regex, &'static str)] {
             (r"\bgh[ousr]_[A-Za-z0-9]{20,}\b", "****"),
             // JWT
             (r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*", "****"),
+            // Slack request signatures and generic signed URL parameters.
+            (r#"(?i)(["']?(?:x-slack-signature|x-amz-signature|signature|sig|signing_secret)["']?\s*[:=]\s*)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;&]+)"#, "${1}****"),
+            (r"(?i)\bv0=[0-9a-f]{64}\b", "v0=****"),
             // URL 속 비밀번호: scheme://user:PASS@host
             (r"(?i)\b([a-z][a-z0-9+.-]*://[^\s:/@]+:)[^\s@/]+(@)", "${1}****${2}"),
         ]
@@ -2426,6 +2429,29 @@ fn api_client() -> Result<Client, String> {
         .map_err(|_| "Slack API 클라이언트를 시작할 수 없습니다".into())
 }
 
+fn api_error_log_line(method: &str, result: &Value) -> String {
+    let error = result
+        .get("error")
+        .and_then(Value::as_str)
+        .map(mask_secrets)
+        .map(|error| {
+            error
+                .chars()
+                .map(|character| {
+                    if character.is_control() {
+                        ' '
+                    } else {
+                        character
+                    }
+                })
+                .take(120)
+                .collect::<String>()
+        })
+        .filter(|error| !error.is_empty())
+        .unwrap_or_else(|| "unknown".into());
+    format!("knock: Slack API {method} failed (error={error})")
+}
+
 fn api_call(
     client: &Client,
     token: &str,
@@ -2448,6 +2474,7 @@ fn api_call(
     if result.get("ok").and_then(Value::as_bool) == Some(true) {
         Ok(result)
     } else {
+        crate::daemon_log!("{}", api_error_log_line(method, &result));
         Err("Slack API가 요청을 거절했습니다".into())
     }
 }
@@ -2697,7 +2724,7 @@ fn process_block_action_with_touch_id(
     config_touch_id: bool,
 ) -> ActionResult {
     if !enabled {
-        eprintln!("knock: Slack action ignored (slack disabled)");
+        crate::daemon_log!("knock: Slack action ignored (slack disabled)");
         return ActionResult::Ignored;
     }
     if payload
@@ -2706,7 +2733,7 @@ fn process_block_action_with_touch_id(
         .and_then(Value::as_str)
         != Some(owner_user_id)
     {
-        eprintln!("knock: Slack action rejected (user is not the configured owner)");
+        crate::daemon_log!("knock: Slack action rejected (user is not the configured owner)");
         let blocks = payload
             .get("message")
             .and_then(|message| message.get("blocks"))
@@ -2740,7 +2767,7 @@ fn process_block_action_with_touch_id(
         .and_then(Value::as_array)
         .and_then(|actions| actions.first())
     else {
-        eprintln!("knock: Slack action ignored (no actions in payload)");
+        crate::daemon_log!("knock: Slack action ignored (no actions in payload)");
         return ActionResult::Ignored;
     };
     if let Some(qi) = action
@@ -2756,14 +2783,14 @@ fn process_block_action_with_touch_id(
     }
     if action.get("action_id").and_then(Value::as_str) == Some("knock_bundle_approve_group") {
         let Some(clicked_bundle_id) = action.get("value").and_then(Value::as_str) else {
-            eprintln!("knock: Slack bundle action ignored (no bundle id on button)");
+            crate::daemon_log!("knock: Slack bundle action ignored (no bundle id on button)");
             return ActionResult::Ignored;
         };
         let Some(message) = message_ref(payload) else {
             return ActionResult::Ignored;
         };
         let Some(displayed_ids) = bundle_visible_ids(payload) else {
-            eprintln!("knock: Slack bundle action ignored (no displayed item buttons)");
+            crate::daemon_log!("knock: Slack bundle action ignored (no displayed item buttons)");
             return ActionResult::Ignored;
         };
         let (key, candidates) = {
@@ -2774,7 +2801,7 @@ fn process_block_action_with_touch_id(
                 .filter_map(|entry| bundle_key_from_source(&entry.source))
                 .find(|key| bundle_id(key) == clicked_bundle_id)
             else {
-                eprintln!(
+                crate::daemon_log!(
                     "knock: Slack bundle action ignored (stale bundle id={clicked_bundle_id})"
                 );
                 return ActionResult::RefreshBundle { message };
@@ -2870,18 +2897,18 @@ fn process_block_action_with_touch_id(
         Some("knock_approve") => "approved",
         Some("knock_dismiss") => "dismissed",
         other => {
-            eprintln!("knock: Slack action ignored (unknown action_id={other:?})");
+            crate::daemon_log!("knock: Slack action ignored (unknown action_id={other:?})");
             return ActionResult::Ignored;
         }
     };
     let Some(id) = action.get("value").and_then(Value::as_str) else {
-        eprintln!("knock: Slack action ignored (no value on button)");
+        crate::daemon_log!("knock: Slack action ignored (no value on button)");
         return ActionResult::Ignored;
     };
     let response = json!({ "decision": decision, "via": "slack" });
     if crate::reply_queue_entry(queue, id, &response, |entry| entry.remote_slack, |_| {}).is_none()
     {
-        eprintln!("knock: Slack action ignored (no pending remote entry for id={id})");
+        crate::daemon_log!("knock: Slack action ignored (no pending remote entry for id={id})");
         return ActionResult::Ignored;
     }
     ActionResult::Applied {
@@ -3009,11 +3036,11 @@ fn apply_ask_edit(
             .iter_mut()
             .find(|entry| entry.id == id && entry.remote_slack && entry.kind == "ask")
         else {
-            eprintln!("knock: Slack action ignored (no pending remote ask for id={id})");
+            crate::daemon_log!("knock: Slack action ignored (no pending remote ask for id={id})");
             return ActionResult::Ignored;
         };
         let Some(spec) = ask_remote_spec(&entry.payload) else {
-            eprintln!("knock: Slack action ignored (ask is not remote-capable, id={id})");
+            crate::daemon_log!("knock: Slack action ignored (ask is not remote-capable, id={id})");
             return ActionResult::Ignored;
         };
         entry
@@ -3057,7 +3084,7 @@ fn apply_ask_edit(
             AskEdit::Submit => true,
         };
         if !ok {
-            eprintln!("knock: Slack action ignored (ask edit out of range, id={id})");
+            crate::daemon_log!("knock: Slack action ignored (ask edit out of range, id={id})");
             Outcome::Ignore
         } else {
             let all = spec
@@ -3099,7 +3126,9 @@ fn apply_ask_edit(
             if crate::reply_queue_entry(queue, id, &response, |entry| entry.remote_slack, |_| {})
                 .is_none()
             {
-                eprintln!("knock: Slack action ignored (no pending remote entry for id={id})");
+                crate::daemon_log!(
+                    "knock: Slack action ignored (no pending remote entry for id={id})"
+                );
                 return ActionResult::Ignored;
             }
             ActionResult::Applied {
@@ -3128,7 +3157,7 @@ fn open_other_modal(
         payload.get("trigger_id").and_then(Value::as_str),
         message_ref(payload),
     ) else {
-        eprintln!("knock: Slack action ignored (malformed ask other button)");
+        crate::daemon_log!("knock: Slack action ignored (malformed ask other button)");
         return ActionResult::Ignored;
     };
     let found = {
@@ -3144,7 +3173,7 @@ fn open_other_modal(
             })
     };
     let Some((question, current)) = found else {
-        eprintln!("knock: Slack action ignored (no pending remote ask for id={id})");
+        crate::daemon_log!("knock: Slack action ignored (no pending remote ask for id={id})");
         return ActionResult::Ignored;
     };
     let mut element = json!({ "type": "plain_text_input", "action_id": "text", "multiline": true });
@@ -3186,7 +3215,7 @@ fn process_view_submission(
         meta["id"].as_str(),
         meta["qi"].as_u64().map(|qi| qi as usize),
     ) else {
-        eprintln!("knock: Slack view ignored (malformed metadata)");
+        crate::daemon_log!("knock: Slack view ignored (malformed metadata)");
         return ActionResult::Ignored;
     };
     let text = view["state"]["values"]["other"]["text"]["value"]
@@ -3194,7 +3223,7 @@ fn process_view_submission(
         .map(str::trim)
         .unwrap_or_default();
     if text.is_empty() {
-        eprintln!("knock: Slack view ignored (empty other text)");
+        crate::daemon_log!("knock: Slack view ignored (empty other text)");
         return ActionResult::Ignored;
     }
     let message = match (meta["channel"].as_str(), meta["ts"].as_str()) {
@@ -3303,7 +3332,7 @@ fn run_socket_reader(
         }
         match liveness.probe(Instant::now()) {
             Probe::Dead => {
-                eprintln!(
+                crate::daemon_log!(
                     "knock: Slack socket silent for {}s; reconnecting",
                     LIVENESS_TIMEOUT.as_secs()
                 );
@@ -3335,9 +3364,9 @@ fn run_socket_reader(
                     }
                 }
                 match envelope.get("type").and_then(Value::as_str) {
-                    Some("hello") => eprintln!("knock: Slack hello received"),
+                    Some("hello") => crate::daemon_log!("knock: Slack hello received"),
                     Some("disconnect") => {
-                        eprintln!(
+                        crate::daemon_log!(
                             "knock: Slack disconnect requested (reason={})",
                             envelope
                                 .get("reason")
@@ -3356,7 +3385,7 @@ fn run_socket_reader(
                     Some(Value::String(raw)) => serde_json::from_str(raw).unwrap_or(Value::Null),
                     _ => Value::Null,
                 };
-                eprintln!(
+                crate::daemon_log!(
                     "knock: Slack interactive payload received (type={})",
                     payload.get("type").and_then(Value::as_str).unwrap_or("?")
                 );
@@ -3368,13 +3397,13 @@ fn run_socket_reader(
                 }
             }
             Ok(Message::Close(_)) => {
-                eprintln!("knock: Slack socket closed by peer");
+                crate::daemon_log!("knock: Slack socket closed by peer");
                 break;
             }
             Ok(_) => {}
             Err(tungstenite::Error::Io(error)) if is_idle_io(&error) => {}
             Err(_) => {
-                eprintln!("knock: Slack socket read failed");
+                crate::daemon_log!("knock: Slack socket read failed");
                 break;
             }
         }
@@ -3615,7 +3644,7 @@ fn execute_http(
                 Some(version),
             );
             if opened.is_err() {
-                eprintln!("knock: Slack views.open failed");
+                crate::daemon_log!("knock: Slack views.open failed");
             }
             Ok(())
         }
@@ -3697,7 +3726,7 @@ pub(super) fn run_worker(
                 continue;
             }
             mark_connecting();
-            eprintln!("knock: Slack connecting (attempt {})", attempt + 1);
+            crate::daemon_log!("knock: Slack connecting (attempt {})", attempt + 1);
             let connected = connect_if_enabled(
                 &version.0,
                 || {
@@ -3736,7 +3765,9 @@ pub(super) fn run_worker(
             match connected {
                 Err(StartError::Credentials) => {
                     if !missing_tokens_logged {
-                        eprintln!("knock: Slack enabled but Keychain tokens are unavailable");
+                        crate::daemon_log!(
+                            "knock: Slack enabled but Keychain tokens are unavailable"
+                        );
                         missing_tokens_logged = true;
                     }
                     set_conn_state(ConnState::NoToken);
@@ -3744,7 +3775,7 @@ pub(super) fn run_worker(
                     attempt = attempt.saturating_add(1);
                 }
                 Err(StartError::Connection) => {
-                    eprintln!("knock: Slack Socket Mode disconnected; reconnecting");
+                    crate::daemon_log!("knock: Slack Socket Mode disconnected; reconnecting");
                     set_conn_state(ConnState::Reconnecting);
                     retry_at = Instant::now() + reconnect_backoff(attempt);
                     attempt = attempt.saturating_add(1);
@@ -3771,7 +3802,7 @@ pub(super) fn run_worker(
                     attempt = 0;
                     missing_tokens_logged = false;
                     set_conn_state(ConnState::Connected);
-                    eprintln!("knock: Slack connected (generation {generation})");
+                    crate::daemon_log!("knock: Slack connected (generation {generation})");
                 }
             }
         }
@@ -3813,7 +3844,7 @@ pub(super) fn run_worker(
                 if current_generation == Some(ended_generation) {
                     close_session(session.take());
                     set_conn_state(ConnState::Reconnecting);
-                    eprintln!("knock: Slack socket ended; reconnecting");
+                    crate::daemon_log!("knock: Slack socket ended; reconnecting");
                     retry_at = Instant::now() + reconnect_backoff(attempt);
                     attempt = attempt.saturating_add(1);
                 }
@@ -3834,7 +3865,7 @@ pub(super) fn run_worker(
                     )
                 });
                 if failed {
-                    eprintln!("knock: Slack message request failed; retrying");
+                    crate::daemon_log!("knock: Slack message request failed; retrying");
                     close_session(session.take());
                     set_conn_state(ConnState::Reconnecting);
                     retry_at = Instant::now() + reconnect_backoff(attempt);
@@ -5784,6 +5815,214 @@ mod tests {
         assert_eq!(text, "✅ 처리 완료 (승인 1 · 취소 0)");
         assert_eq!(blocks.len(), 1);
         assert!(blocks.iter().all(|block| block["type"] != "actions"));
+    }
+
+    #[test]
+    fn critical_individual_bundle_approval_queues_completion_update() {
+        // 이 케이스는 게시된 단일 critical 카드의 실제 버튼 payload가 responder 승인 후 완료 갱신을 큐잉하기 때문에 통과한다.
+        let (integration, receiver) = Integration::new();
+        let (entry, bytes) = bundle_entry(
+            "critical",
+            "/work/repo",
+            "destroy request",
+            "annotate",
+            true,
+            true,
+            false,
+            false,
+            false,
+            1,
+        );
+        integration.queue_request_for_entry(&entry, "destroy request".into(), "body".into(), None);
+        let Work::PostBundle { key, cycle } = receiver.try_recv().unwrap() else {
+            panic!("bundle post expected")
+        };
+        integration.begin_bundle_post(&key, cycle).unwrap();
+        let message = SlackMessageRef {
+            channel: "D1".into(),
+            ts: "1.2".into(),
+        };
+        integration.bundle_posted(&key, cycle, message.clone());
+
+        let (_, blocks) = {
+            let bundles = integration.bundles.lock().unwrap();
+            bundle_message_blocks(
+                bundles
+                    .state(&BundleRef {
+                        key: key.clone(),
+                        cycle,
+                    })
+                    .unwrap(),
+                false,
+            )
+        };
+        let button = blocks
+            .iter()
+            .filter(|block| block["type"] == "actions")
+            .flat_map(|block| block["elements"].as_array().into_iter().flatten())
+            .find(|button| button["action_id"] == "knock_bundle_approve_1")
+            .unwrap()
+            .clone();
+        assert_eq!(button["value"], "critical");
+        assert_eq!(button["text"]["type"], "plain_text");
+        assert_eq!(button["text"]["text"], "1 개별 승인만");
+        assert_eq!(button["text"]["emoji"], true);
+        assert!(serde_json::to_string(&blocks)
+            .unwrap()
+            .contains("🔴 1건은 개별 확인 필요"));
+        let payload = json!({
+            "type": "block_actions",
+            "user": { "id": "U_OWNER" },
+            "actions": [button],
+            "channel": { "id": message.channel },
+            "message": { "ts": message.ts, "blocks": blocks },
+        });
+        let queue = Arc::new(Mutex::new(vec![entry]));
+        let ActionResult::Applied {
+            id,
+            decision: "approved",
+        } = process_action_for_current_bundle(
+            &integration,
+            true,
+            "U_OWNER",
+            &queue,
+            &payload,
+            None,
+        )
+        else {
+            panic!("individual critical approval must reach its responder")
+        };
+        assert_eq!(
+            reply(&bytes),
+            json!({ "decision": "approved", "via": "slack" })
+        );
+        assert!(queue.lock().unwrap().is_empty());
+
+        let (resolved_tx, resolved_rx) = mpsc::channel();
+        let resolved_integration = integration.clone();
+        thread::spawn(move || {
+            resolved_integration.resolve_action(&id, &payload, "approved");
+            let _ = resolved_tx.send(());
+        });
+        resolved_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("resolve_action must finish without blocking on the bundle mutex");
+
+        let Work::UpdateBundle {
+            key: update_key,
+            cycle: update_cycle,
+        } = receiver.try_recv().unwrap()
+        else {
+            panic!("individual approval must queue an UpdateBundle HTTP work item")
+        };
+        assert_eq!((update_key, update_cycle), (key.clone(), cycle));
+        let (target, text, updated_blocks, complete) = integration
+            .bundle_update_payload(&key, cycle)
+            .expect("posted bundle must have an update payload");
+        assert_eq!(target, message);
+        assert_eq!(text, "✅ 처리 완료 (승인 1 · 취소 0)");
+        assert!(complete);
+        assert!(!text.trim().is_empty());
+        assert!(utf16_len(&text) <= SLACK_SECTION_TEXT_LIMIT);
+        assert_eq!(updated_blocks.len(), 1);
+        assert!(updated_blocks.iter().all(|block| {
+            block["type"] == "section"
+                && block["text"]["text"].as_str().is_some_and(|text| {
+                    !text.trim().is_empty() && utf16_len(text) <= SLACK_SECTION_TEXT_LIMIT
+                })
+        }));
+        assert!(updated_blocks
+            .iter()
+            .all(|block| block["type"] != "actions"));
+    }
+
+    #[test]
+    fn ten_critical_items_with_special_characters_fit_bundle_block_limits() {
+        // 이 케이스는 10개 표시 경계의 특수 문자·이모지 입력도 section/action 제한 안에 들어가므로 통과한다.
+        let entries = (1..=10)
+            .map(|index| {
+                let title = format!("destroy {}", "<>&🙂".repeat(24));
+                let (mut entry, _) = bundle_entry(
+                    &format!("item-{index}"),
+                    "/work/repo",
+                    &title,
+                    "annotate",
+                    true,
+                    true,
+                    false,
+                    false,
+                    false,
+                    index,
+                );
+                entry.payload["slackBody"] =
+                    json!(format!("▶️ 승인 시 실행: {}", "<>&🙂".repeat(24)));
+                entry
+            })
+            .collect::<Vec<_>>();
+        let state = bundle_state_for_entries(&entries);
+        assert_eq!(state.items.len(), 10);
+        assert!(state.items.iter().all(|item| item.critical));
+
+        let (_, blocks) = bundle_message_blocks(&state, false);
+        assert!(blocks.len() <= SLACK_BLOCK_LIMIT);
+        let rendered = serde_json::to_string(&blocks).unwrap();
+        assert!(rendered.contains("🙂"));
+        assert!(
+            rendered.contains("&lt;") && rendered.contains("&gt;") && rendered.contains("&amp;")
+        );
+        let mut action_ids = std::collections::HashSet::new();
+        let mut button_count = 0;
+        for block in &blocks {
+            match block["type"].as_str() {
+                Some("section") => {
+                    let text = block["text"]["text"].as_str().unwrap();
+                    assert!(!text.trim().is_empty());
+                    assert!(utf16_len(text) <= SLACK_SECTION_TEXT_LIMIT);
+                }
+                Some("actions") => {
+                    let elements = block["elements"].as_array().unwrap();
+                    assert!(elements.len() <= 25);
+                    for element in elements {
+                        let action_id = element["action_id"].as_str().unwrap();
+                        let label = element["text"]["text"].as_str().unwrap();
+                        assert!(action_ids.insert(action_id.to_string()));
+                        assert!(!action_id.is_empty() && action_id.chars().count() <= 255);
+                        assert!(!label.trim().is_empty() && label.chars().count() <= 75);
+                        button_count += 1;
+                    }
+                }
+                other => panic!("unexpected bundle block type: {other:?}"),
+            }
+        }
+        assert_eq!(button_count, 30);
+        assert_eq!(action_ids.len(), 30);
+    }
+
+    #[test]
+    fn slack_api_rejection_log_reports_method_and_masks_secrets() {
+        // 이 케이스는 합성 Slack ok:false 응답의 오류 코드만 노출하고 토큰·제어문자는 숨기기 때문에 통과한다.
+        let line = api_error_log_line(
+            "chat.update",
+            &json!({
+                "ok": false,
+                "error": "invalid_blocks xoxb-1234567890-secret\nignored"
+            }),
+        );
+        assert_eq!(
+            line,
+            "knock: Slack API chat.update failed (error=invalid_blocks **** ignored)"
+        );
+        assert!(!line.contains("xoxb-"));
+        crate::daemon_log!("{line}");
+    }
+
+    #[test]
+    fn slack_api_error_masks_signature_before_log_line_truncation() {
+        let signature = "d".repeat(64);
+        let error = format!("{} v0={signature}", "x".repeat(110));
+        let line = api_error_log_line("chat.update", &json!({"error": error}));
+        assert!(line.contains("v0=****"));
+        assert!(!line.contains("dddddd"));
     }
 
     #[test]

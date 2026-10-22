@@ -22,6 +22,7 @@ use tauri::{Emitter, Manager, UserAttentionType, WindowEvent};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 use tauri_plugin_notification::NotificationExt;
 
+mod daemon_log;
 mod ipc;
 mod slack;
 #[cfg(target_os = "macos")]
@@ -1834,6 +1835,7 @@ fn daemon_bulk_approve(app: tauri::AppHandle, state: tauri::State<DaemonState>) 
 }
 
 fn run_daemon() {
+    daemon_log::initialize();
     let queue: Arc<Mutex<Vec<QueueEntry>>> = Arc::new(Mutex::new(Vec::new()));
     let grants: Grants = Arc::new(Mutex::new(Vec::new()));
     let (slack, slack_rx) = slack::Integration::new();
@@ -2211,7 +2213,7 @@ fn run_daemon() {
                         && {
                             let fits = slack::ask_remote_spec(&inner).is_some();
                             if !fits {
-                                eprintln!("knock: ask 가 Slack 한도(질문 4개·선택지 24개/체크 10개)를 넘어 맥 창 전용으로 처리");
+                                crate::daemon_log!("knock: ask 가 Slack 한도(질문 4개·선택지 24개/체크 10개)를 넘어 맥 창 전용으로 처리");
                             }
                             fits
                         };
@@ -2436,7 +2438,7 @@ fn run_daemon() {
 
 #[tauri::command]
 fn zoom_debug(msg: String) {
-    eprintln!("[zoom-debug] {}", msg);
+    crate::daemon_log!("[zoom-debug] {}", msg);
 }
 
 fn launch(state: AppState) {
@@ -2445,7 +2447,7 @@ fn launch(state: AppState) {
             Ok(Some(listener)) => Some(listener),
             Ok(None) => return,
             Err(error) => {
-                eprintln!("설정 창 연결을 열지 못했습니다: {error}");
+                crate::daemon_log!("설정 창 연결을 열지 못했습니다: {error}");
                 return;
             }
         }
