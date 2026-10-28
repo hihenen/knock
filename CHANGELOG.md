@@ -4,9 +4,13 @@ All notable changes to knock are documented here. Versions follow [SemVer](https
 
 ## [Unreleased]
 
+## [0.8.3] - 2026-10-28
+
 ### Fixed
 
 - 데몬 창에서 승인 게이트(`--gate`)의 **「1 ✓ 승인」 카드가 사라지던 문제**. 비게이트 요청(`--gate` 없는 뷰어·`--view` 미리보기)이 한 번 뜨면 승인 카드에 `hidden` 이 붙었는데 떼는 코드가 없었다. 창은 재사용되고 footer 는 class 째로 복제돼, 데몬을 다시 띄울 때까지 이후의 모든 게이트에 승인 버튼이 없었다(숫자키 1·`knock ctl approve` 는 동작). 이제 요청마다 보이기·숨기기를 다시 정한다.
+
+- 데몬의 앱 진단을 `~/Library/Logs/knock/knock.log` 에 비밀값을 가린 채 남긴다(1MiB × 백업 3개 회전, 0600). Slack API `ok:false` 는 메서드와 가린 오류 코드를 남긴다 (#53).
 
 ### Added
 
