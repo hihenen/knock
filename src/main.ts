@@ -28,6 +28,9 @@ interface AnnotatePayload {
   viewHtml?: string | null;
   /// file:// URL of that same document, for the "open in browser" button.
   viewUrl?: string | null;
+  /// --view-result: the panel posts a value and the owner submits it with
+  /// knock's own button. Not a gate (no approve).
+  viewResult?: boolean;
   /// 이 요청이 이미 승인돼 진행 중인가 (큐에서 다시 열었을 때 채워진다).
   inProgress?: boolean;
   mergeToggle?: boolean;
@@ -101,7 +104,12 @@ interface QueuePayload {
 // In daemon mode this is swapped for one that resolves a specific queued request
 // and reloads the page to show the next item / the list.
 type Sink = {
-  annotate: (decision: string, feedback?: string, completed?: boolean) => void;
+  annotate: (
+    decision: string,
+    feedback?: string,
+    completed?: boolean,
+    view?: unknown,
+  ) => void;
   // --checklist 승인: resolve 하지 않고 큐에 "진행 중"으로 남긴다.
   // 단일창 모드에는 큐가 없어 undefined — 그 경우 기존처럼 즉시 resolve 한다.
   startAction?: () => void;
@@ -112,8 +120,12 @@ type Sink = {
 };
 
 let sink: Sink = {
-  annotate: (decision, feedback) =>
-    invoke("submit", { decision, feedback: feedback ?? null }),
+  annotate: (decision, feedback, _completed, view) =>
+    invoke("submit", {
+      decision,
+      feedback: feedback ?? null,
+      view: view === undefined ? null : view,
+    }),
   // Only the boolean intent crosses the boundary; the TTL policy lives in Rust.
   ask: (answers, grant) =>
     invoke("submit_answers", { answers, grant: !!grant }),
@@ -441,11 +453,12 @@ function resetView() {
 // annotate mode
 // =====================================================================
 function sendDecision(
-  decision: "approved" | "annotated" | "dismissed",
+  decision: "approved" | "annotated" | "dismissed" | "submitted",
   feedback?: string,
   completed?: boolean,
+  view?: unknown,
 ) {
-  once(() => sink.annotate(decision, feedback, completed));
+  once(() => sink.annotate(decision, feedback, completed, view));
 }
 
 // Header 🔊 toggle — shown on every gate (annotate/ask) so the owner can mute
@@ -630,8 +643,35 @@ let viewScrollable = false;
 
 let viewMode = "scroll";
 
+// --view-result: the latest value the panel posted for the request on screen.
+// Reset whenever the panel is (re)loaded, so a value never outlives its page.
+let viewResultWanted = false;
+let viewResultValue: unknown = undefined;
+let onViewResult: (() => void) | null = null;
+// Same bound as the Rust side (MAX_VIEW_RESULT_BYTES); checked here too so the
+// button never lights up for a value the CLI would refuse.
+const MAX_VIEW_RESULT_CHARS = 256 * 1024;
+
 addEventListener("message", (e) => {
-  const m = (e as MessageEvent).data;
+  const ev = e as MessageEvent;
+  const m = ev.data;
+  if (m && m.__knockView === "result") {
+    // Only the panel of the request on screen, and only when that request
+    // asked for a value. The value is data for the owner's own submit button;
+    // the panel cannot submit, approve or dismiss anything by itself.
+    const frame = document.getElementById("view-frame") as HTMLIFrameElement | null;
+    if (!viewResultWanted || !frame || ev.source !== frame.contentWindow) return;
+    let size = Infinity;
+    try {
+      size = JSON.stringify(m.value ?? null).length;
+    } catch {
+      // not serialisable → refuse
+    }
+    if (m.value === undefined || m.value === null || size > MAX_VIEW_RESULT_CHARS) return;
+    viewResultValue = m.value;
+    onViewResult?.();
+    return;
+  }
   if (m && m.__knockView === "zoom") {
     stepZoom(m.delta as 1 | -1 | 0);
     return;
@@ -674,6 +714,13 @@ function applyViewPanel(
   const handle = $("split-handle");
   const openBtn = $<HTMLButtonElement>("view-open");
   const modeBtn = $<HTMLButtonElement>("view-mode");
+  viewResultValue = undefined;
+  // The panel is still author content; say what it can and cannot do here.
+  const cap = panel.querySelector(".view-cap-text");
+  if (cap)
+    cap.textContent = viewResultWanted
+      ? "결정 보드 — 여기서 고른 값은 아래 「결정 제출」 을 눌러야 갑니다"
+      : "외부 콘텐츠 — 왼쪽 요청과 별개, 승인 버튼 없음";
   modeBtn.classList.toggle("hidden", !viewHtml);
   openBtn.classList.toggle("hidden", !viewUrl);
   openBtn.dataset.url = viewUrl || "";
@@ -890,11 +937,14 @@ function wireSplitHandle() {
 }
 
 function setupAnnotate(p: AnnotatePayload) {
+  // Set before the panel loads: its first post can arrive right after srcdoc.
+  viewResultWanted = !!p.viewResult && !!p.viewHtml;
+  onViewResult = null;
   const hasView = applyViewPanel(p.viewHtml, p.viewUrl);
   void applyWindowLayout(
     hasView ? "split" : p.html.length > 6000 ? "large" : "compact",
   );
-  $("badge").textContent = "승인 요청";
+  $("badge").textContent = viewResultWanted ? "결정 요청" : "승인 요청";
   $("title").textContent = p.title;
   $("content").innerHTML = p.html;
   $("content").classList.remove("hidden");
@@ -970,6 +1020,10 @@ function setupAnnotate(p: AnnotatePayload) {
   let approving = false;
   const approve = async () => {
     if (approving || submitted) return; // never open the URL / resolve twice
+    // A decision request has nothing to approve. External approve (Stream Deck,
+    // `knock ctl approve`) clicks the hidden approve card; it must not turn into
+    // an answer the owner never gave.
+    if (viewResultWanted) return;
     approving = true;
     if (tdToggle.checked) {
       const ok = await invoke<boolean>("touch_id_approve");
@@ -1008,6 +1062,12 @@ function setupAnnotate(p: AnnotatePayload) {
 
   const submitFeedback = () => {
     const txt = feedback.value.trim();
+    if (viewResultWanted) {
+      // The panel's value is the answer; the text is an optional memo.
+      if (viewResultValue === undefined) return;
+      sendDecision("submitted", txt || undefined, undefined, viewResultValue);
+      return;
+    }
     if (txt) sendDecision("annotated", txt);
   };
 
@@ -1015,8 +1075,26 @@ function setupAnnotate(p: AnnotatePayload) {
   optCancel.addEventListener("click", () => sendDecision("dismissed"));
   sendBtn.addEventListener("click", submitFeedback);
   feedback.addEventListener("input", () => {
+    if (viewResultWanted) return; // enabled by the panel's value, not by text
     sendBtn.disabled = feedback.value.trim().length === 0;
   });
+  const defaultPlaceholder =
+    "변경요청·피드백 입력 → 제출 (Cmd+Enter · 이미지 붙여넣기 가능)";
+  if (viewResultWanted) {
+    feedback.placeholder = "메모 (선택) — 결정과 함께 보냅니다 (Cmd+Enter 로 제출)";
+    sendBtn.textContent = "결정 제출 ✓";
+    sendBtn.disabled = viewResultValue === undefined;
+    sendBtn.title = "오른쪽 보드의 내 결정을 제출 (Cmd+Enter)";
+    onViewResult = () => {
+      if (!submitted) sendBtn.disabled = false;
+    };
+  } else {
+    // The window is reused: undo a previous decision request's relabelling.
+    feedback.placeholder = defaultPlaceholder;
+    sendBtn.textContent = "제출 ✓";
+    sendBtn.title = "Cmd+Enter";
+    sendBtn.disabled = feedback.value.trim().length === 0;
+  }
 
   // Clipboard image paste → save to a temp file, append its path to the feedback.
   feedback.addEventListener("paste", (e) => {
@@ -1050,7 +1128,9 @@ function setupAnnotate(p: AnnotatePayload) {
     (o) => !o.classList.contains("hidden"),
   );
   let focusIdx = 0;
-  opts[0]?.focus();
+  // A decision request has only 취소 among the option cards; focusing it would
+  // make a stray Enter throw the owner's board away.
+  if (!viewResultWanted) opts[0]?.focus();
   $("annotate-footer").addEventListener("focusin", (e) => {
     const i = opts.indexOf(e.target as HTMLElement);
     if (i >= 0) focusIdx = i;
@@ -1065,7 +1145,7 @@ function setupAnnotate(p: AnnotatePayload) {
     const inText = document.activeElement === feedback;
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
       e.preventDefault();
-      if (feedback.value.trim()) submitFeedback();
+      if (viewResultWanted || feedback.value.trim()) submitFeedback();
       else if (p.gate) approve();
       return;
     }
@@ -1094,6 +1174,9 @@ function setupAnnotate(p: AnnotatePayload) {
       focusIdx = (focusIdx - 1 + opts.length) % opts.length;
       opts[focusIdx].focus();
     } else if (e.key === "Enter" || e.key === " ") {
+      // Decision request: only act when an option card itself has focus, so
+      // Enter elsewhere never dismisses; a focused button handles its own key.
+      if (viewResultWanted && !opts.includes(document.activeElement as HTMLElement)) return;
       e.preventDefault();
       run(opts[focusIdx]);
     }
@@ -1682,8 +1765,17 @@ function daemonSink(id: string): Sink {
     answers: Record<string, string | string[]> | null,
     grant: boolean = false,
     completed: boolean | null = null,
+    view: unknown = null,
   ) => {
-    invoke("daemon_resolve", { id, decision, feedback, answers, grant, completed });
+    invoke("daemon_resolve", {
+      id,
+      decision,
+      feedback,
+      answers,
+      grant,
+      completed,
+      view: view === undefined ? null : view,
+    });
     daemonBusy = false;
     activeDetailId = null;
     submitted = false;
@@ -1691,8 +1783,8 @@ function daemonSink(id: string): Sink {
     setTimeout(() => void renderDaemon(), 80);
   };
   return {
-    annotate: (d, f, completed) =>
-      resolve(d, f ?? null, null, false, completed ?? null),
+    annotate: (d, f, completed, view) =>
+      resolve(d, f ?? null, null, false, completed ?? null, view ?? null),
     ask: (a, grant) => resolve("answered", null, a, !!grant),
     dismiss: () => resolve("dismissed", null, null),
     // resolve 하지 않는다 — 큐에 "진행 중"으로 남기고 창만 닫는다.
