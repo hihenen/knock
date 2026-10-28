@@ -113,6 +113,12 @@ enum Command {
         /// a file, not a URL.
         #[arg(long, value_name = "FILE")]
         view: Option<PathBuf>,
+        /// Let the --view panel hand a value back (e.g. a decision board). The
+        /// panel posts it with `parent.postMessage({__knockView: "result", value}, "*")`;
+        /// the owner still submits with knock's own button, and the value comes
+        /// back as `{"decision":"submitted","view":...}`. Not a gate.
+        #[arg(long, requires = "view", conflicts_with = "gate")]
+        view_result: bool,
     },
     /// Ask a multiple-choice question (AskUserQuestion schema). Always emits JSON.
     Ask {
@@ -681,6 +687,31 @@ fn speak_os_native(spoken: &str, times: u32, female: bool) {
 /// nobody can read in a side panel anyway.
 const MAX_VIEW_BYTES: usize = 2 * 1024 * 1024;
 
+/// Upper bound for a value handed back by a `--view-result` panel. A decision
+/// board is a few KB; anything near this is a runaway page, not an answer.
+const MAX_VIEW_RESULT_BYTES: usize = 256 * 1024;
+
+/// The value a `--view-result` panel handed back, if it is usable as an answer.
+/// Missing or oversized values are refused so the caller sees "dismissed"
+/// (re-ask) instead of an empty or truncated decision.
+fn accepted_view_result(view: Option<&Value>) -> Option<&Value> {
+    let v = view?;
+    if v.is_null() {
+        return None;
+    }
+    let len = serde_json::to_string(v)
+        .map(|s| s.len())
+        .unwrap_or(usize::MAX);
+    if len > MAX_VIEW_RESULT_BYTES {
+        eprintln!(
+            "knock: --view-result value is {} bytes (limit {}); treating as dismissed",
+            len, MAX_VIEW_RESULT_BYTES
+        );
+        return None;
+    }
+    Some(v)
+}
+
 enum Mode {
     Annotate {
         html: String,
@@ -693,6 +724,7 @@ enum Mode {
         merge_toggle: bool,
         view_html: Option<String>,
         view_url: Option<String>,
+        view_result: bool,
     },
     Ask {
         questions: Value,
@@ -894,8 +926,26 @@ fn extract_plan(payload: &Value) -> &str {
 }
 
 /// annotate-mode decision -> stdout contract line, or None = print nothing.
-fn annotate_contract(decision: &str, feedback: Option<&str>, json: bool) -> Option<String> {
+fn annotate_contract(
+    decision: &str,
+    feedback: Option<&str>,
+    view: Option<&Value>,
+    json: bool,
+) -> Option<String> {
     match decision {
+        // --view-result: the panel's value is the answer, so this is always JSON
+        // (a structured value has no text form). No usable value = not an answer.
+        "submitted" => Some(match accepted_view_result(view) {
+            Some(v) => {
+                let mut out = serde_json::json!({ "decision": "submitted", "view": v });
+                let fb = feedback.unwrap_or("").trim();
+                if !fb.is_empty() {
+                    out["feedback"] = Value::String(fb.to_string());
+                }
+                out.to_string()
+            }
+            None => serde_json::json!({ "decision": "dismissed" }).to_string(),
+        }),
         "approved" => Some(if json {
             serde_json::json!({ "decision": "approved" }).to_string()
         } else {
@@ -922,10 +972,11 @@ fn annotate_contract(decision: &str, feedback: Option<&str>, json: bool) -> Opti
 fn annotate_contract_with_via(
     decision: &str,
     feedback: Option<&str>,
+    view: Option<&Value>,
     json: bool,
     via: Option<&str>,
 ) -> Option<String> {
-    let result = annotate_contract(decision, feedback, json)?;
+    let result = annotate_contract(decision, feedback, view, json)?;
     if json && via == Some("slack") {
         let mut value: Value = serde_json::from_str(&result).ok()?;
         value["via"] = Value::String("slack".into());
@@ -936,7 +987,16 @@ fn annotate_contract_with_via(
 }
 
 fn output_annotate(decision: &str, feedback: Option<&str>, json: bool) -> ! {
-    match annotate_contract(decision, feedback, json) {
+    output_annotate_view(decision, feedback, None, json)
+}
+
+fn output_annotate_view(
+    decision: &str,
+    feedback: Option<&str>,
+    view: Option<&Value>,
+    json: bool,
+) -> ! {
+    match annotate_contract(decision, feedback, view, json) {
         Some(line) => print_and_exit(line),
         None => print_nothing_and_exit(),
     }
@@ -945,10 +1005,11 @@ fn output_annotate(decision: &str, feedback: Option<&str>, json: bool) -> ! {
 fn output_annotate_with_via(
     decision: &str,
     feedback: Option<&str>,
+    view: Option<&Value>,
     json: bool,
     via: Option<&str>,
 ) -> ! {
-    match annotate_contract_with_via(decision, feedback, json, via) {
+    match annotate_contract_with_via(decision, feedback, view, json, via) {
         Some(line) => print_and_exit(line),
         None => print_nothing_and_exit(),
     }
@@ -991,6 +1052,7 @@ fn get_payload(state: tauri::State<AppState>) -> Value {
             merge_toggle: _,
             view_html,
             view_url,
+            view_result,
         } => serde_json::json!({
             "mode": "annotate",
             "html": html,
@@ -1012,6 +1074,7 @@ fn get_payload(state: tauri::State<AppState>) -> Value {
             "configAutoApproveMergeExpiresAt": auto_approve_merge.expires_at,
             "viewHtml": view_html,
             "viewUrl": view_url,
+            "viewResult": view_result,
         }),
         Mode::Ask { questions, title } => serde_json::json!({
             "mode": "ask",
@@ -1298,11 +1361,35 @@ fn tts_uninstall() {
 }
 
 #[tauri::command]
-fn submit(decision: String, feedback: Option<String>, state: tauri::State<AppState>) {
+fn submit(
+    decision: String,
+    feedback: Option<String>,
+    view: Option<Value>,
+    state: tauri::State<AppState>,
+) {
     if state.hook {
         output_hook(&decision, feedback.as_deref());
     }
-    output_annotate(&decision, feedback.as_deref(), state.json);
+    let wants_view = matches!(
+        state.mode,
+        Mode::Annotate {
+            view_result: true,
+            ..
+        }
+    );
+    let decision = submitted_decision(&decision, wants_view);
+    output_annotate_view(decision, feedback.as_deref(), view.as_ref(), state.json);
+}
+
+/// "submitted" is only an answer for a request that opted in with
+/// `--view-result`. Anything else claiming it (a stale page, a different
+/// request reusing the window) is downgraded to "dismissed".
+fn submitted_decision(decision: &str, wants_view: bool) -> &str {
+    if decision == "submitted" && !wants_view {
+        "dismissed"
+    } else {
+        decision
+    }
 }
 
 #[tauri::command]
@@ -1760,12 +1847,33 @@ fn daemon_resolve(
     answers: Option<Value>,
     grant: Option<bool>,
     completed: Option<bool>,
+    view: Option<Value>,
     state: tauri::State<DaemonState>,
 ) {
+    let wants_view = state
+        .queue
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|entry| entry.id == id)
+        .map(|entry| {
+            entry
+                .payload
+                .get("viewResult")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
+        .unwrap_or(false);
+    let decision = submitted_decision(&decision, wants_view).to_string();
     let status_decision = decision.clone();
     let mut response = serde_json::json!({ "decision": decision });
     if let Some(f) = feedback {
         response["feedback"] = Value::String(f);
+    }
+    if decision == "submitted" {
+        if let Some(v) = view {
+            response["view"] = v;
+        }
     }
     if let Some(a) = answers {
         response["answers"] = a;
@@ -2714,6 +2822,7 @@ fn try_daemon(kind: &str, inner: Value, json: bool, hook: bool, source: Option<V
         output_annotate_with_via(
             decision,
             feedback,
+            resp.get("view"),
             json,
             resp.get("via").and_then(Value::as_str),
         );
@@ -2974,6 +3083,7 @@ fn run_hook() {
             checklist: false,
             view_html: None,
             view_url: None,
+            view_result: false,
             merge_toggle: false,
         },
         json: false,
@@ -3010,6 +3120,7 @@ pub fn run() {
             checklist,
             merge_toggle,
             view,
+            view_result,
         } => {
             // Pre-authorization: a `--gate` annotation (the critical gate) can be
             // satisfied by a live grant the owner set via an ask-confirm — spend
@@ -3089,6 +3200,7 @@ pub fn run() {
                 "configAutoApproveMergeExpiresAt": auto_approve_merge.expires_at,
                 "viewHtml": view_html.clone(),
                 "viewUrl": view_url.clone(),
+                "viewResult": view_result,
             });
             try_daemon("annotate", inner, json, false, None);
             launch(AppState {
@@ -3101,6 +3213,7 @@ pub fn run() {
                     merge_toggle,
                     view_html,
                     view_url,
+                    view_result,
                 },
                 json,
                 hook: false,
@@ -3955,52 +4068,129 @@ mod tests {
     #[test]
     fn annotate_approved_plain() {
         assert_eq!(
-            annotate_contract("approved", None, false).unwrap(),
+            annotate_contract("approved", None, None, false).unwrap(),
             "The user approved."
         );
     }
 
     #[test]
     fn annotate_approved_json() {
-        let s = annotate_contract("approved", None, true).unwrap();
+        let s = annotate_contract("approved", None, None, true).unwrap();
         assert!(s.contains("\"decision\":\"approved\""));
     }
 
     #[test]
     fn annotate_annotated_returns_feedback() {
         assert_eq!(
-            annotate_contract("annotated", Some("  needs work  "), false).unwrap(),
+            annotate_contract("annotated", Some("  needs work  "), None, false).unwrap(),
             "needs work"
         );
     }
 
     #[test]
     fn annotate_dismissed_plain_is_none() {
-        assert!(annotate_contract("dismissed", None, false).is_none());
+        assert!(annotate_contract("dismissed", None, None, false).is_none());
     }
 
     #[test]
     fn annotate_dismissed_json_some() {
-        let s = annotate_contract("dismissed", None, true).unwrap();
+        let s = annotate_contract("dismissed", None, None, true).unwrap();
         assert!(s.contains("\"dismissed\""));
     }
 
     #[test]
     fn annotate_via_is_only_added_to_slack_json_results() {
         for decision in ["approved", "dismissed"] {
-            let output = annotate_contract_with_via(decision, None, true, Some("slack")).unwrap();
+            let output =
+                annotate_contract_with_via(decision, None, None, true, Some("slack")).unwrap();
             let value: Value = serde_json::from_str(&output).unwrap();
             assert_eq!(value["decision"], decision);
             assert_eq!(value["via"], "slack");
             assert_eq!(
-                annotate_contract_with_via(decision, None, true, None),
-                annotate_contract(decision, None, true)
+                annotate_contract_with_via(decision, None, None, true, None),
+                annotate_contract(decision, None, None, true)
             );
             assert_eq!(
-                annotate_contract_with_via(decision, None, false, Some("slack")),
-                annotate_contract(decision, None, false)
+                annotate_contract_with_via(decision, None, None, false, Some("slack")),
+                annotate_contract(decision, None, None, false)
             );
         }
+    }
+
+    #[test]
+    fn view_result_submitted_carries_the_panel_value() {
+        let v = serde_json::json!({ "base": "1", "changes": [{ "step": 2, "from": "3" }] });
+        let out: Value = serde_json::from_str(
+            &annotate_contract("submitted", Some("  memo  "), Some(&v), true).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(out["decision"], "submitted");
+        assert_eq!(out["view"], v);
+        assert_eq!(out["feedback"], "memo");
+        // 텍스트 출력이 없는 값이라 --json 이 없어도 JSON 이다.
+        let plain: Value =
+            serde_json::from_str(&annotate_contract("submitted", None, Some(&v), false).unwrap())
+                .unwrap();
+        assert_eq!(plain["view"], v);
+        assert!(plain.get("feedback").is_none(), "빈 메모는 싣지 않는다");
+    }
+
+    #[test]
+    fn view_result_without_usable_value_is_not_an_answer() {
+        for view in [None, Some(Value::Null)] {
+            let out = annotate_contract("submitted", None, view.as_ref(), true).unwrap();
+            assert!(out.contains("\"dismissed\""), "got: {out}");
+        }
+        let huge = Value::String("x".repeat(MAX_VIEW_RESULT_BYTES + 1));
+        let out = annotate_contract("submitted", None, Some(&huge), true).unwrap();
+        assert!(
+            out.contains("\"dismissed\""),
+            "oversized value must not pass"
+        );
+    }
+
+    #[test]
+    fn submitted_only_counts_for_requests_that_opted_in() {
+        assert_eq!(submitted_decision("submitted", true), "submitted");
+        assert_eq!(submitted_decision("submitted", false), "dismissed");
+        assert_eq!(submitted_decision("approved", false), "approved");
+    }
+
+    #[test]
+    fn view_result_flag_needs_view_and_is_not_a_gate() {
+        let ok = Cli::try_parse_from([
+            "knock",
+            "annotate",
+            "r.md",
+            "--view",
+            "b.html",
+            "--view-result",
+        ])
+        .unwrap();
+        assert!(matches!(
+            ok.command,
+            Command::Annotate {
+                view_result: true,
+                ..
+            }
+        ));
+        assert!(
+            Cli::try_parse_from(["knock", "annotate", "r.md", "--view-result"]).is_err(),
+            "--view-result 는 --view 가 있어야 한다"
+        );
+        assert!(
+            Cli::try_parse_from([
+                "knock",
+                "annotate",
+                "r.md",
+                "--gate",
+                "--view",
+                "b.html",
+                "--view-result",
+            ])
+            .is_err(),
+            "--view-result 는 승인 게이트가 아니다"
+        );
     }
 
     #[test]

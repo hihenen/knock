@@ -36,7 +36,22 @@ knock 은 사람의 승인·결정이 필요할 때 채팅 대신 데스크톱 �
 | `--checklist` | 승인 뒤에도 요청을 큐에 "진행 중"으로 남긴다. 사용자가 브라우저에서 여러 단계를 밟는 동안 절차를 다시 볼 수 있고, "완료" 를 눌러야 응답이 온다 |
 | `--touch-id` | 지문(Touch ID / Windows Hello)으로만 승인받는다. 운영 변경·권한 확장·삭제 같은 critical 게이트에 쓴다. Slack 으로는 가지 않는다 |
 | `--view <FILE>` | 자립형 HTML(다이어그램, 시안)을 요청 옆 패널에 띄운다 |
+| `--view-result` | `--view` 패널(결정 보드 등)이 값을 넘기고 사용자가 knock 의 "결정 제출" 로 낸다. 아래 "패널에서 값 받기" 참고. `--gate` 와 같이 쓸 수 없다 |
 | `--merge-toggle` | PR 머지 게이트에 "이후 머지 자동 승인" 토글을 보여준다 (사용자가 직접 켠다) |
+
+### 패널에서 값 받기: `--view-result`
+
+선택지를 칸 단위로 섞거나 문구를 고쳐야 하는 결정(흐름 비교 보드 등)은 `ask` 로 표현되지 않는다. 그럴 때 HTML 패널이 화면을 맡고, knock 은 그 값을 받아 돌려준다.
+
+```bash
+knock annotate request.md --view board.html --view-result --json   # run_in_background
+```
+
+- 패널은 값이 바뀔 때마다 `parent.postMessage({ __knockView: "result", value: <JSON> }, "*")` 를 보낸다. 마지막 값만 쓴다. 처음 그린 상태도 한 번 보낸다(그래야 제출 버튼이 켜진다).
+- 제출은 **knock 의 "결정 제출" 버튼(또는 Cmd+Enter)** 으로만 된다. 패널은 스스로 제출·승인·취소할 수 없다. 메모 칸의 글은 `feedback` 으로 같이 온다.
+- 출력: `{"decision":"submitted","view":<패널 값>,"feedback":"<메모, 있을 때만>"}`. 닫으면 `{"decision":"dismissed"}`. 값이 없거나 256KB 를 넘으면 `dismissed` 다.
+- 승인 게이트가 아니라 Slack 으로 가지 않고, "모두 승인"·외부 승인 키(`knock ctl approve`, Stream Deck)로도 끝나지 않는다.
+- 패널은 sandbox(`allow-scripts`, same-origin 없음) 안이라 `fetch("decision.json")` 같은 상대 경로를 못 읽는다. 데이터는 HTML 안에 넣는다.
 
 ## 객관식 질문: `knock ask <questions.json>`
 

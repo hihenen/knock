@@ -4,6 +4,10 @@ All notable changes to knock are documented here. Versions follow [SemVer](https
 
 ## [Unreleased]
 
+### Added
+
+- `annotate --view <FILE> --view-result`: 옆 패널(결정 보드처럼 칸을 고르고 문구를 고치는 화면)이 `postMessage({__knockView:"result", value})` 로 넘긴 값을 사용자가 knock 의 "결정 제출" 버튼으로 내면 `{"decision":"submitted","view":...,"feedback":...}` 로 돌려준다. 패널은 값만 넘기고 제출·승인은 못 한다. 승인 게이트가 아니어서 `--gate` 와 같이 쓸 수 없고, 모두 승인·외부 승인 키로 끝나지 않는다. 값 상한 256KB.
+
 ## [0.8.2] - 2026-10-20
 
 ### Added
