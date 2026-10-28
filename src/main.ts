@@ -975,7 +975,11 @@ function setupAnnotate(p: AnnotatePayload) {
   const feedback = $<HTMLTextAreaElement>("feedback");
   const sendBtn = $<HTMLButtonElement>("send");
 
-  if (!p.gate) optApprove.classList.add("hidden");
+  // toggle, not add: the daemon reuses one window and dropStaleListeners()
+  // clones the footer *with its classes*, so a "hidden" left by a non-gate
+  // viewer used to stick and every later --gate window lost its approve card
+  // until the daemon restarted (2026-10-28, critical gate with no 승인).
+  optApprove.classList.toggle("hidden", !p.gate);
 
   // Header Touch ID toggle — reflects the saved config and also applies to this
   // approval. Flipping it persists to config (next critical gates) immediately.

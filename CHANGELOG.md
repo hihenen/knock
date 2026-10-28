@@ -4,6 +4,10 @@ All notable changes to knock are documented here. Versions follow [SemVer](https
 
 ## [Unreleased]
 
+### Fixed
+
+- 데몬 창에서 승인 게이트(`--gate`)의 **「1 ✓ 승인」 카드가 사라지던 문제**. 비게이트 요청(`--gate` 없는 뷰어·`--view` 미리보기)이 한 번 뜨면 승인 카드에 `hidden` 이 붙었는데 떼는 코드가 없었다. 창은 재사용되고 footer 는 class 째로 복제돼, 데몬을 다시 띄울 때까지 이후의 모든 게이트에 승인 버튼이 없었다(숫자키 1·`knock ctl approve` 는 동작). 이제 요청마다 보이기·숨기기를 다시 정한다.
+
 ### Added
 
 - `annotate --view <FILE> --view-result`: 옆 패널(결정 보드처럼 칸을 고르고 문구를 고치는 화면)이 `postMessage({__knockView:"result", value})` 로 넘긴 값을 사용자가 knock 의 "결정 제출" 버튼으로 내면 `{"decision":"submitted","view":...,"feedback":...}` 로 돌려준다. 패널은 값만 넘기고 제출·승인은 못 한다. 승인 게이트가 아니어서 `--gate` 와 같이 쓸 수 없고, 모두 승인·외부 승인 키로 끝나지 않는다. 값 상한 256KB.
